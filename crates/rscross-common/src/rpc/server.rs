@@ -215,7 +215,7 @@ impl RpcServer {
     }
 }
 
-/// 从 WebSocket 提取认证 key（对应原 arpc 的 header key）
+/// 从 WebSocket 提取认证 key（连接握手时携带）
 pub fn extract_key(headers: &axum::http::HeaderMap) -> Option<String> {
     headers
         .get("key")

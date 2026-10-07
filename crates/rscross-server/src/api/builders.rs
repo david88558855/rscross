@@ -1,7 +1,7 @@
-//! 代理配置构造：从数据库记录生成 frp 代理配置
+//! 代理配置构造：从数据库记录生成隧道配置
 
-use rscross_frp::msg::{ProxyConfigMsg, TransportConfig};
-use rscross_frp::ProxyType;
+use rscross_tunnel::msg::{ProxyConfigMsg, TransportConfig};
+use rscross_tunnel::ProxyType;
 
 use crate::AppState;
 
@@ -115,12 +115,12 @@ pub async fn apply_domain_to_node(
     force_https: i32,
     _matcher: i32,
 ) {
-    let Some(frps) = state.engine.frps(node_code) else {
+    let Some(tunnel 节点服务) = state.engine.tunnel 节点服务(node_code) else {
         tracing::debug!(node_code, "节点不在线，跳过域名下发");
         return;
     };
     tracing::info!(node_code, domain, "已下发自定义域名配置");
-    drop(frps);
+    drop(tunnel 节点服务);
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! 事件处理：接收服务端下发的配置指令，驱动 frp 内核
+//! 事件处理：接收服务端下发的配置指令，驱动 穿透内核
 //!
 //! 对应原项目的 `client/internal/service/event` 包：
 //! `server_config` / `host_config` / `forward_config` / `tunnel_config` /
@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use rscross_common::rpc::RpcClient;
-use rscross_frp::msg::{ProxyConfigMsg, TransportConfig};
-use rscross_frp::{ClientConfig, FrpcService, ProxyType};
+use rscross_tunnel::msg::{ProxyConfigMsg, TransportConfig};
+use rscross_tunnel::{ClientConfig, AgentService, ProxyType};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -89,8 +89,8 @@ struct TransportBase {
 }
 
 impl BaseCfg {
-    /// 转换为 frpc 配置
-    fn to_frpc(&self, node_code: &str) -> ClientConfig {
+    /// 转换为 tunnel 客户端 配置
+    fn to_tunnel(&self, node_code: &str) -> ClientConfig {
         ClientConfig {
             auth_token: if self.auth.token.is_empty() {
                 node_code.to_string()
@@ -221,7 +221,7 @@ async fn handle_server_config(state: AppState, payload: Value) -> Result<(), Str
     let max_pool = cfg["transport"]["maxPoolCount"].as_i64().unwrap_or(5) as i32;
     let token = cfg["auth"]["token"].as_str().unwrap_or("").to_string();
 
-    let frp_cfg = rscross_frp::ServerConfig {
+    let tunnel_cfg = rscross_tunnel::ServerConfig {
         auth_token: token,
         bind_addr: "0.0.0.0".to_string(),
         bind_port,
@@ -230,20 +230,20 @@ async fn handle_server_config(state: AppState, payload: Value) -> Result<(), Str
         ..Default::default()
     };
 
-    // 停掉旧的 frps
+    // 停掉旧的 tunnel 节点服务
     state.services.stop(&req.key);
     state.services.remove(&req.key);
 
-    let srv = rscross_frp::FrpsServer::new(frp_cfg, rscross_common::util::random_hex(16));
+    let srv = rscross_tunnel::HubServer::new(tunnel_cfg, rscross_common::util::random_hex(16));
     let s = srv.clone();
     tokio::spawn(async move {
         if let Err(e) = s.serve().await {
-            tracing::error!(error = %e, "frps 退出");
+            tracing::error!(error = %e, "tunnel 节点服务 退出");
         }
     });
 
     state.state.mark_configured(&req.key, &req.update_tag);
-    tracing::info!(key = %req.key, bind_port, vhost_http_port, "frps 已启动");
+    tracing::info!(key = %req.key, bind_port, vhost_http_port, "tunnel 节点服务 已启动");
     Ok(())
 }
 
@@ -272,8 +272,8 @@ async fn handle_host_config(state: AppState, payload: Value) -> Result<(), Strin
     }
 
     let node_code = req.base.node_code();
-    let frpc_cfg = req.base.to_frpc(&node_code);
-    let svc = ensure_service(&state, &req.key, frpc_cfg);
+    let tunnel_cfg = req.base.to_tunnel(&node_code);
+    let svc = ensure_service(&state, &req.key, tunnel_cfg);
 
     let mut msg = req.http.to_msg(&node_code);
     msg.proxy_type = ProxyType::Http.as_str().to_string();
@@ -309,8 +309,8 @@ async fn handle_forward_config(state: AppState, payload: Value) -> Result<(), St
     }
 
     let node_code = req.base.node_code();
-    let frpc_cfg = req.base.to_frpc(&node_code);
-    let svc = ensure_service(&state, &req.key, frpc_cfg);
+    let tunnel_cfg = req.base.to_tunnel(&node_code);
+    let svc = ensure_service(&state, &req.key, tunnel_cfg);
 
     let mut count = 0;
     if !req.tcp.is_empty() {
@@ -349,8 +349,8 @@ async fn handle_tunnel_config(state: AppState, payload: Value) -> Result<(), Str
     }
 
     let node_code = req.base.node_code();
-    let frpc_cfg = req.base.to_frpc(&node_code);
-    let svc = ensure_service(&state, &req.key, frpc_cfg);
+    let tunnel_cfg = req.base.to_tunnel(&node_code);
+    let svc = ensure_service(&state, &req.key, tunnel_cfg);
 
     if !req.stcp.is_empty() {
         let mut m = req.stcp.to_msg(&node_code);
@@ -389,8 +389,8 @@ async fn handle_p2p_config(state: AppState, payload: Value) -> Result<(), String
     }
 
     let node_code = req.base.node_code();
-    let frpc_cfg = req.base.to_frpc(&node_code);
-    let svc = ensure_service(&state, &req.key, frpc_cfg);
+    let tunnel_cfg = req.base.to_tunnel(&node_code);
+    let svc = ensure_service(&state, &req.key, tunnel_cfg);
 
     if !req.xtcp.is_empty() {
         let mut m = req.xtcp.to_msg(&node_code);
@@ -440,8 +440,8 @@ async fn handle_proxy_config(state: AppState, payload: Value) -> Result<(), Stri
     }
 
     let node_code = req.base.node_code();
-    let frpc_cfg = req.base.to_frpc(&node_code);
-    let svc = ensure_service(&state, &req.key, frpc_cfg);
+    let tunnel_cfg = req.base.to_tunnel(&node_code);
+    let svc = ensure_service(&state, &req.key, tunnel_cfg);
 
     let mut metas = std::collections::HashMap::new();
     if !req.auth_user.is_empty() {
@@ -592,16 +592,16 @@ async fn handle_stop(state: AppState, payload: Value) -> Result<(), String> {
 }
 
 /// 获取或创建隧道服务
-fn ensure_service(state: &AppState, key: &str, cfg: ClientConfig) -> Arc<FrpcService> {
+fn ensure_service(state: &AppState, key: &str, cfg: ClientConfig) -> Arc<AgentService> {
     if let Some(svc) = state.services.get(key) {
         return svc;
     }
-    let svc = Arc::new(FrpcService::new(key, cfg));
+    let svc = Arc::new(AgentService::new(key, cfg));
     state.services.set(key, svc.clone());
     let s = svc.clone();
     tokio::spawn(async move {
         if let Err(e) = s.run().await {
-            tracing::error!(error = %e, "frpc 循环退出");
+            tracing::error!(error = %e, "tunnel 客户端 循环退出");
         }
     });
     svc
@@ -636,10 +636,10 @@ mod tests {
         let req: serde_json::Value = raw;
         let base: BaseCfg = serde_json::from_value(req["BaseCfg"].clone()).unwrap();
         assert_eq!(base.node_code(), "node1");
-        let frpc = base.to_frpc("node1");
-        assert_eq!(frpc.server_addr, "1.2.3.4");
-        assert_eq!(frpc.server_port, 7000);
-        assert_eq!(frpc.pool_count, 3);
+        let tunnel 客户端 = base.to_tunnel("node1");
+        assert_eq!(tunnel 客户端.server_addr, "1.2.3.4");
+        assert_eq!(tunnel 客户端.server_port, 7000);
+        assert_eq!(tunnel 客户端.pool_count, 3);
     }
 
     #[test]

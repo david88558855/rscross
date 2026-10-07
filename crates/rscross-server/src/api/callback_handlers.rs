@@ -1,6 +1,6 @@
-//! FRP HTTP 插件回调：frps 将 Login / NewProxy / NewWorkConn 等事件回调到此
+//! FRP HTTP 插件回调：tunnel 节点服务 将 Login / NewProxy / NewWorkConn 等事件回调到此
 //!
-//! 这些接口在原项目中也由 frps 通过 HTTP 调用，是 frp 内核与控制面之间的关键纽带。
+//! 这些接口在原项目中也由 tunnel 节点服务 通过 HTTP 调用，是 穿透内核与控制面之间的关键纽带。
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -11,7 +11,7 @@ use rscross_common::response::ApiResponse;
 
 use crate::AppState;
 
-/// frp 回调统一响应
+/// 节点回调统一响应
 fn ok() -> Json<ApiResponse<serde_json::Value>> {
     Json(ApiResponse::ok(json!({"status": "success"})))
 }
@@ -23,8 +23,8 @@ fn fail(msg: &str) -> Json<ApiResponse<serde_json::Value>> {
     ))
 }
 
-/// Login 回调：frps 校验客户端令牌
-pub async fn frp_login(State(state): State<AppState>, body: Bytes) -> Json<ApiResponse<serde_json::Value>> {
+/// Login 回调：tunnel 节点服务 校验客户端令牌
+pub async fn node_auth_callback(State(state): State<AppState>, body: Bytes) -> Json<ApiResponse<serde_json::Value>> {
     let payload: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => return fail("invalid payload"),
@@ -57,7 +57,7 @@ pub async fn frp_login(State(state): State<AppState>, body: Bytes) -> Json<ApiRe
 }
 
 /// NewProxy 回调：新代理注册通知
-pub async fn frp_new_proxy(
+pub async fn node_proxy_callback(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Json<ApiResponse<serde_json::Value>> {
@@ -87,23 +87,23 @@ pub async fn frp_new_proxy(
                 node_code: row.2,
             });
         }
-        tracing::debug!(name, "frp 代理注册回调");
+        tracing::debug!(name, "隧道注册回调");
     }
     ok()
 }
 
 /// CloseProxy 回调
-pub async fn frp_close_proxy() -> Json<ApiResponse<serde_json::Value>> {
+pub async fn node_close_callback() -> Json<ApiResponse<serde_json::Value>> {
     ok()
 }
 
 /// Ping 回调
-pub async fn frp_ping() -> Json<ApiResponse<serde_json::Value>> {
+pub async fn node_ping_callback() -> Json<ApiResponse<serde_json::Value>> {
     ok()
 }
 
 /// NewWorkConn 回调：请求建立工作连接
-pub async fn frp_new_work_conn(
+pub async fn node_workconn_callback(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Json<ApiResponse<serde_json::Value>> {
@@ -127,6 +127,6 @@ pub async fn frp_new_work_conn(
 }
 
 /// NewUserConn 回调：用户连接建立
-pub async fn frp_new_user_conn() -> Json<ApiResponse<serde_json::Value>> {
+pub async fn node_userconn_callback() -> Json<ApiResponse<serde_json::Value>> {
     ok()
 }

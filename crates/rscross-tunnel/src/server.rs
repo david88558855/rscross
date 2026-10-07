@@ -1,4 +1,4 @@
-//! frps 服务端：运行在公网节点，处理控制流、代理注册与流量分发
+//! tunnel 节点服务 服务端：运行在公网节点，处理控制流、代理注册与流量分发
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -52,8 +52,8 @@ impl ClientSession {
     }
 }
 
-/// frps 服务端
-pub struct FrpsServer {
+/// tunnel 节点服务 服务端
+pub struct HubServer {
     pub config: ServerConfig,
     /// 代理注册表
     pub registry: Arc<ProxyRegistry>,
@@ -71,7 +71,7 @@ pub struct FrpsServer {
     secret: Arc<String>,
 }
 
-impl FrpsServer {
+impl HubServer {
     pub fn new(config: ServerConfig, secret: String) -> Arc<Self> {
         let registry = Arc::new(ProxyRegistry::new());
         let srv = Arc::new(Self {
@@ -128,7 +128,7 @@ impl FrpsServer {
             .local_addr()
             .map_err(|e| format!("获取监听地址失败: {e}"))?;
         *self.bind_addr.write() = Some(local);
-        tracing::info!("frps 控制流监听于 {local}");
+        tracing::info!("tunnel 节点服务 控制流监听于 {local}");
 
         loop {
             if !self.is_running() {
@@ -660,7 +660,7 @@ pub async fn handle_pong(stream: &mut TcpStream, ping: Ping) -> Result<(), Strin
 }
 
 /// 便捷类型别名
-pub type SharedServer = Arc<FrpsServer>;
+pub type SharedServer = Arc<HubServer>;
 
 /// 生成服务端配置 JSON，便于调试输出
 pub fn server_config_to_json(cfg: &ServerConfig) -> String {

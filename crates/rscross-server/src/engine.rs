@@ -1,10 +1,10 @@
-//! 调度引擎：管理在线客户端/节点的 frp 服务实例，按需下发配置
+//! 调度引擎：管理在线客户端/节点的 隧道服务实例，按需下发配置
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use rscross_frp::{ClientConfig, FrpcService, FrpsServer, ServiceRegistry};
+use rscross_tunnel::{ClientConfig, AgentService, HubServer, ServiceRegistry};
 
 use rscross_common::error::AppResult;
 
@@ -15,7 +15,7 @@ use crate::db::Database;
 pub enum EngineKind {
     /// 客户端引擎（内网客户端）
     Client,
-    /// 节点引擎（公网节点，运行 frps）
+    /// 节点引擎（公网节点，运行 tunnel 节点服务）
     Node,
 }
 
@@ -24,17 +24,17 @@ pub struct EngineInstance {
     pub kind: EngineKind,
     /// 实体编号
     pub code: String,
-    /// frpc 服务（客户端模式）
-    pub frpc: Option<Arc<FrpcService>>,
-    /// frps 服务（节点模式）
-    pub frps: Option<Arc<FrpsServer>>,
+    /// tunnel 客户端 服务（客户端模式）
+    pub tunnel 客户端: Option<Arc<AgentService>>,
+    /// tunnel 节点服务 服务（节点模式）
+    pub tunnel 节点服务: Option<Arc<HubServer>>,
     /// 最近活跃时间
     pub last_active: std::time::Instant,
 }
 
 impl EngineInstance {
     pub fn is_running(&self) -> bool {
-        match (&self.frpc, &self.frps) {
+        match (&self.tunnel 客户端, &self.tunnel 节点服务) {
             (Some(s), _) => s.is_running(),
             (_, Some(s)) => s.is_running(),
             _ => false,
@@ -51,7 +51,7 @@ pub struct EngineRegistry {    /// 编号 -> 引擎实例
     instances: DashMap<String, Arc<parking_lot::Mutex<EngineInstance>>>,
     /// 按 key 查编号
     key_index: DashMap<String, String>,
-    /// 全局 frpc 服务集合
+    /// 全局 tunnel 客户端 服务集合
     services: Arc<ServiceRegistry>,
     /// 传输层加密密钥
     secret: Arc<String>,
@@ -68,28 +68,28 @@ impl EngineRegistry {
     }
 
     /// 注册客户端引擎
-    pub fn register_client(&self, code: &str, key: &str, cfg: ClientConfig) -> Arc<FrpcService> {
+    pub fn register_client(&self, code: &str, key: &str, cfg: ClientConfig) -> Arc<AgentService> {
         // 同编号旧实例先停掉
         if let Some(old) = self.instances.get(code) {
             let mut guard = old.lock();
-            if let Some(s) = &guard.frpc {
+            if let Some(s) = &guard.tunnel 客户端 {
                 s.stop();
             }
-            if let Some(s) = &guard.frps {
+            if let Some(s) = &guard.tunnel 节点服务 {
                 s.stop();
             }
         }
         drop(self.instances.remove(code));
 
-        let svc = FrpcService::new(code, cfg);
+        let svc = AgentService::new(code, cfg);
         self.services.set(code, svc.clone());
         self.instances.insert(
             code.to_string(),
             Arc::new(parking_lot::Mutex::new(EngineInstance {
                 kind: EngineKind::Client,
                 code: code.to_string(),
-                frpc: Some(svc.clone()),
-                frps: None,
+                tunnel 客户端: Some(svc.clone()),
+                tunnel 节点服务: None,
                 last_active: std::time::Instant::now(),
             })),
         );
@@ -99,29 +99,29 @@ impl EngineRegistry {
         svc
     }
 
-    /// 注册节点引擎（frps）
+    /// 注册节点引擎（tunnel 节点服务）
     pub fn register_node(
         &self,
         code: &str,
         key: &str,
-        cfg: rscross_frp::ServerConfig,
-    ) -> Arc<FrpsServer> {
+        cfg: rscross_tunnel::ServerConfig,
+    ) -> Arc<HubServer> {
         if let Some(old) = self.instances.get(code) {
             let mut guard = old.lock();
-            if let Some(s) = &guard.frps {
+            if let Some(s) = &guard.tunnel 节点服务 {
                 s.stop();
             }
         }
         drop(self.instances.remove(code));
 
-        let srv = FrpsServer::new(cfg, self.secret.as_ref().clone());
+        let srv = HubServer::new(cfg, self.secret.as_ref().clone());
         self.instances.insert(
             code.to_string(),
             Arc::new(parking_lot::Mutex::new(EngineInstance {
                 kind: EngineKind::Node,
                 code: code.to_string(),
-                frpc: None,
-                frps: Some(srv.clone()),
+                tunnel 客户端: None,
+                tunnel 节点服务: Some(srv.clone()),
                 last_active: std::time::Instant::now(),
             })),
         );
@@ -148,14 +148,14 @@ impl EngineRegistry {
             .unwrap_or(false)
     }
 
-    /// 取 frpc 服务
-    pub fn frpc(&self, code: &str) -> Option<Arc<FrpcService>> {
-        self.get(code).and_then(|e| e.lock().frpc.clone())
+    /// 取 tunnel 客户端 服务
+    pub fn tunnel 客户端(&self, code: &str) -> Option<Arc<AgentService>> {
+        self.get(code).and_then(|e| e.lock().tunnel 客户端.clone())
     }
 
-    /// 取 frps 服务
-    pub fn frps(&self, code: &str) -> Option<Arc<FrpsServer>> {
-        self.get(code).and_then(|e| e.lock().frps.clone())
+    /// 取 tunnel 节点服务 服务
+    pub fn tunnel 节点服务(&self, code: &str) -> Option<Arc<HubServer>> {
+        self.get(code).and_then(|e| e.lock().tunnel 节点服务.clone())
     }
 
     /// 列出所有在线编号
@@ -171,10 +171,10 @@ impl EngineRegistry {
     pub fn stop(&self, code: &str, _msg: &str) {
         if let Some(inst) = self.get(code) {
             let mut guard = inst.lock();
-            if let Some(s) = &guard.frpc {
+            if let Some(s) = &guard.tunnel 客户端 {
                 s.stop();
             }
-            if let Some(s) = &guard.frps {
+            if let Some(s) = &guard.tunnel 节点服务 {
                 s.stop();
             }
         }
@@ -273,7 +273,7 @@ mod tests {
         let cfg = build_client_config("key1", "127.0.0.1", 7000, 5, HashMap::new());
         reg.register_client("c1", "key1", cfg);
 
-        assert!(reg.frpc("c1").is_some());
+        assert!(reg.tunnel 客户端("c1").is_some());
         assert_eq!(reg.code_by_key("key1"), Some("c1".to_string()));
         assert_eq!(reg.len(), 1);
     }
@@ -284,7 +284,7 @@ mod tests {
         let cfg = build_client_config("k", "127.0.0.1", 7000, 1, HashMap::new());
         reg.register_client("c1", "k", cfg);
         reg.stop("c1", "test");
-        assert!(!reg.frpc("c1").unwrap().is_running());
+        assert!(!reg.tunnel 客户端("c1").unwrap().is_running());
     }
 
     #[test]

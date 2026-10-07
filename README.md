@@ -23,7 +23,7 @@
 rscross/
 ├── crates/
 │   ├── rscross-common/   # 公共库：配置、加密、RPC 传输、工具
-│   ├── rscross-frp/      # 穿透内核：frps 服务端 + frpc 客户端 + NAT 打洞
+│   ├── rscross-tunnel/      # 穿透内核：frps 服务端 + frpc 客户端 + NAT 打洞
 │   ├── rscross-server/   # 服务端：axum API + sqlx 数据层 + 调度引擎
 │   └── rscross-client/   # 节点/客户端运行时
 ├── web/                  # 前端（Vue 3 + Naive UI）
@@ -36,7 +36,7 @@ rscross/
 
 - **控制面**：服务端与节点/客户端之间跑自定义 RPC over WebSocket，
   承载注册、心跳、配置下发、流量上报。
-- **数据面**：`rscross-frp` 实现的穿透协议。控制流为
+- **数据面**：`rscross-tunnel` 实现的穿透协议。控制流为
   「8 字节大端长度前缀 + JSON」，数据流按工作连接复用转发，
   支持按需加密、压缩与限速。
 

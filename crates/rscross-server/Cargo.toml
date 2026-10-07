@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 rscross-common = { path = "../rscross-common" }
-rscross-frp = { path = "../rscross-frp" }
+rscross-tunnel = { path = "../rscross-tunnel" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }

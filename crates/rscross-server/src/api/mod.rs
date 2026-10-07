@@ -43,12 +43,12 @@ pub fn build_router(state: AppState) -> Router {
     app = app
         .route("/api/v1/public/system/config", post(public_config))
         .route("/api/v1/public/system/notice", post(public_notice))
-        .route("/api/v1/public/frp/login", post(frp_login))
-        .route("/api/v1/public/frp/newProxy", post(frp_new_proxy))
-        .route("/api/v1/public/frp/closeProxy", post(frp_close_proxy))
-        .route("/api/v1/public/frp/ping", post(frp_ping))
-        .route("/api/v1/public/frp/newWorkConn", post(frp_new_work_conn))
-        .route("/api/v1/public/frp/newUserConn", post(frp_new_user_conn));
+        .route("/api/v1/public/node/login", post(node_auth_callback))
+        .route("/api/v1/public/node/newProxy", post(node_proxy_callback))
+        .route("/api/v1/public/node/closeProxy", post(node_close_callback))
+        .route("/api/v1/public/node/ping", post(node_ping_callback))
+        .route("/api/v1/public/node/newWorkConn", post(node_workconn_callback))
+        .route("/api/v1/public/node/newUserConn", post(node_userconn_callback));
 
     // ---- 认证接口 ----
     app = app
@@ -386,12 +386,12 @@ mod auth_handlers;
 mod normal_handlers;
 mod admin_handlers;
 mod public_handlers;
-mod frp_handlers;
+mod callback_handlers;
 mod builders;
 
 pub use auth_handlers::*;
 pub use normal_handlers::*;
 pub use admin_handlers::*;
 pub use public_handlers::*;
-pub use frp_handlers::*;
+pub use callback_handlers::*;
 pub use builders::*;

@@ -1,6 +1,6 @@
 //! rscross-client —— rscross 节点与客户端运行时
 //!
-//! 通过 WebSocket RPC 连接服务端，接收配置指令并驱动 frp 内核。
+//! 通过 WebSocket RPC 连接服务端，接收配置指令并驱动 穿透内核。
 
 pub mod config;
 pub mod events;

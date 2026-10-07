@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use rscross_frp::ClientConfig;
+use rscross_tunnel::ClientConfig;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -23,7 +23,7 @@ pub struct Visitor {
     bind_addr: String,
     /// 服务端地址
     server_addr: String,
-    /// 服务集合（复用 frpc 连接）
+    /// 服务集合（复用 tunnel 客户端 连接）
     services: Arc<ServiceRegistry>,
 }
 
@@ -79,7 +79,7 @@ impl Visitor {
         let _ = outbound.set_nodelay(true);
 
         // 双向转发
-        let _ = rscross_frp::transport::relay_bidirectional(
+        let _ = rscross_tunnel::transport::relay_bidirectional(
             &mut inbound,
             &mut outbound,
             None,
@@ -110,8 +110,8 @@ pub fn from_args(
         ..Default::default()
     };
     let services = Arc::new(ServiceRegistry::new());
-    // 访客复用 frpc 的连接池
-    let svc = Arc::new(rscross_frp::FrpcService::new("visitor", cfg));
+    // 访客复用 tunnel 客户端 的连接池
+    let svc = Arc::new(rscross_tunnel::AgentService::new("visitor", cfg));
     services.set("visitor", svc);
 
     Arc::new(Visitor::new(

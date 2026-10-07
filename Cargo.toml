@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crates/rscross-common",
-    "crates/rscross-frp",
+    "crates/rscross-tunnel",
     "crates/rscross-server",
     "crates/rscross-client",
 ]

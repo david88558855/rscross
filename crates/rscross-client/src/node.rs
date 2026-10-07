@@ -130,14 +130,14 @@ impl Node {
     }
 }
 
-/// 构建 frpc 客户端配置
-pub fn build_frpc_config(
+/// 构建 tunnel 客户端 客户端配置
+pub fn build_tunnel 客户端_config(
     auth_token: &str,
     server_addr: &str,
     server_port: u16,
     pool_count: i32,
-) -> rscross_frp::ClientConfig {
-    rscross_frp::ClientConfig {
+) -> rscross_tunnel::ClientConfig {
+    rscross_tunnel::ClientConfig {
         auth_token: auth_token.to_string(),
         server_addr: server_addr.to_string(),
         server_port,
@@ -155,8 +155,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_frpc_config() {
-        let c = build_frpc_config("token", "1.2.3.4", 7000, 3);
+    fn test_build_tunnel 客户端_config() {
+        let c = build_tunnel 客户端_config("token", "1.2.3.4", 7000, 3);
         assert_eq!(c.auth_token, "token");
         assert_eq!(c.control_addr(), "1.2.3.4:7000");
         assert_eq!(c.pool_count, 3);

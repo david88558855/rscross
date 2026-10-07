@@ -1,12 +1,14 @@
-//! rscross-frp —— 内网穿透内核
+//! rscross-tunnel —— rscross 自研内网穿透内核
 //!
-//! 纯 Rust 实现的 frp 协议栈：
+//! 完全独立实现的穿透协议栈，不依赖任何外部项目，
+//! 与 gostc / frp 的协议互不兼容：
 //! - [`msg`]：控制流消息（登录、代理注册、工作连接请求）
-//! - [`config`]：配置模型（服务端 / 客户端 / 各类代理）
-//! - [`server`]：frps 服务端（节点侧）
-//! - [`client`]：frpc 客户端（内网侧）
+//! - [`config`]：配置模型（节点侧 / 客户端侧 / 各类隧道）
+//! - [`server`]：节点侧服务（部署在公网节点，运行 HubServer）
+//! - [`client`]：客户端侧代理（部署在内网，运行 AgentService）
 //! - [`transport`]：数据传输通道（加密、压缩、限速）
-//! - [`nathole`]：xtcp 打洞
+//! - [`vhost`]：域名分发
+//! - [`nathole`]：P2P 打洞
 
 pub mod client;
 pub mod config;
@@ -17,11 +19,11 @@ pub mod server;
 pub mod transport;
 pub mod vhost;
 
-pub use client::{FrpcService, ServiceRegistry};
+pub use client::{AgentService, ServiceRegistry};
 pub use config::{ClientConfig, ProxyBaseConfig, ServerConfig};
 pub use msg::*;
 pub use proxy::{ProxyEntry, ProxyRegistry};
-pub use server::FrpsServer;
+pub use server::HubServer;
 
 /// 协议版本，随实现演进递增
 pub const PROTOCOL_VERSION: &str = "0.1.0";

@@ -1,14 +1,14 @@
-//! 隧道服务注册表：管理 key -> frpc 服务的映射
+//! 隧道服务注册表：管理 key -> tunnel 客户端 服务的映射
 
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use rscross_frp::FrpcService;
+use rscross_tunnel::AgentService;
 
 /// 服务注册表
 #[derive(Default)]
 pub struct ServiceRegistry {
-    services: DashMap<String, Arc<FrpcService>>,
+    services: DashMap<String, Arc<AgentService>>,
 }
 
 impl ServiceRegistry {
@@ -17,7 +17,7 @@ impl ServiceRegistry {
     }
 
     /// 注册服务
-    pub fn set(&self, key: &str, svc: Arc<FrpcService>) {
+    pub fn set(&self, key: &str, svc: Arc<AgentService>) {
         // 同 key 旧服务先停
         if let Some(old) = self.services.get(key) {
             if !Arc::ptr_eq(old.value(), &svc) {
@@ -28,12 +28,12 @@ impl ServiceRegistry {
     }
 
     /// 取服务
-    pub fn get(&self, key: &str) -> Option<Arc<FrpcService>> {
+    pub fn get(&self, key: &str) -> Option<Arc<AgentService>> {
         self.services.get(key).map(|e| e.value().clone())
     }
 
     /// 移除并停止
-    pub fn del(&self, key: &str) -> Option<Arc<FrpcService>> {
+    pub fn del(&self, key: &str) -> Option<Arc<AgentService>> {
         let removed = self.services.remove(key).map(|(_, v)| v);
         if let Some(svc) = &removed {
             svc.stop();
@@ -42,7 +42,7 @@ impl ServiceRegistry {
     }
 
     /// 移除记录但不停止服务
-    pub fn remove(&self, key: &str) -> Option<Arc<FrpcService>> {
+    pub fn remove(&self, key: &str) -> Option<Arc<AgentService>> {
         self.services.remove(key).map(|(_, v)| v)
     }
 
@@ -77,12 +77,12 @@ impl ServiceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rscross_frp::ClientConfig;
+    use rscross_tunnel::ClientConfig;
 
     #[test]
     fn test_set_get_del() {
         let reg = ServiceRegistry::new();
-        let svc = Arc::new(FrpcService::new("k1", ClientConfig::default()));
+        let svc = Arc::new(AgentService::new("k1", ClientConfig::default()));
         reg.set("k1", svc.clone());
 
         assert!(reg.get("k1").is_some());

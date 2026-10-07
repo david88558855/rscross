@@ -1,4 +1,4 @@
-//! 控制流消息：frpc 与 frps 之间的 JSON over TCP 协议
+//! 控制流消息：tunnel 客户端 与 tunnel 节点服务 之间的 JSON over TCP 协议
 //!
 //! 消息以 8 字节大端长度前缀 + JSON 负载的方式在流上传输。
 
@@ -74,7 +74,7 @@ impl Envelope {
     }
 }
 
-/// 登录请求（frpc -> frps）
+/// 登录请求（tunnel 客户端 -> tunnel 节点服务）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Login {
     /// 认证令牌，即节点/客户端编号
@@ -105,7 +105,7 @@ impl Login {
     }
 }
 
-/// 登录响应（frps -> frpc）
+/// 登录响应（tunnel 节点服务 -> tunnel 客户端）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginResp {
     /// 是否成功
@@ -158,7 +158,7 @@ impl ProxyConfigMsg {
     }
 }
 
-/// 新代理请求（frpc -> frps）
+/// 新代理请求（tunnel 客户端 -> tunnel 节点服务）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewProxy {
     #[serde(flatten)]
@@ -189,7 +189,7 @@ pub struct CloseProxyResp {
     pub reason: String,
 }
 
-/// 服务端请求客户端建立工作连接（frps -> frpc）
+/// 服务端请求客户端建立工作连接（tunnel 节点服务 -> tunnel 客户端）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewWorkConn {
     /// 对应的代理名
@@ -223,7 +223,7 @@ pub struct Pong {
     pub interval: i64,
 }
 
-/// P2P 打洞请求（frpc -> frps -> 对端 frpc）
+/// P2P 打洞请求（tunnel 客户端 -> tunnel 节点服务 -> 对端 tunnel 客户端）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NatHole {
     /// 请求方

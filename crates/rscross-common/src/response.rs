@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AppError, ErrorCode};
+use crate::error::{AppResult, ErrorCode};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiResponse<T> {
@@ -108,7 +108,7 @@ impl PageQuery {
     /// 仅允许 `column` 或 `column ASC|DESC` 形式，且列名匹配 `[A-Za-z0-9_]+`。
     pub fn order_by(&self, allowed: &[&str]) -> String {
         let raw = self.order.clone().unwrap_or_default();
-        let field = self.order_field.clone().unwrap_or_else(|| "id".to_string());
+        let default_field = self.order_field.clone().unwrap_or_else(|| "id".to_string());
 
         // 拆分字段与方向
         let (field, desc) = if let Some(f) = raw.strip_prefix("-") {
@@ -117,7 +117,11 @@ impl PageQuery {
             (raw.as_str(), false)
         };
 
-        let field = if field.is_empty() { "id" } else { field };
+        let field = if field.is_empty() {
+            default_field.as_str()
+        } else {
+            field
+        };
 
         if !allowed.contains(&field) || !is_valid_identifier(field) {
             return "id DESC".to_string();

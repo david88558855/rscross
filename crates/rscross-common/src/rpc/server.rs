@@ -8,7 +8,7 @@ use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 use super::{decode_frame, encode_frame, frame_type, AppReply, Frame, RpcContext, SessionCtx};
 

@@ -88,9 +88,8 @@ pub fn aes_cbc_encrypt(plaintext: &[u8], secret: &str) -> AppResult<String> {
     let iv = aes::cipher::generic_array::GenericArray::from_slice(&iv_bytes);
 
     let enc = Encryptor::new(&key.into(), iv);
-    let buf = enc
-        .encrypt_padded_vec_mut::<Pkcs7>(plaintext)
-        .map_err(|_| AppError::msg("AES 加密失败"))?;
+    // encrypt_padded_vec_mut 内部自行扩容，不返回 Result
+    let buf = enc.encrypt_padded_vec_mut::<Pkcs7>(plaintext);
     Ok(B64.encode(buf))
 }
 

@@ -58,32 +58,36 @@ pub struct Frame {
 }
 
 /// 连接级上下文，键值对存储
-pub type SessionCtx = Arc<RwLock<HashMap<String, String>>>;
+///
+/// 用 newtype 包装 `Arc<RwLock<..>>`：既能定义固有方法，
+/// 又能廉价克隆后跨任务共享同一份连接状态。
+#[derive(Clone, Debug, Default)]
+pub struct SessionCtx(Arc<RwLock<HashMap<String, String>>>);
 
 impl SessionCtx {
     pub fn new() -> Self {
-        Arc::new(RwLock::new(HashMap::new()))
+        Self(Arc::new(RwLock::new(HashMap::new())))
     }
 
     pub async fn set(&self, k: &str, v: &str) {
-        self.write().await.insert(k.to_string(), v.to_string());
+        self.0.write().await.insert(k.to_string(), v.to_string());
     }
 
     pub async fn get(&self, k: &str) -> Option<String> {
-        self.read().await.get(k).cloned()
+        self.0.read().await.get(k).cloned()
     }
 
     pub async fn has(&self, k: &str) -> bool {
-        self.read().await.contains_key(k)
+        self.0.read().await.contains_key(k)
     }
 
     /// 一次性获取并删除，用于注册超时判定
     pub async fn take(&self, k: &str) -> Option<String> {
-        self.write().await.remove(k)
+        self.0.write().await.remove(k)
     }
 
     pub async fn all(&self) -> HashMap<String, String> {
-        self.read().await.clone()
+        self.0.read().await.clone()
     }
 }
 

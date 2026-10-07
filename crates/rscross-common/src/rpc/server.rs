@@ -132,6 +132,8 @@ impl RpcServer {
                     Ok(s) => s,
                     Err(_) => continue,
                 },
+                // 兼容 tungstenite 各版本的额外变体
+                _ => continue,
             };
 
             let Some(frame) = decode_frame(&text) else {

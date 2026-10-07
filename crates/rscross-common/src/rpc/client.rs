@@ -91,6 +91,8 @@ impl RpcClient {
                     },
                     Message::Ping(_) | Message::Pong(_) => continue,
                     Message::Close(_) => break,
+                    // 兼容 tungstenite 各版本的额外变体
+                    _ => continue,
                 };
                 if let Some(frame) = decode_frame(&text) {
                     if in_tx.send(frame).is_err() {

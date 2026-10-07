@@ -52,7 +52,7 @@ fn default_db_type() -> String {
     "sqlite".to_string()
 }
 fn default_sqlite_path() -> String {
-    "data/gostc.db".to_string()
+    "data/rscross.db".to_string()
 }
 fn default_base_path() -> String {
     String::new()

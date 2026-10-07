@@ -87,7 +87,7 @@ impl RpcServer {
         let writer = tokio::spawn(async move {
             while let Some(frame) = rx.recv().await {
                 let text = encode_frame(&frame);
-                if sink.send(Message::Text(text.into())).await.is_err() {
+                if sink.send(Message::Text(text)).await.is_err() {
                     break;
                 }
             }
@@ -132,8 +132,6 @@ impl RpcServer {
                     Ok(s) => s,
                     Err(_) => continue,
                 },
-                // 兼容 tungstenite 各版本的额外变体
-                _ => continue,
             };
 
             let Some(frame) = decode_frame(&text) else {

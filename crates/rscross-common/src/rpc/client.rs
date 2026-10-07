@@ -73,7 +73,7 @@ impl RpcClient {
         tokio::spawn(async move {
             while let Some(frame) = out_rx.recv().await {
                 let text = encode_frame(&frame);
-                if sink.send(Message::Text(text.into())).await.is_err() {
+                if sink.send(Message::Text(text)).await.is_err() {
                     break;
                 }
             }
@@ -321,6 +321,11 @@ pub struct DispatchHandle {
 }
 
 impl DispatchHandle {
+    /// 取得出站发送端，供外部主动下发指令
+    pub fn sender(&self) -> mpsc::UnboundedSender<Frame> {
+        self.outbox.clone()
+    }
+
     /// 标记连接已断开
     pub async fn mark_disconnected(&self) {
         *self.state.write().await = ConnState::Disconnected;

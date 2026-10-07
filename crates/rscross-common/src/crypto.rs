@@ -111,9 +111,11 @@ pub fn aes_cbc_decrypt(ciphertext_b64: &str, secret: &str) -> AppResult<Vec<u8>>
     let iv = aes::cipher::generic_array::GenericArray::from_slice(&iv_bytes);
 
     let mut buf = raw;
-    let dec = Decryptor::new(&key.into(), iv);
-    dec.decrypt_padded_vec_mut::<Pkcs7>(&mut buf)
-        .map_err(|_| AppError::msg("AES 解密失败：密钥不匹配或数据损坏"))
+    let mut dec = Decryptor::new(&key.into(), iv);
+    let plain = dec
+        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .map_err(|_| AppError::msg("AES 解密失败：密钥不匹配或数据损坏"))?;
+    Ok(plain.to_vec())
 }
 
 /// JWT 载荷

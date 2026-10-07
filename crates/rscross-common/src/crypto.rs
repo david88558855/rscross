@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn test_aes_roundtrip() {
         let secret = "my-secret-key";
-        let plain = b"hello gostc world";
+        let plain = b"hello rscross world";
         let enc = aes_cbc_encrypt(plain, secret).unwrap();
         assert_ne!(enc, B64.encode(plain));
         let dec = aes_cbc_decrypt(&enc, secret).unwrap();

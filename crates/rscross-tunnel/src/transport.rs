@@ -211,7 +211,7 @@ impl Compressor {
         while i < data.len() {
             let b = data[i];
             let mut run = 1u8;
-            while i + run as usize < data.len()
+            while (i + run as usize) < data.len()
                 && data[i + run as usize] == b
                 && run < 255
             {

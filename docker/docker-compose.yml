@@ -1,0 +1,31 @@
+version: "3"
+services:
+  rscross-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    image: david88558855/rscross-server:latest
+    restart: always
+    network_mode: host
+    container_name: rscross-server
+    volumes:
+      - ../data:/app/data
+      - ../logs:/app/logs
+    command:
+      - --log-level
+      - info
+
+  rscross-client:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.client
+    image: david88558855/rscross-client:latest
+    restart: always
+    network_mode: host
+    container_name: rscross-client
+    command:
+      - --tls=false
+      - -addr
+      - 127.0.0.1:8080
+      - -k
+      - REPLACE_WITH_KEY

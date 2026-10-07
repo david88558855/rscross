@@ -1,0 +1,7 @@
+# rscross 节点/客户端配置
+addr: "127.0.0.1:8080"
+key: ""
+tls: false
+node: false
+proxy_base_url: ""
+log_level: "info"

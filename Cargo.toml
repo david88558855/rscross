@@ -1,0 +1,85 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rscross-common",
+    "crates/rscross-frp",
+    "crates/rscross-server",
+    "crates/rscross-client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+repository = "https://github.com/david88558855/rscross"
+description = "rscross - 内网穿透管理平台（Rust 实现）"
+
+[workspace.dependencies]
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Web / RPC
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace", "fs"] }
+hyper = "1"
+hyper-util = "0.1"
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# 数据库
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "mysql",
+    "sqlite",
+    "macros",
+    "migrate",
+] }
+
+# 加密与认证
+jsonwebtoken = "9"
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+hex = "0.4"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+ctr = "0.9"
+md-5 = "0.10"
+rand_chacha = "0.3"
+
+# 工具
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+parking_lot = "0.12"
+once_cell = "1"
+regex = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+url = "2"
+percent-encoding = "2"
+clap = { version = "4", features = ["derive", "env"] }
+governor = "0.6"
+dashmap = "6"
+mime_guess = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -164,8 +164,8 @@ impl HubServer {
         stream: TcpStream,
         peer: SocketAddr,
     ) -> Result<(), String> {
-        // 首包必须是登录请求
-        let login = match msg::read_message(&mut &stream).await? {
+        // 首包必须是登录请求（登录阶段尚未拆分流，直接用 &mut stream）
+        let login = match msg::read_message(&mut stream).await? {
             Some(env) if env.msg_type == msg_type::LOGIN => {
                 let l: Login = env.parse()?;
                 l
@@ -184,8 +184,7 @@ impl HubServer {
                 })
                 .unwrap(),
             );
-            let mut s = &stream;
-            let _ = msg::write_message(&mut s, &resp).await;
+            let _ = msg::write_message(&mut stream, &resp).await;
             return Err("认证失败".to_string());
         }
 
@@ -231,8 +230,8 @@ impl HubServer {
 
         tracing::info!(login_id, username = %session.username, "客户端已登录");
 
-        // 会话主循环
-        let result = self.session_loop(&stream, session.clone()).await;
+        // 会话主循环：流的所有权移交，读写半部分别由两个任务持有
+        let result = self.clone().session_loop(stream, session.clone(), rx).await;
 
         // 清理：注销该客户端的所有代理
         let proxy_names: Vec<String> = session.proxies.read().iter().cloned().collect();
@@ -246,22 +245,24 @@ impl HubServer {
     }
 
     /// 会话消息处理循环
+    ///
+    /// `stream` 的所有权在此移交：拆成读/写半部后，
+    /// 写半部交给独立任务消费 `rx`，读半部用于接收客户端上行消息。
     async fn session_loop(
-        &self,
-        stream: &TcpStream,
+        self: Arc<Self>,
+        stream: TcpStream,
         session: Arc<ClientSession>,
+        mut rx: mpsc::UnboundedReceiver<Envelope>,
     ) -> Result<(), String> {
-        // 主动下发消息的写循环：消费 session.tx
-        let (mut writer, mut writer_rx) = tokio::io::split(stream);
+        let (mut reader, mut writer) = tokio::io::split(stream);
         let writer_task = tokio::spawn(async move {
-            while let Some(env) = writer_rx.recv().await {
+            while let Some(env) = rx.recv().await {
                 if msg::write_message(&mut writer, &env).await.is_err() {
                     break;
                 }
             }
         });
 
-        let mut reader = stream;
         let heartbeat_interval = (self.config.heartbeat_timeout / 2).max(1);
 
         loop {
@@ -278,7 +279,7 @@ impl HubServer {
                     match msg {
                         Ok(Some(env)) => {
                             session.touch();
-                            self.handle_client_msg(env, &session).await;
+                            self.clone().handle_client_msg(env, &session).await;
                         }
                         Ok(None) => break, // 对端关闭
                         Err(e) => {
@@ -301,7 +302,7 @@ impl HubServer {
     }
 
     /// 处理客户端上行的控制消息
-    async fn handle_client_msg(&self, env: Envelope, session: &Arc<ClientSession>) {
+    async fn handle_client_msg(self: Arc<Self>, env: Envelope, session: &Arc<ClientSession>) {
         match env.msg_type.as_str() {
             msg_type::NEW_PROXY => {
                 let np: NewProxy = match env.parse() {
@@ -311,7 +312,7 @@ impl HubServer {
                         return;
                     }
                 };
-                self.handle_new_proxy(np.config, session).await;
+                self.clone().handle_new_proxy(np.config, session).await;
             }
             msg_type::CLOSE_PROXY => {
                 if let Ok(cp) = env.parse::<CloseProxy>() {
@@ -334,7 +335,7 @@ impl HubServer {
     }
 
     /// 处理新代理注册
-    async fn handle_new_proxy(&self, cfg: ProxyConfigMsg, session: &Arc<ClientSession>) {
+    async fn handle_new_proxy(self: Arc<Self>, cfg: ProxyConfigMsg, session: &Arc<ClientSession>) {
         // 基础校验
         if cfg.name.is_empty() {
             self.reply_error(session, msg_type::NEW_PROXY_RESP, "代理名不能为空");
@@ -510,8 +511,8 @@ impl HubServer {
         let counter = session.traffic.clone();
 
         let _ = crate::transport::relay_bidirectional(
-            &mut work_stream,
-            &mut inbound,
+            work_stream,
+            inbound,
             limit,
             Some(Arc::new(move |n: u64| {
                 counter.add_output(n);
@@ -629,18 +630,20 @@ impl HubServer {
     }
 
     fn reply_error(&self, session: &Arc<ClientSession>, msg_type: &str, reason: &str) {
-        let resp = match msg_type {
-            msg_type::NEW_PROXY_RESP => NewProxyResp {
+        let value = match msg_type {
+            msg_type::NEW_PROXY_RESP => serde_json::to_value(NewProxyResp {
                 success: false,
                 reason: reason.to_string(),
                 remote_port: 0,
-            },
-            _ => CloseProxyResp {
+            }),
+            _ => serde_json::to_value(CloseProxyResp {
                 success: false,
                 reason: reason.to_string(),
-            },
+            }),
         };
-        self.reply(session, msg_type, resp);
+        if let Ok(v) = value {
+            let _ = session.tx.send(Envelope::new(msg_type, v));
+        }
     }
 }
 
@@ -686,8 +689,8 @@ pub async fn read_exact_n(stream: &mut TcpStream, n: usize) -> std::io::Result<V
 }
 
 /// 立即关闭流
-pub fn close_stream(stream: &TcpStream) {
-    let _ = stream.shutdown(std::net::Shutdown::Both);
+pub async fn close_stream(stream: &TcpStream) {
+    let _ = stream.shutdown().await;
 }
 
 /// 生成 map 快照

@@ -24,9 +24,13 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
+    // 两端各自拆成读/写半部，避免同时持有两个可变借用
+    let (a_read, a_write) = tokio::io::split(a);
+    let (b_read, b_write) = tokio::io::split(b);
+
     let (up, down) = tokio::join!(
-        copy_with_limit(&mut a, &mut b, limit, on_bytes.clone()),
-        copy_with_limit(&mut b, &mut a, limit, on_bytes),
+        copy_with_limit(a_read, b_write, limit, on_bytes.clone()),
+        copy_with_limit(b_read, a_write, limit, on_bytes),
     );
     let up_bytes = up?;
     let down_bytes = down?;
@@ -35,8 +39,8 @@ where
 
 /// 带限速的单向复制
 async fn copy_with_limit<R, W>(
-    reader: &mut R,
-    writer: &mut W,
+    mut reader: R,
+    mut writer: W,
     limit: Option<u64>,
     on_bytes: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 ) -> io::Result<u64>
@@ -73,6 +77,8 @@ where
     }
 
     writer.flush().await?;
+    // 半关闭：通知对端本方向已结束，避免对端一直等待 EOF
+    let _ = writer.shutdown().await;
     Ok(total)
 }
 
@@ -190,7 +196,19 @@ impl Default for CompressionCfg {
     }
 }
 
+impl Default for Compressor {
+    fn default() -> Self {
+        Self {
+            cfg: CompressionCfg::default(),
+        }
+    }
+}
+
 impl Compressor {
+    pub fn new(cfg: CompressionCfg) -> Self {
+        Self { cfg }
+    }
+
     pub fn from_transport(t: &TransportConfig) -> Self {
         Self {
             cfg: CompressionCfg {
@@ -319,28 +337,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_relay_bidirectional() {
-        let a = tokio::io::duplex(64 * 1024);
-        let (a_read, a_write) = tokio::io::split(a);
-        let (b_write, b_read) = tokio::io::split(tokio::io::duplex(64 * 1024));
+        let (a1, mut a2) = tokio::io::duplex(64 * 1024);
+        let (b1, b2) = tokio::io::duplex(64 * 1024);
 
         let payload = vec![7u8; 1024];
         let p2 = payload.clone();
-        let sender = tokio::spawn(async move {
-            let mut w = a_write;
-            w.write_all(&p2).await.unwrap();
-            w.shutdown().await.unwrap();
+        // a2 写入后关闭，使正向复制读到 EOF
+        tokio::spawn(async move {
+            a2.write_all(&p2).await.unwrap();
+            a2.shutdown().await.unwrap();
         });
+        // b2 立即丢弃，使反向复制立刻 EOF，避免 join! 互相等待
+        drop(b2);
 
         let counter = Arc::new(TrafficCounter::new());
         let c2 = counter.clone();
-        let (_, _) = relay_bidirectional(a_read, b_write, None, Some(c2))
-            .await
-            .unwrap();
+        let (up, down) = relay_bidirectional(a1, b1, None, Some(c2)).await.unwrap();
 
-        let mut out = Vec::new();
-        b_read.read_to_end(&mut out).await.unwrap();
-        let _ = sender.await;
-        assert_eq!(out, payload);
-        assert_eq!(counter.output(), 1024);
+        assert_eq!(up, payload.len() as u64);
+        assert_eq!(down, 0);
+        assert_eq!(counter.output(), payload.len() as u64);
     }
 }

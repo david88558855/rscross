@@ -116,7 +116,7 @@ pub struct LoginResp {
 }
 
 /// 代理配置，注册时随 NewProxy 一起提交
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProxyConfigMsg {
     /// 代理名，全局唯一
     pub name: String,

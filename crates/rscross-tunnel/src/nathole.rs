@@ -50,7 +50,7 @@ async fn query_stun(server: &str, timeout_ms: u64) -> Option<String> {
     let target = tokio::net::lookup_host(server).await.ok()?.next()?;
 
     // STUN binding request：magic cookie 0x2112A442
-    let mut req = vec![0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42];
+    let req = vec![0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42];
     socket.send_to(&req, target).await.ok()?;
 
     let mut buf = vec![0u8; 512];

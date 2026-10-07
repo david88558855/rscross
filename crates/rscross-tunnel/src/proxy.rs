@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncWriteExt as _};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::msg::{self, msg_type, Envelope, NewWorkConn};
@@ -149,12 +149,12 @@ impl ProxyRegistry {
         let d = domain.to_lowercase();
         // 精确匹配
         if let Some(name) = self.domain_index.get(&d) {
-            return self.get(name);
+            return self.get(name.as_str());
         }
         // 通配匹配：*.example.com
         for (pattern, name) in self.domain_index.iter() {
-            if rscross_common::util::domain_match(pattern, &d) {
-                return self.get(name);
+            if rscross_common::util::domain_match(pattern.as_str(), &d) {
+                return self.get(name.as_str());
             }
         }
         None

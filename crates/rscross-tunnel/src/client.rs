@@ -51,7 +51,7 @@ impl AgentService {
             control_tx: RwLock::new(None),
             running: Arc::new(AtomicBool::new(true)),
             traffic: Arc::new(TrafficCounter::new()),
-            on_change: RwLock::new(None()),
+            on_change: RwLock::new(None),
         })
     }
 
@@ -147,7 +147,7 @@ impl AgentService {
         let mut backoff = Duration::from_secs(1);
 
         while self.is_running() {
-            match self.connect_once(&addr).await {
+            match self.clone().connect_once(&addr).await {
                 Ok(()) => {
                     backoff = Duration::from_secs(1);
                 }
@@ -172,7 +172,8 @@ impl AgentService {
             .map_err(|e| format!("连接 {addr} 失败: {e}"))?;
         let _ = stream.set_nodelay(true);
 
-        let (mut writer, mut reader) = stream.split();
+        // 拆成独立的读/写半部，避免借用 &TcpStream（它不实现 AsyncRead/Write）
+        let (mut reader, mut writer) = stream.into_split();
         let (tx, mut rx) = mpsc::unbounded_channel::<Envelope>();
         *self.control_tx.write() = Some(tx.clone());
 
@@ -361,8 +362,8 @@ impl AgentService {
         tracing::debug!(proxy = %req.proxy_name, "工作连接建立，开始转发");
 
         let _ = crate::transport::relay_bidirectional(
-            &mut back,
-            &mut local_stream,
+            back,
+            local_stream,
             limit,
             Some(Arc::new(move |n: u64| {
                 counter.add_output(n);
@@ -373,28 +374,21 @@ impl AgentService {
 
     /// UDP 工作连接
     async fn handle_udp_work_conn(self: &Arc<Self>, cfg: &ProxyConfigMsg) {
+        // UDP 转发循环在真实场景中按需启动；此处保留接口
         let local = format!("{}:{}", cfg.local_ip, cfg.local_port);
+        let Ok(addr) = local.parse::<std::net::SocketAddr>() else {
+            tracing::error!(local, "UDP 本地服务地址非法");
+            return;
+        };
         let Ok(local_socket) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
             tracing::error!("UDP 本地套接字创建失败");
             return;
         };
-        let Ok(remote_socket) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
-            tracing::error!("UDP 远端套接字创建失败");
+        if let Err(e) = local_socket.connect(addr).await {
+            tracing::error!(error = %e, "UDP 连接本地服务失败");
             return;
-        };
-
-        // 解析本地地址
-        let Ok(local_addr) = local_socket.connect(
-            &local
-                .parse()
-                .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
-        ) else {
-            tracing::error!("UDP 连接本地服务失败: {local}");
-            return;
-        };
-        let _ = local_addr;
-        let _ = cfg;
-        // UDP 转发循环在真实场景中按需启动；此处保留接口
+        }
+        tracing::debug!(local, "UDP 代理已就绪");
     }
 
     /// 服务端地址

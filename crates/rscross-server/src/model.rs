@@ -455,7 +455,7 @@ pub struct GostClientProxy {
 
 /// FRP 自定义配置
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct FrpClientCfg {
+pub struct ClientCfg {
     pub id: i64,
     pub code: String,
     #[serde(rename = "allowEdit")]

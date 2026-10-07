@@ -486,7 +486,7 @@ pub struct GostObs {
     pub version: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub type: String,
+    pub r#type: String,
     pub date: String,
     pub input_bytes: i64,
     pub output_bytes: i64,
@@ -527,7 +527,7 @@ pub struct SystemNotice {
     pub updated_at: DateTime<Utc>,
     pub title: String,
     pub content: String,
-    pub type: String,
+    pub r#type: String,
     pub status: i32,
 }
 

@@ -40,7 +40,11 @@ pub async fn admin_dashboard_count(State(state): State<AppState>) -> Response {
 }
 
 /// 通用流量统计
-async fn obs_aggregate(state: &AppState, group_by: &str, limit: i64) -> AppResult<serde_json::Value> {
+async fn obs_aggregate(
+    state: &AppState,
+    group_by: &str,
+    limit: i64,
+) -> AppResult<serde_json::Value> {
     let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
     let (i_col, o_col, g_col) = match group_by {
         "user" => ("user_code", "input_bytes", "user_code"),
@@ -122,14 +126,24 @@ pub async fn admin_dashboard_user_obs_date(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    Json(obs_by_date(&state, q.get("userCode").map(|s| s.as_str())).await.into()).into_response()
+    Json(
+        obs_by_date(&state, q.get("userCode").map(|s| s.as_str()))
+            .await
+            .into(),
+    )
+    .into_response()
 }
 
 pub async fn admin_dashboard_node_obs_date(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    Json(obs_by_date(&state, q.get("nodeCode").map(|s| s.as_str())).await.into()).into_response()
+    Json(
+        obs_by_date(&state, q.get("nodeCode").map(|s| s.as_str()))
+            .await
+            .into(),
+    )
+    .into_response()
 }
 
 // ==================== 客户端 ====================
@@ -137,13 +151,12 @@ pub async fn admin_dashboard_node_obs_date(
 pub async fn admin_client_list(State(state): State<AppState>) -> Response {
     let result: AppResult<serde_json::Value> = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
-        let rows: Vec<(String, String, String, String, i32, i32, String)> =
-            sqlx::query_as(
-                "SELECT code, `key`, name, user_code, status, enable, updated_at
+        let rows: Vec<(String, String, String, String, i32, i32, String)> = sqlx::query_as(
+            "SELECT code, `key`, name, user_code, status, enable, updated_at
                  FROM gost_clients ORDER BY id DESC",
-            )
-            .fetch_all(pool)
-            .await?;
+        )
+        .fetch_all(pool)
+        .await?;
         Ok(json!({
             "list": rows.iter().map(|r| json!({
                 "code": r.0, "key": r.1, "name": r.2, "userCode": r.3,
@@ -203,7 +216,11 @@ pub async fn admin_client_create(
         .bind(now)
         .bind(now)
         .bind(&key)
-        .bind(if req.name.is_empty() { "未命名客户端" } else { &req.name })
+        .bind(if req.name.is_empty() {
+            "未命名客户端"
+        } else {
+            &req.name
+        })
         .bind(&req.client_code)
         .execute(pool)
         .await?;
@@ -246,9 +263,9 @@ pub async fn admin_client_logger_page(
     State(_state): State<AppState>,
     Json(_q): Json<PageQuery>,
 ) -> Response {
-    Json(
-        ApiResponse::ok(json!({"list": [], "total": 0, "page": 1, "pageSize": 20})),
-    )
+    Json(ApiResponse::ok(
+        json!({"list": [], "total": 0, "page": 1, "pageSize": 20}),
+    ))
     .into_response()
 }
 
@@ -256,9 +273,9 @@ pub async fn admin_node_logger_page(
     State(_state): State<AppState>,
     Json(_q): Json<PageQuery>,
 ) -> Response {
-    Json(
-        ApiResponse::ok(json!({"list": [], "total": 0, "page": 1, "pageSize": 20})),
-    )
+    Json(ApiResponse::ok(
+        json!({"list": [], "total": 0, "page": 1, "pageSize": 20}),
+    ))
     .into_response()
 }
 
@@ -267,13 +284,22 @@ pub async fn admin_node_logger_page(
 pub async fn admin_node_list(State(state): State<AppState>) -> Response {
     let result: AppResult<serde_json::Value> = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
-        let rows: Vec<(String, String, String, String, String, String, i32, i32, String)> =
-            sqlx::query_as(
-                "SELECT code, `key`, name, ip, port, http_port, status, enable, user_code
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i32,
+            i32,
+            String,
+        )> = sqlx::query_as(
+            "SELECT code, `key`, name, ip, port, http_port, status, enable, user_code
                  FROM gost_nodes ORDER BY id DESC",
-            )
-            .fetch_all(pool)
-            .await?;
+        )
+        .fetch_all(pool)
+        .await?;
         Ok(json!({
             "list": rows.iter().map(|r| json!({
                 "code": r.0, "key": r.1, "name": r.2, "ip": r.3, "port": r.4,
@@ -311,10 +337,7 @@ pub async fn admin_node_page(State(state): State<AppState>, Json(q): Json<PageQu
     Json(result.into()).into_response()
 }
 
-pub async fn admin_node_create(
-    State(state): State<AppState>,
-    Json(req): Json<OpReq>,
-) -> Response {
+pub async fn admin_node_create(State(state): State<AppState>, Json(req): Json<OpReq>) -> Response {
     let result: AppResult<serde_json::Value> = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
         let key = rscross_common::util::generate_key();
@@ -331,10 +354,22 @@ pub async fn admin_node_create(
         .bind(now)
         .bind(now)
         .bind(&key)
-        .bind(if req.name.is_empty() { "未命名节点" } else { &req.name })
+        .bind(if req.name.is_empty() {
+            "未命名节点"
+        } else {
+            &req.name
+        })
         .bind(&req.target_ip)
-        .bind(if req.port.is_empty() { "7000" } else { &req.port })
-        .bind(if req.target_port.is_empty() { "8080" } else { &req.target_port })
+        .bind(if req.port.is_empty() {
+            "7000"
+        } else {
+            &req.port
+        })
+        .bind(if req.target_port.is_empty() {
+            "8080"
+        } else {
+            &req.target_port
+        })
         .bind(&req.client_code)
         .execute(pool)
         .await?;
@@ -344,10 +379,7 @@ pub async fn admin_node_create(
     Json(result.into()).into_response()
 }
 
-pub async fn admin_node_update(
-    State(state): State<AppState>,
-    Json(req): Json<OpReq>,
-) -> Response {
+pub async fn admin_node_update(State(state): State<AppState>, Json(req): Json<OpReq>) -> Response {
     let result: AppResult<serde_json::Value> = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
         let affected = sqlx::query(
@@ -373,10 +405,7 @@ pub async fn admin_node_update(
     Json(result.into()).into_response()
 }
 
-pub async fn admin_node_delete(
-    State(state): State<AppState>,
-    Json(req): Json<OpReq>,
-) -> Response {
+pub async fn admin_node_delete(State(state): State<AppState>, Json(req): Json<OpReq>) -> Response {
     let result: AppResult<serde_json::Value> = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
         state.engine.remove(&req.code);
@@ -402,10 +431,7 @@ pub async fn admin_node_delete(
     Json(result.into()).into_response()
 }
 
-pub async fn admin_node_query(
-    State(state): State<AppState>,
-    Json(req): Json<OpReq>,
-) -> Response {
+pub async fn admin_node_query(State(state): State<AppState>, Json(req): Json<OpReq>) -> Response {
     let result: AppResult<serde_json::Value> = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
         let row: Option<(String, String, String, String)> = sqlx::query_as(
@@ -547,8 +573,16 @@ pub async fn admin_node_config_create(
         .bind(now)
         .bind(now)
         .bind(&req.content)
-        .bind(if req.content_type.is_empty() { "yaml" } else { &req.content_type })
-        .bind(if req.name.is_empty() { "未命名配置" } else { &req.name })
+        .bind(if req.content_type.is_empty() {
+            "yaml"
+        } else {
+            &req.content_type
+        })
+        .bind(if req.name.is_empty() {
+            "未命名配置"
+        } else {
+            &req.name
+        })
         .bind(&req.client_code)
         .execute(pool)
         .await?;
@@ -744,17 +778,11 @@ admin_tunnel_page!(admin_proxy_page, "gost_client_proxies");
 admin_tunnel_config!(admin_proxy_config, "gost_client_proxies");
 admin_tunnel_delete!(admin_proxy_delete, "gost_client_proxies");
 
-pub async fn admin_host_create(
-    State(state): State<AppState>,
-    Json(req): Json<OpReq>,
-) -> Response {
+pub async fn admin_host_create(State(state): State<AppState>, Json(req): Json<OpReq>) -> Response {
     super::normal_handlers::normal_host_create(State(state), Json(req)).await
 }
 
-pub async fn admin_host_update(
-    State(state): State<AppState>,
-    Json(req): Json<OpReq>,
-) -> Response {
+pub async fn admin_host_update(State(state): State<AppState>, Json(req): Json<OpReq>) -> Response {
     super::normal_handlers::normal_host_update(State(state), Json(req)).await
 }
 
@@ -779,17 +807,11 @@ pub async fn admin_tunnel_update(
     super::normal_handlers::normal_tunnel_update(State(state), Json(req)).await
 }
 
-pub async fn admin_p2p_create(
-    State(state): State<AppState>,
-    Json(req): Json<OpReq>,
-) -> Response {
+pub async fn admin_p2p_create(State(state): State<AppState>, Json(req): Json<OpReq>) -> Response {
     super::normal_handlers::normal_p2p_create(State(state), Json(req)).await
 }
 
-pub async fn admin_p2p_update(
-    State(state): State<AppState>,
-    Json(req): Json<OpReq>,
-) -> Response {
+pub async fn admin_p2p_update(State(state): State<AppState>, Json(req): Json<OpReq>) -> Response {
     super::normal_handlers::normal_p2p_update(State(state), Json(req)).await
 }
 
@@ -840,10 +862,7 @@ pub async fn admin_user_page(State(state): State<AppState>, Json(q): Json<PageQu
     Json(result.into()).into_response()
 }
 
-pub async fn admin_user_create(
-    State(state): State<AppState>,
-    Json(req): Json<OpReq>,
-) -> Response {
+pub async fn admin_user_create(State(state): State<AppState>, Json(req): Json<OpReq>) -> Response {
     let result: AppResult<serde_json::Value> = async {
         if req.password.len() < 6 {
             return Err(AppError::invalid("密码长度不能少于 6 位"));
@@ -872,7 +891,11 @@ pub async fn admin_user_create(
         .bind(now)
         .bind(&req.name)
         .bind(&hash)
-        .bind(if req.client_code.is_empty() { "user" } else { &req.client_code })
+        .bind(if req.client_code.is_empty() {
+            "user"
+        } else {
+            &req.client_code
+        })
         .bind(&req.content)
         .execute(pool)
         .await?;
@@ -882,10 +905,7 @@ pub async fn admin_user_create(
     Json(result.into()).into_response()
 }
 
-pub async fn admin_user_update(
-    State(state): State<AppState>,
-    Json(req): Json<OpReq>,
-) -> Response {
+pub async fn admin_user_update(State(state): State<AppState>, Json(req): Json<OpReq>) -> Response {
     let result: AppResult<serde_json::Value> = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
         let affected = sqlx::query(
@@ -893,7 +913,11 @@ pub async fn admin_user_update(
              balance = ?, tunnel_limit = ?, updated_at = ? WHERE code = ?",
         )
         .bind(&req.name)
-        .bind(if req.client_code.is_empty() { "user" } else { &req.client_code })
+        .bind(if req.client_code.is_empty() {
+            "user"
+        } else {
+            &req.client_code
+        })
         .bind(req.enable.unwrap_or(1))
         .bind(0i64)
         .bind(req.limiter.unwrap_or(0))
@@ -911,10 +935,7 @@ pub async fn admin_user_update(
     Json(result.into()).into_response()
 }
 
-pub async fn admin_user_delete(
-    State(state): State<AppState>,
-    Json(req): Json<OpReq>,
-) -> Response {
+pub async fn admin_user_delete(State(state): State<AppState>, Json(req): Json<OpReq>) -> Response {
     let result: AppResult<serde_json::Value> = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
         // 保护默认管理员

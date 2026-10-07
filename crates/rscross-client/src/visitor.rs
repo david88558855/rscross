@@ -67,25 +67,19 @@ impl Visitor {
 
     /// 处理单条访客连接
     async fn handle(&self, mut inbound: TcpStream) -> Result<()> {
-        let mut outbound = tokio::time::timeout(
-            Duration::from_secs(10),
-            TcpStream::connect(&self.target),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("连接目标超时"))?
-        .map_err(|e| anyhow::anyhow!("连接目标失败: {e}"))?;
+        let mut outbound =
+            tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&self.target))
+                .await
+                .map_err(|_| anyhow::anyhow!("连接目标超时"))?
+                .map_err(|e| anyhow::anyhow!("连接目标失败: {e}"))?;
 
         let _ = inbound.set_nodelay(true);
         let _ = outbound.set_nodelay(true);
 
         // 双向转发
-        let _ = rscross_tunnel::transport::relay_bidirectional(
-            &mut inbound,
-            &mut outbound,
-            None,
-            None,
-        )
-        .await;
+        let _ =
+            rscross_tunnel::transport::relay_bidirectional(&mut inbound, &mut outbound, None, None)
+                .await;
 
         Ok(())
     }
@@ -97,12 +91,7 @@ impl Visitor {
 }
 
 /// 从命令行参数构建访客
-pub fn from_args(
-    target: &str,
-    secret_key: &str,
-    bind_addr: &str,
-    server: &str,
-) -> Arc<Visitor> {
+pub fn from_args(target: &str, secret_key: &str, bind_addr: &str, server: &str) -> Arc<Visitor> {
     let (host, port) = server.rsplit_once(':').unwrap_or((server, "7000"));
     let cfg = ClientConfig {
         server_addr: host.to_string(),
@@ -115,16 +104,17 @@ pub fn from_args(
     services.set("visitor", svc);
 
     Arc::new(Visitor::new(
-        target,
-        secret_key,
-        bind_addr,
-        server,
-        services,
+        target, secret_key, bind_addr, server, services,
     ))
 }
 
 /// 构造访客注册消息
-pub fn visitor_payload(name: &str, server_name: &str, secret: &str, bind_port: u16) -> serde_json::Value {
+pub fn visitor_payload(
+    name: &str,
+    server_name: &str,
+    secret: &str,
+    bind_port: u16,
+) -> serde_json::Value {
     json!({
         "visitor_name": name,
         "server_name": server_name,

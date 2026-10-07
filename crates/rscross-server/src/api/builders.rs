@@ -18,9 +18,31 @@ pub fn limiter_string(limiter_kb: i32) -> String {
 #[allow(clippy::too_many_arguments)]
 pub async fn build_host_config(
     state: &AppState,
-    row: &(String, String, String, String, i32, String, String, i32, i32, i32),
+    row: &(
+        String,
+        String,
+        String,
+        String,
+        i32,
+        String,
+        String,
+        i32,
+        i32,
+        i32,
+    ),
 ) -> Option<ProxyConfigMsg> {
-    let (code, _name, target_ip, target_port, _https, domain_prefix, custom_domain, enc, comp, pool) = row;
+    let (
+        code,
+        _name,
+        target_ip,
+        target_port,
+        _https,
+        domain_prefix,
+        custom_domain,
+        enc,
+        comp,
+        pool,
+    ) = row;
 
     // 查节点信息
     let pool_db = state.db.sqlite_pool()?;
@@ -34,7 +56,9 @@ pub async fn build_host_config(
 
     let (node_code, node_ip, _http_port) = node?;
     let domain = if custom_domain.is_empty() {
-        format!("{domain_prefix}.{node_ip}").trim_matches('.').to_string()
+        format!("{domain_prefix}.{node_ip}")
+            .trim_matches('.')
+            .to_string()
     } else {
         custom_domain.clone()
     };
@@ -77,7 +101,11 @@ pub async fn build_forward_config(
             .flatten();
 
     let remote_port = rscross_common::util::str_must_int(port) as u16;
-    let proxy_type = if remote_port > 0 { ProxyType::Tcp } else { ProxyType::Tcp };
+    let proxy_type = if remote_port > 0 {
+        ProxyType::Tcp
+    } else {
+        ProxyType::Tcp
+    };
 
     Some(ProxyConfigMsg {
         name: format!("{code}_tcp"),

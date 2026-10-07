@@ -62,16 +62,10 @@ async fn main() {
     }
 
     // 访客模式
-    if let Some(Command::Visit {
-        target,
-        vkey,
-        bind,
-    }) = args.command
-    {
+    if let Some(Command::Visit { target, vkey, bind }) = args.command {
         let services = std::sync::Arc::new(rscross_client::registry::ServiceRegistry::new());
-        let visitor = rscross_client::visitor::Visitor::new(
-            &target, &vkey, &bind, &args.addr, services,
-        );
+        let visitor =
+            rscross_client::visitor::Visitor::new(&target, &vkey, &bind, &args.addr, services);
         if let Err(e) = std::sync::Arc::new(visitor).run().await {
             eprintln!("访客启动失败: {e}");
             std::process::exit(1);

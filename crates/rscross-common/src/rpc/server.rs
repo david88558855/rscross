@@ -49,10 +49,8 @@ impl RpcServer {
     where
         F: Fn(RpcContext) -> super::BoxFuture<AppReply> + Send + Sync + 'static,
     {
-        self.handlers.insert(
-            method.to_string(),
-            Arc::new(move |ctx| Box::pin(f(ctx))),
-        );
+        self.handlers
+            .insert(method.to_string(), Arc::new(move |ctx| Box::pin(f(ctx))));
         self
     }
 
@@ -124,9 +122,7 @@ impl RpcServer {
                         ftype: frame_type::PING,
                         id: None,
                         method: String::new(),
-                        payload: serde_json::Value::String(
-                            String::from_utf8_lossy(&p).to_string(),
-                        ),
+                        payload: serde_json::Value::String(String::from_utf8_lossy(&p).to_string()),
                     });
                     continue;
                 }
@@ -183,10 +179,7 @@ impl RpcServer {
                     ftype: frame_type::ERROR,
                     id: Some(id),
                     method: String::new(),
-                    payload: serde_json::Value::String(format!(
-                        "unknown method: {}",
-                        frame.method
-                    )),
+                    payload: serde_json::Value::String(format!("unknown method: {}", frame.method)),
                 });
             }
             tracing::warn!(method = %frame.method, "未注册的 RPC 方法");

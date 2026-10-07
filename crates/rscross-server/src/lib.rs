@@ -28,11 +28,7 @@ use crate::db::Database;
 /// 启动服务端
 pub async fn run() -> Result<()> {
     let cfg = config::ServerConfig::load()?;
-    rscross_common::logger::init(
-        Some(std::path::Path::new("logs")),
-        &cfg.log_level,
-        true,
-    )?;
+    rscross_common::logger::init(Some(std::path::Path::new("logs")), &cfg.log_level, true)?;
 
     tracing::info!(
         "rscross-server v{} 启动中，模式 {}",

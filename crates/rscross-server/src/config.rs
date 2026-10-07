@@ -13,12 +13,10 @@ pub struct ServerConfig {
 impl ServerConfig {
     /// 从文件或环境变量加载
     pub fn load() -> AppResult<Self> {
-        let path = std::env::var("RSC_CONFIG")
-            .ok()
-            .or_else(|| {
-                let p = std::path::Path::new("configs/config.yaml");
-                p.exists().then(|| p.to_string_lossy().to_string())
-            });
+        let path = std::env::var("RSC_CONFIG").ok().or_else(|| {
+            let p = std::path::Path::new("configs/config.yaml");
+            p.exists().then(|| p.to_string_lossy().to_string())
+        });
 
         Ok(Self {
             inner: rscross_common::config::load_server_config(path.as_deref())?,

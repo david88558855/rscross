@@ -102,9 +102,7 @@ enum SqlBind {
 
 /// 校验当前用户存在
 fn me(ext: &axum::http::Extensions) -> AppResult<UserAuth> {
-    ext.get::<UserAuth>()
-        .cloned()
-        .ok_or(AppError::Unauthorized)
+    ext.get::<UserAuth>().cloned().ok_or(AppError::Unauthorized)
 }
 
 /// 分页查询辅助
@@ -172,24 +170,25 @@ pub async fn normal_client_list(
 ) -> Response {
     let result: AppResult<serde_json::Value> = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
-        let rows: Vec<serde_json::Value> = sqlx::query_as::<_, (i64, String, String, String, i32, i32, i32)>(
-            "SELECT id, code, `key`, name, status, enable, node_limit
+        let rows: Vec<serde_json::Value> =
+            sqlx::query_as::<_, (i64, String, String, String, i32, i32, i32)>(
+                "SELECT id, code, `key`, name, status, enable, node_limit
              FROM gost_clients WHERE user_code = ? ORDER BY id",
-        )
-        .bind(&user.code)
-        .fetch_all(pool)
-        .await?
-        .into_iter()
-        .map(|(id, code, key, name, status, enable, node_limit)| {
-            let online = state.cache.is_client_online(&code);
-            json!({
-                "id": id, "code": code, "key": key, "name": name,
-                "status": status, "enable": enable, "nodeLimit": node_limit,
-                "online": online,
-                "version": state.cache.client_version(&code),
+            )
+            .bind(&user.code)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|(id, code, key, name, status, enable, node_limit)| {
+                let online = state.cache.is_client_online(&code);
+                json!({
+                    "id": id, "code": code, "key": key, "name": name,
+                    "status": status, "enable": enable, "nodeLimit": node_limit,
+                    "online": online,
+                    "version": state.cache.client_version(&code),
+                })
             })
-        })
-        .collect();
+            .collect();
         Ok(json!({ "list": rows }))
     }
     .await;
@@ -210,10 +209,11 @@ pub async fn normal_client_create(
             .await?
             .unwrap_or(3);
         if limit > 0 {
-            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM gost_clients WHERE user_code = ?")
-                .bind(&user.code)
-                .fetch_one(pool)
-                .await?;
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM gost_clients WHERE user_code = ?")
+                    .bind(&user.code)
+                    .fetch_one(pool)
+                    .await?;
             if count >= limit {
                 return Err(AppError::Conflict(format!("客户端数量已达上限 {limit}")));
             }
@@ -233,7 +233,11 @@ pub async fn normal_client_create(
         .bind(now)
         .bind(now)
         .bind(&key)
-        .bind(if req.name.is_empty() { "未命名客户端" } else { &req.name })
+        .bind(if req.name.is_empty() {
+            "未命名客户端"
+        } else {
+            &req.name
+        })
         .bind(&user.code)
         .execute(pool)
         .await?;
@@ -264,7 +268,13 @@ pub async fn normal_client_delete(
         state.engine.stop(&req.code, "客户端已删除");
 
         // 级联删除隧道
-        for t in ["gost_client_hosts", "gost_client_forwards", "gost_client_tunnels", "gost_client_p2_ps", "gost_client_proxies"] {
+        for t in [
+            "gost_client_hosts",
+            "gost_client_forwards",
+            "gost_client_tunnels",
+            "gost_client_p2_ps",
+            "gost_client_proxies",
+        ] {
             sqlx::query(&format!("DELETE FROM {t} WHERE client_code = ?"))
                 .bind(&req.code)
                 .execute(pool)
@@ -288,7 +298,12 @@ pub async fn normal_host_list(
     State(state): State<AppState>,
     Extension(user): Extension<UserAuth>,
 ) -> Response {
-    Json(list_tunnels(&state, &user.code, "gost_client_hosts").await.into()).into_response()
+    Json(
+        list_tunnels(&state, &user.code, "gost_client_hosts")
+            .await
+            .into(),
+    )
+    .into_response()
 }
 
 pub async fn normal_host_page(
@@ -337,7 +352,12 @@ pub async fn normal_forward_list(
     State(state): State<AppState>,
     Extension(user): Extension<UserAuth>,
 ) -> Response {
-    Json(list_tunnels(&state, &user.code, "gost_client_forwards").await.into()).into_response()
+    Json(
+        list_tunnels(&state, &user.code, "gost_client_forwards")
+            .await
+            .into(),
+    )
+    .into_response()
 }
 
 pub async fn normal_forward_page(
@@ -386,7 +406,12 @@ pub async fn normal_tunnel_list(
     State(state): State<AppState>,
     Extension(user): Extension<UserAuth>,
 ) -> Response {
-    Json(list_tunnels(&state, &user.code, "gost_client_tunnels").await.into()).into_response()
+    Json(
+        list_tunnels(&state, &user.code, "gost_client_tunnels")
+            .await
+            .into(),
+    )
+    .into_response()
 }
 
 pub async fn normal_tunnel_page(
@@ -435,7 +460,12 @@ pub async fn normal_p2p_list(
     State(state): State<AppState>,
     Extension(user): Extension<UserAuth>,
 ) -> Response {
-    Json(list_tunnels(&state, &user.code, "gost_client_p2_ps").await.into()).into_response()
+    Json(
+        list_tunnels(&state, &user.code, "gost_client_p2_ps")
+            .await
+            .into(),
+    )
+    .into_response()
 }
 
 pub async fn normal_p2p_page(
@@ -484,7 +514,12 @@ pub async fn normal_proxy_list(
     State(state): State<AppState>,
     Extension(user): Extension<UserAuth>,
 ) -> Response {
-    Json(list_tunnels(&state, &user.code, "gost_client_proxies").await.into()).into_response()
+    Json(
+        list_tunnels(&state, &user.code, "gost_client_proxies")
+            .await
+            .into(),
+    )
+    .into_response()
 }
 
 pub async fn normal_proxy_page(
@@ -548,12 +583,11 @@ pub async fn normal_node_config(
 ) -> Response {
     let result: AppResult<serde_json::Value> = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
-        let rows: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT code, name, content FROM gost_node_configs WHERE user_code = ?",
-        )
-        .bind(&user.code)
-        .fetch_all(pool)
-        .await?;
+        let rows: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT code, name, content FROM gost_node_configs WHERE user_code = ?")
+                .bind(&user.code)
+                .fetch_all(pool)
+                .await?;
         Ok(json!({ "list": rows }))
     }
     .await;
@@ -575,9 +609,11 @@ pub async fn normal_cfg_list(
         .fetch_all(pool)
         .await?
         .into_iter()
-        .map(|(code, name, content, ct)| json!({
-            "code": code, "name": name, "content": content, "contentType": ct
-        }))
+        .map(|(code, name, content, ct)| {
+            json!({
+                "code": code, "name": name, "content": content, "contentType": ct
+            })
+        })
         .collect();
         Ok(json!({ "list": rows }))
     }
@@ -626,9 +662,17 @@ pub async fn normal_cfg_create(
         .bind(&code)
         .bind(now)
         .bind(now)
-        .bind(if req.name.is_empty() { "未命名配置" } else { &req.name })
+        .bind(if req.name.is_empty() {
+            "未命名配置"
+        } else {
+            &req.name
+        })
         .bind(&req.content)
-        .bind(if req.content_type.is_empty() { "yaml" } else { &req.content_type })
+        .bind(if req.content_type.is_empty() {
+            "yaml"
+        } else {
+            &req.content_type
+        })
         .bind(&req.client_code)
         .bind(&user.code)
         .execute(pool)
@@ -705,7 +749,11 @@ pub async fn normal_cfg_delete(
 // ==================== 其他 ====================
 
 pub async fn normal_client_logger() -> Response {
-    (StatusCode::OK, Json(json!({"code": 0, "msg": "success", "data": {"list": []}}))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({"code": 0, "msg": "success", "data": {"list": []}})),
+    )
+        .into_response()
 }
 
 pub async fn normal_obs_page(
@@ -798,7 +846,11 @@ pub async fn normal_user_reset(
 // ==================== 通用隧道操作 ====================
 
 /// 列出隧道
-async fn list_tunnels(state: &AppState, user_code: &str, table: &str) -> AppResult<serde_json::Value> {
+async fn list_tunnels(
+    state: &AppState,
+    user_code: &str,
+    table: &str,
+) -> AppResult<serde_json::Value> {
     let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
     let sql = format!(
         "SELECT code, name, target_ip, target_port, node_code, client_code, enable, status
@@ -842,8 +894,11 @@ async fn page_tunnels(state: &AppState, user_code: &str, table: &str, q: PageQue
             "SELECT code, name, target_ip, target_port, node_code, client_code, enable, status
              FROM {table} WHERE {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
-        let mut list_q = sqlx::query_as::<_, (String, String, String, String, String, String, i32, i32)>(&list_sql)
-            .bind(user_code);
+        let mut list_q = sqlx::query_as::<
+            _,
+            (String, String, String, String, String, String, i32, i32),
+        >(&list_sql)
+        .bind(user_code);
         if let Some(kw) = &q.keyword {
             if !kw.is_empty() {
                 let like = format!("%{kw}%");
@@ -871,12 +926,7 @@ async fn page_tunnels(state: &AppState, user_code: &str, table: &str, q: PageQue
 }
 
 /// 创建隧道
-async fn create_tunnel(
-    state: &AppState,
-    user_code: &str,
-    table: &str,
-    req: OpReq,
-) -> Response {
+async fn create_tunnel(state: &AppState, user_code: &str, table: &str, req: OpReq) -> Response {
     let result: AppResult<serde_json::Value> = async {
         req.validate_target()?;
         if req.node_code.is_empty() {
@@ -1036,12 +1086,7 @@ async fn create_tunnel(
 }
 
 /// 更新隧道
-async fn update_tunnel(
-    state: &AppState,
-    user_code: &str,
-    table: &str,
-    req: OpReq,
-) -> Response {
+async fn update_tunnel(state: &AppState, user_code: &str, table: &str, req: OpReq) -> Response {
     let result: AppResult<serde_json::Value> = async {
         req.validate_target()?;
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
@@ -1075,12 +1120,7 @@ async fn update_tunnel(
 }
 
 /// 下发隧道配置
-async fn config_tunnel(
-    state: &AppState,
-    user_code: &str,
-    table: &str,
-    code: &str,
-) -> Response {
+async fn config_tunnel(state: &AppState, user_code: &str, table: &str, code: &str) -> Response {
     let _ = table;
     let result: AppResult<serde_json::Value> = async {
         // 查隧道归属的客户端
@@ -1106,12 +1146,7 @@ async fn config_tunnel(
 }
 
 /// 删除隧道
-async fn delete_tunnel(
-    state: &AppState,
-    user_code: &str,
-    table: &str,
-    code: &str,
-) -> Response {
+async fn delete_tunnel(state: &AppState, user_code: &str, table: &str, code: &str) -> Response {
     let result: AppResult<serde_json::Value> = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
 
@@ -1124,11 +1159,13 @@ async fn delete_tunnel(
         .fetch_optional(pool)
         .await?;
 
-        sqlx::query(&format!("DELETE FROM {table} WHERE code = ? AND user_code = ?"))
-            .bind(code)
-            .bind(user_code)
-            .execute(pool)
-            .await?;
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE code = ? AND user_code = ?"
+        ))
+        .bind(code)
+        .bind(user_code)
+        .execute(pool)
+        .await?;
 
         sqlx::query("DELETE FROM gost_auths WHERE tunnel_code = ?")
             .bind(code)

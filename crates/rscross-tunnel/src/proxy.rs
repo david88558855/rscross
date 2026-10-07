@@ -193,7 +193,9 @@ impl ProxyRegistry {
         let Some(entry) = self.resolve_by_domain(&lookup) else {
             tracing::debug!(host = %host, "vhost 未匹配到代理");
             let _ = stream
-                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
                 .await;
             return;
         };
@@ -290,9 +292,7 @@ pub async fn http_ok(stream: &mut TcpStream, body: &str) {
 }
 
 /// 读取一条控制流消息（供 vhost 与其他模块复用）
-pub async fn read_control_msg(
-    stream: &mut TcpStream,
-) -> Result<Option<Envelope>, String> {
+pub async fn read_control_msg(stream: &mut TcpStream) -> Result<Option<Envelope>, String> {
     msg::read_message(stream).await
 }
 

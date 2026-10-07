@@ -26,9 +26,12 @@ pub fn get(path: &str) -> Option<(Vec<u8>, &'static str)> {
     let clean = rscross_common::assets::normalize(path);
 
     if let Some(dir) = embedded() {
-        return dir
-            .get_file(&clean)
-            .map(|f| (f.contents().to_vec(), rscross_common::assets::mime_of(&clean)));
+        return dir.get_file(&clean).map(|f| {
+            (
+                f.contents().to_vec(),
+                rscross_common::assets::mime_of(&clean),
+            )
+        });
     }
 
     // 降级：读运行期目录

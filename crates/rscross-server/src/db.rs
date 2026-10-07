@@ -24,9 +24,8 @@ impl Database {
                 let path = &cfg.inner.sqlite_path;
                 if let Some(parent) = std::path::Path::new(path).parent() {
                     if !parent.as_os_str().is_empty() {
-                        std::fs::create_dir_all(parent).map_err(|e| {
-                            AppError::msg(format!("创建数据目录失败: {e}"))
-                        })?;
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| AppError::msg(format!("创建数据目录失败: {e}")))?;
                     }
                 }
                 let url = format!("sqlite://{path}?mode=rwc");
@@ -99,18 +98,14 @@ impl Database {
     pub async fn init_default_data(&self) -> AppResult<()> {
         // 默认管理员
         let exists: i64 = match self {
-            Database::Sqlite(p) => {
-                sqlx::query_scalar("SELECT COUNT(*) FROM system_users")
-                    .fetch_one(p)
-                    .await
-                    .unwrap_or(0)
-            }
-            Database::Mysql(p) => {
-                sqlx::query_scalar("SELECT COUNT(*) FROM system_users")
-                    .fetch_one(p)
-                    .await
-                    .unwrap_or(0)
-            }
+            Database::Sqlite(p) => sqlx::query_scalar("SELECT COUNT(*) FROM system_users")
+                .fetch_one(p)
+                .await
+                .unwrap_or(0),
+            Database::Mysql(p) => sqlx::query_scalar("SELECT COUNT(*) FROM system_users")
+                .fetch_one(p)
+                .await
+                .unwrap_or(0),
         };
 
         if exists == 0 {
@@ -178,15 +173,27 @@ impl Database {
         match self {
             Database::Sqlite(p) => {
                 sqlx::query(sql)
-                    .bind(&code).bind(now).bind(now)
-                    .bind(key).bind(value).bind(group).bind(key)
-                    .execute(p).await?;
+                    .bind(&code)
+                    .bind(now)
+                    .bind(now)
+                    .bind(key)
+                    .bind(value)
+                    .bind(group)
+                    .bind(key)
+                    .execute(p)
+                    .await?;
             }
             Database::Mysql(p) => {
                 sqlx::query(sql)
-                    .bind(&code).bind(now).bind(now)
-                    .bind(key).bind(value).bind(group).bind(key)
-                    .execute(p).await?;
+                    .bind(&code)
+                    .bind(now)
+                    .bind(now)
+                    .bind(key)
+                    .bind(value)
+                    .bind(group)
+                    .bind(key)
+                    .execute(p)
+                    .await?;
             }
         }
         Ok(())

@@ -373,10 +373,7 @@ mod tests {
         };
         assert_eq!(cfg.proxy_type_enum(), Some(ProxyType::Tcp));
 
-        let env = Envelope::new(
-            msg_type::NEW_PROXY,
-            serde_json::to_value(&cfg).unwrap(),
-        );
+        let env = Envelope::new(msg_type::NEW_PROXY, serde_json::to_value(&cfg).unwrap());
         let back: ProxyConfigMsg = env.parse().unwrap();
         assert_eq!(back.remote_port, 9000);
     }

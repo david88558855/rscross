@@ -118,8 +118,8 @@ impl RateLimiter {
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(self.last).as_secs_f64();
         if elapsed > 0.0 {
-            self.tokens = (self.tokens + elapsed * self.bytes_per_sec as f64)
-                .min(self.capacity as f64);
+            self.tokens =
+                (self.tokens + elapsed * self.bytes_per_sec as f64).min(self.capacity as f64);
             self.last = now;
         }
     }
@@ -211,10 +211,7 @@ impl Compressor {
         while i < data.len() {
             let b = data[i];
             let mut run = 1u8;
-            while (i + run as usize) < data.len()
-                && data[i + run as usize] == b
-                && run < 255
-            {
+            while (i + run as usize) < data.len() && data[i + run as usize] == b && run < 255 {
                 run += 1;
             }
             if run >= 4 {
@@ -336,7 +333,9 @@ mod tests {
 
         let counter = Arc::new(TrafficCounter::new());
         let c2 = counter.clone();
-        let (_, _) = relay_bidirectional(a_read, b_write, None, Some(c2)).await.unwrap();
+        let (_, _) = relay_bidirectional(a_read, b_write, None, Some(c2))
+            .await
+            .unwrap();
 
         let mut out = Vec::new();
         b_read.read_to_end(&mut out).await.unwrap();

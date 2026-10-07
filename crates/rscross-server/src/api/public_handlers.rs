@@ -10,9 +10,7 @@ use rscross_common::response::ApiResponse;
 use crate::AppState;
 
 /// 公开系统配置（登录页使用）
-pub async fn public_config(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<serde_json::Value>> {
+pub async fn public_config(State(state): State<AppState>) -> Json<ApiResponse<serde_json::Value>> {
     let result = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
         let rows: Vec<(String, String, String)> =
@@ -37,9 +35,7 @@ pub async fn public_config(
 }
 
 /// 公开公告
-pub async fn public_notice(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<serde_json::Value>> {
+pub async fn public_notice(State(state): State<AppState>) -> Json<ApiResponse<serde_json::Value>> {
     let result: AppResult<serde_json::Value> = async {
         let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
         let rows: Vec<(String, String)> = sqlx::query_as(

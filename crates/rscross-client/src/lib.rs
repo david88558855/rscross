@@ -48,10 +48,7 @@ pub fn build_urls(addr: &str, tls: bool) -> (String, String) {
         } else {
             ("http", "ws")
         };
-        return (
-            format!("{s}://{rest}"),
-            format!("{w}://{rest}"),
-        );
+        return (format!("{s}://{rest}"), format!("{w}://{rest}"));
     }
     (
         format!("{scheme}://{addr}"),

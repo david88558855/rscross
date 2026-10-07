@@ -13,9 +13,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::config::ServerConfig;
-use crate::msg::{self, msg_type, CloseProxy, CloseProxyResp, Envelope, Login, LoginResp,
-                 NewProxy, NewProxyResp, NewWorkConn, NewWorkConnResp, Ping, Pong,
-                 ProxyConfigMsg};
+use crate::msg::{
+    self, msg_type, CloseProxy, CloseProxyResp, Envelope, Login, LoginResp, NewProxy, NewProxyResp,
+    NewWorkConn, NewWorkConnResp, Ping, Pong, ProxyConfigMsg,
+};
 use crate::proxy::ProxyRegistry;
 use crate::transport::TrafficCounter;
 
@@ -158,7 +159,11 @@ impl HubServer {
     }
 
     /// 处理一条新连接
-    async fn handle_conn(self: Arc<Self>, stream: TcpStream, peer: SocketAddr) -> Result<(), String> {
+    async fn handle_conn(
+        self: Arc<Self>,
+        stream: TcpStream,
+        peer: SocketAddr,
+    ) -> Result<(), String> {
         // 首包必须是登录请求
         let login = match msg::read_message(&mut &stream).await? {
             Some(env) if env.msg_type == msg_type::LOGIN => {
@@ -357,11 +362,7 @@ impl HubServer {
                     match self.alloc_port() {
                         Some(p) => assigned_port = p,
                         None => {
-                            self.reply_error(
-                                session,
-                                msg_type::NEW_PROXY_RESP,
-                                "没有可用端口",
-                            );
+                            self.reply_error(session, msg_type::NEW_PROXY_RESP, "没有可用端口");
                             return;
                         }
                     }
@@ -382,7 +383,9 @@ impl HubServer {
             self.remove_proxy(&cfg.name);
         }
 
-        let entry = self.registry.register(cfg.name.clone(), session.login_id.clone(), &cfg);
+        let entry = self
+            .registry
+            .register(cfg.name.clone(), session.login_id.clone(), &cfg);
         if entry.is_err() {
             self.reply_error(
                 session,
@@ -396,7 +399,8 @@ impl HubServer {
         // TCP/UDP 监听远程端口
         if assigned_port > 0 {
             if let Some(pt) = cfg.proxy_type_enum() {
-                if !pt.is_vhost() && !matches!(pt, crate::ProxyType::Stcp | crate::ProxyType::Xtcp) {
+                if !pt.is_vhost() && !matches!(pt, crate::ProxyType::Stcp | crate::ProxyType::Xtcp)
+                {
                     self.port_index.insert(assigned_port, cfg.name.clone());
                     let s = self.clone();
                     let name = cfg.name.clone();
@@ -475,9 +479,7 @@ impl HubServer {
         // 申请一条工作连接
         let conn_id = uuid::Uuid::new_v4().to_string();
         let (work_tx, mut work_rx) = mpsc::unbounded_channel();
-        session
-            .work_conn_waiters
-            .insert(conn_id.clone(), work_tx);
+        session.work_conn_waiters.insert(conn_id.clone(), work_tx);
 
         let req = Envelope::new(
             msg_type::NEW_WORK_CONN,

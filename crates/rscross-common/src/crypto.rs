@@ -157,9 +157,7 @@ pub fn jwt_decode(token: &str, secret: &str) -> AppResult<JwtPayload> {
     )
     .map(|d| d.claims)
     .map_err(|e| match e.kind() {
-        jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
-            AppError::Unauthorized
-        }
+        jsonwebtoken::errors::ErrorKind::ExpiredSignature => AppError::Unauthorized,
         _ => AppError::Unauthorized,
     })
 }

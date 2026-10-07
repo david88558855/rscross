@@ -79,7 +79,11 @@ impl Node {
         }
 
         tracing::info!(
-            mode = if self.state.config.node { "节点" } else { "客户端" },
+            mode = if self.state.config.node {
+                "节点"
+            } else {
+                "客户端"
+            },
             "注册成功"
         );
         self.state.state.set_running("__session__", "");

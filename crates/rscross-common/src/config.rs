@@ -160,9 +160,7 @@ pub fn load_server_config(path: Option<&str>) -> AppResult<ServerConfig> {
             cfg.jwt_secret = crate::util::random_hex(32);
             tracing::warn!("未配置 jwt_secret，已自动生成（重启后 token 会失效）");
         } else {
-            return Err(AppError::Config(
-                "生产模式必须配置 jwt_secret".to_string(),
-            ));
+            return Err(AppError::Config("生产模式必须配置 jwt_secret".to_string()));
         }
     }
 

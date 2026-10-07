@@ -46,13 +46,10 @@ impl Default for ClientConfig {
 impl ClientConfig {
     /// 从配置文件或环境变量加载
     pub fn load() -> Result<Self> {
-        let mut cfg = match std::env::var("RSC_CLIENT_CONFIG")
-            .ok()
-            .or_else(|| {
-                let p = std::path::Path::new("configs/client.yaml");
-                p.exists().then(|| p.to_string_lossy().to_string())
-            })
-        {
+        let mut cfg = match std::env::var("RSC_CLIENT_CONFIG").ok().or_else(|| {
+            let p = std::path::Path::new("configs/client.yaml");
+            p.exists().then(|| p.to_string_lossy().to_string())
+        }) {
             Some(path) => {
                 let content = std::fs::read_to_string(&path)
                     .with_context(|| format!("读取客户端配置 {path} 失败"))?;

@@ -24,6 +24,7 @@ toml = { workspace = true }
 
 sqlx = { workspace = true }
 jsonwebtoken = { workspace = true }
+argon2 = { workspace = true }
 
 anyhow = { workspace = true }
 thiserror = { workspace = true }

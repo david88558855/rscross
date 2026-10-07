@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use rscross_tunnel::{ClientConfig, AgentService, HubServer, ServiceRegistry};
+use rscross_tunnel::{AgentService, ClientConfig, HubServer, ServiceRegistry};
 
 use rscross_common::error::AppResult;
 
@@ -47,7 +47,8 @@ impl EngineInstance {
 }
 
 /// 引擎注册表
-pub struct EngineRegistry {    /// 编号 -> 引擎实例
+pub struct EngineRegistry {
+    /// 编号 -> 引擎实例
     instances: DashMap<String, Arc<parking_lot::Mutex<EngineInstance>>>,
     /// 按 key 查编号
     key_index: DashMap<String, String>,

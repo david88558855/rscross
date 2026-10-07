@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use rscross_common::rpc::RpcClient;
 use rscross_tunnel::msg::{ProxyConfigMsg, TransportConfig};
-use rscross_tunnel::{ClientConfig, AgentService, ProxyType};
+use rscross_tunnel::{AgentService, ClientConfig, ProxyType};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -314,11 +314,15 @@ async fn handle_forward_config(state: AppState, payload: Value) -> Result<(), St
 
     let mut count = 0;
     if !req.tcp.is_empty() {
-        svc.add_proxy(req.tcp.to_msg(&node_code)).await.map_err(|e| e.to_string())?;
+        svc.add_proxy(req.tcp.to_msg(&node_code))
+            .await
+            .map_err(|e| e.to_string())?;
         count += 1;
     }
     if !req.udp.is_empty() {
-        svc.add_proxy(req.udp.to_msg(&node_code)).await.map_err(|e| e.to_string())?;
+        svc.add_proxy(req.udp.to_msg(&node_code))
+            .await
+            .map_err(|e| e.to_string())?;
         count += 1;
     }
 

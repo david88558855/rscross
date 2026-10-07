@@ -17,14 +17,14 @@ fn ok() -> Json<ApiResponse<serde_json::Value>> {
 }
 
 fn fail(msg: &str) -> Json<ApiResponse<serde_json::Value>> {
-    Json(ApiResponse::fail(
-        rscross_common::ErrorCode::Failed,
-        msg,
-    ))
+    Json(ApiResponse::fail(rscross_common::ErrorCode::Failed, msg))
 }
 
 /// Login 回调：节点服务校验客户端令牌
-pub async fn node_auth_callback(State(state): State<AppState>, body: Bytes) -> Json<ApiResponse<serde_json::Value>> {
+pub async fn node_auth_callback(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Json<ApiResponse<serde_json::Value>> {
     let payload: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => return fail("invalid payload"),
@@ -42,13 +42,12 @@ pub async fn node_auth_callback(State(state): State<AppState>, body: Bytes) -> J
     };
 
     // node_code 即用户 token
-    let valid: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM gost_nodes WHERE code = ? AND status = 1",
-    )
-    .bind(node_code)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0);
+    let valid: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM gost_nodes WHERE code = ? AND status = 1")
+            .bind(node_code)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
 
     if valid == 0 {
         return fail("node not found or disabled");

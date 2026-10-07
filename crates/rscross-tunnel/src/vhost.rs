@@ -44,15 +44,13 @@ impl VhostRouter {
     /// 处理单个 HTTP 连接
     async fn handle_http(&self, mut stream: TcpStream, _peer: std::net::SocketAddr) {
         let mut buf = vec![0u8; 16 * 1024];
-        let n = match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            stream.read(&mut buf),
-        )
-        .await
-        {
-            Ok(Ok(n)) if n > 0 => n,
-            _ => return,
-        };
+        let n =
+            match tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut buf))
+                .await
+            {
+                Ok(Ok(n)) if n > 0 => n,
+                _ => return,
+            };
 
         let req = String::from_utf8_lossy(&buf[..n]).to_string();
         let Some(host) = crate::proxy::parse_host(&req) else {

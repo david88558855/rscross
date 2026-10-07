@@ -47,8 +47,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/public/node/newProxy", post(node_proxy_callback))
         .route("/api/v1/public/node/closeProxy", post(node_close_callback))
         .route("/api/v1/public/node/ping", post(node_ping_callback))
-        .route("/api/v1/public/node/newWorkConn", post(node_workconn_callback))
-        .route("/api/v1/public/node/newUserConn", post(node_userconn_callback));
+        .route(
+            "/api/v1/public/node/newWorkConn",
+            post(node_workconn_callback),
+        )
+        .route(
+            "/api/v1/public/node/newUserConn",
+            post(node_userconn_callback),
+        );
 
     // ---- 认证接口 ----
     app = app
@@ -104,7 +110,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/system/notice", post(normal_notice))
         .route("/system/user/info", post(normal_user_info))
         .route("/system/user/reset", post(normal_user_reset))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .route("/health", get(|| async { "ok" }));
 
     app = app.nest("/api/v1/normal", normal);
@@ -114,9 +123,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/dashboard/count", post(admin_dashboard_count))
         .route("/dashboard/userObs", post(admin_dashboard_user_obs))
         .route("/dashboard/nodeObs", post(admin_dashboard_node_obs))
-        .route("/dashboard/userObsDate", post(admin_dashboard_user_obs_date))
-        .route("/dashboard/nodeObsDate", post(admin_dashboard_node_obs_date))
-        .route("/dashboard/clientObsDate", post(admin_dashboard_client_obs_date))
+        .route(
+            "/dashboard/userObsDate",
+            post(admin_dashboard_user_obs_date),
+        )
+        .route(
+            "/dashboard/nodeObsDate",
+            post(admin_dashboard_node_obs_date),
+        )
+        .route(
+            "/dashboard/clientObsDate",
+            post(admin_dashboard_client_obs_date),
+        )
         .route(
             "/dashboard/clientHostObsDate",
             post(admin_dashboard_host_obs_date),
@@ -204,10 +222,7 @@ pub fn build_router(state: AppState) -> Router {
     app = app.nest("/api/v1/admin", admin);
 
     // ---- RPC WebSocket ----
-    app = app.route(
-        "/rpc/ws",
-        get(rpc_ws_handler).with_state(state.clone()),
-    );
+    app = app.route("/rpc/ws", get(rpc_ws_handler).with_state(state.clone()));
 
     // ---- 全局中间件与静态资源 ----
     app = app
@@ -220,11 +235,7 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// 鉴权中间件：解析 JWT 并注入上下文
-async fn auth_middleware(
-    State(state): State<AppState>,
-    mut req: Request,
-    next: Next,
-) -> Response {
+async fn auth_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let Some(token) = extract_token(&req) else {
         return unauthorized("缺少登录凭证");
     };
@@ -241,11 +252,7 @@ async fn auth_middleware(
 }
 
 /// 管理员鉴权
-async fn admin_middleware(
-    State(state): State<AppState>,
-    mut req: Request,
-    next: Next,
-) -> Response {
+async fn admin_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let Some(token) = extract_token(&req) else {
         return unauthorized("缺少登录凭证");
     };
@@ -332,8 +339,7 @@ async fn static_handler(uri: axum::http::Uri) -> Response {
             // SPA 路由回退到 index.html
             if rscross_common::assets::is_spa_route(path) {
                 if let Some((bytes, mime)) = assets::get("/index.html") {
-                    return ([(axum::http::header::CONTENT_TYPE, mime)], bytes)
-                        .into_response();
+                    return ([(axum::http::header::CONTENT_TYPE, mime)], bytes).into_response();
                 }
             }
             Html("<h1>rscross</h1><p>前端资源未构建，请先执行 npm run build 并运行 scripts/embed-web.sh</p>")
@@ -382,16 +388,16 @@ pub fn err(msg: impl Into<String>) -> Response {
 // ==================== 处理器实现 ====================
 // 详见 handlers 子模块
 
-mod auth_handlers;
-mod normal_handlers;
 mod admin_handlers;
-mod public_handlers;
-mod callback_handlers;
+mod auth_handlers;
 mod builders;
+mod callback_handlers;
+mod normal_handlers;
+mod public_handlers;
 
-pub use auth_handlers::*;
-pub use normal_handlers::*;
 pub use admin_handlers::*;
-pub use public_handlers::*;
-pub use callback_handlers::*;
+pub use auth_handlers::*;
 pub use builders::*;
+pub use callback_handlers::*;
+pub use normal_handlers::*;
+pub use public_handlers::*;

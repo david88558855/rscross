@@ -228,7 +228,10 @@ impl RpcClient {
     ) -> Result<Value, String> {
         let mut last_err = String::new();
         for i in 0..=times {
-            match self.call_with_timeout(method, payload.clone(), self.timeout).await {
+            match self
+                .call_with_timeout(method, payload.clone(), self.timeout)
+                .await
+            {
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     tracing::warn!(method, error = %e, attempt = i, "调用失败");
@@ -255,7 +258,7 @@ impl RpcClient {
     pub fn start_dispatch(mut self) -> DispatchHandle {
         let pending = self.pending.clone();
         let push_handler = self.push_handler.clone();
-        let inbox = std::mem::replace(
+        let mut inbox = std::mem::replace(
             &mut self.inbox,
             mpsc::unbounded_channel().1, // 占位通道，稍后被丢弃
         );
@@ -267,11 +270,7 @@ impl RpcClient {
                     frame_type::REPLY | frame_type::ERROR => {
                         if let Some(id) = frame.id {
                             if frame.ftype == frame_type::ERROR {
-                                let msg = frame
-                                    .payload
-                                    .as_str()
-                                    .unwrap_or("未知错误")
-                                    .to_string();
+                                let msg = frame.payload.as_str().unwrap_or("未知错误").to_string();
                                 pending.complete(id, Value::String(msg));
                             } else {
                                 pending.complete(id, frame.payload);

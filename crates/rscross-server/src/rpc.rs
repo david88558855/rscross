@@ -92,7 +92,10 @@ impl Cache {
     }
 
     pub fn client_version(&self, code: &str) -> String {
-        self.versions.get(code).map(|v| v.value().clone()).unwrap_or_default()
+        self.versions
+            .get(code)
+            .map(|v| v.value().clone())
+            .unwrap_or_default()
     }
 
     pub fn set_version(&self, code: &str, v: &str) {
@@ -315,13 +318,12 @@ async fn handle_client_reg(state: AppState, ctx: RpcContext) -> Result<serde_jso
     let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
 
     // 查客户端
-    let row: Option<(i64, String, String, i32)> = sqlx::query_as(
-        "SELECT id, code, user_code, status FROM gost_clients WHERE `key` = ?",
-    )
-    .bind(&req.key)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let row: Option<(i64, String, String, i32)> =
+        sqlx::query_as("SELECT id, code, user_code, status FROM gost_clients WHERE `key` = ?")
+            .bind(&req.key)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     let Some((_, code, user_code, status)) = row else {
         return Err("客户端不存在".to_string());
@@ -444,14 +446,15 @@ pub async fn dispatch_all_client_config(state: &AppState, client_code: &str) {
     };
 
     // 域名隧道
-    if let Ok(rows) = sqlx::query_as::<_, (String, String, String, String, i32, i32, i32, i32, i32, i32)>(
-        "SELECT code, name, target_ip, target_port, target_https, domain_prefix, custom_domain,
+    if let Ok(rows) =
+        sqlx::query_as::<_, (String, String, String, String, i32, i32, i32, i32, i32, i32)>(
+            "SELECT code, name, target_ip, target_port, target_https, domain_prefix, custom_domain,
                 use_encryption, use_compression, pool_count
          FROM gost_client_hosts WHERE client_code = ? AND enable = 1",
-    )
-    .bind(client_code)
-    .fetch_all(pool)
-    .await
+        )
+        .bind(client_code)
+        .fetch_all(pool)
+        .await
     {
         for r in rows {
             if let Some(cfg) = crate::api::build_host_config(state, &r).await {
@@ -551,7 +554,10 @@ pub fn spawn_register_timeout_check() {
 /// 供 API 层查询在线状态
 pub fn online_summary(cache: &Cache) -> HashMap<String, bool> {
     let mut m = HashMap::new();
-    m.insert("clients".to_string(), cache.stats().0 as i64 as u32 as u32 != 0);
+    m.insert(
+        "clients".to_string(),
+        cache.stats().0 as i64 as u32 as u32 != 0,
+    );
     m
 }
 

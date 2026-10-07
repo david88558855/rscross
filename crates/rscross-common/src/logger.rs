@@ -20,9 +20,7 @@ pub fn init(log_dir: Option<&Path>, level: &str, to_stdout: bool) -> anyhow::Res
         .add_directive("tower_http=info".parse()?)
         .add_directive("rsc=info".parse()?);
 
-    let console_layer = fmt::layer()
-        .with_target(true)
-        .with_ansi(to_stdout);
+    let console_layer = fmt::layer().with_target(true).with_ansi(to_stdout);
 
     match log_dir {
         Some(dir) => {

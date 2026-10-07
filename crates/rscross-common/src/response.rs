@@ -39,7 +39,11 @@ impl ApiResponse<serde_json::Value> {
         let m = msg.into();
         Self {
             code: code.as_i32(),
-            msg: if m.is_empty() { code.message().to_string() } else { m },
+            msg: if m.is_empty() {
+                code.message().to_string()
+            } else {
+                m
+            },
             data: None,
         }
     }
@@ -129,8 +133,7 @@ impl PageQuery {
 
 fn is_valid_identifier(s: &str) -> bool {
     !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !s.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 

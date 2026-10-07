@@ -22,10 +22,7 @@ pub enum HoleResult {
 }
 
 /// STUN 服务器地址
-pub const DEFAULT_STUN_SERVERS: &[&str] = &[
-    "stun.l.google.com:19302",
-    "stun.cloudflare.com:3478",
-];
+pub const DEFAULT_STUN_SERVERS: &[&str] = &["stun.l.google.com:19302", "stun.cloudflare.com:3478"];
 
 /// 发现本机候选地址
 ///
@@ -100,11 +97,7 @@ pub fn parse_stun_response(data: &[u8]) -> Option<String> {
                 for i in 0..4 {
                     ip[i] = data[offset + 4 + i] ^ cookie[i];
                 }
-                return Some(format!(
-                    "{}:{}",
-                    std::net::Ipv4Addr::from(ip),
-                    xport
-                ));
+                return Some(format!("{}:{}", std::net::Ipv4Addr::from(ip), xport));
             }
         }
         // 对齐到 4 字节边界

@@ -44,7 +44,10 @@ pub struct ResetReq {
 }
 
 /// 登录
-pub async fn auth_login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> Json<ApiResponse<serde_json::Value>> {
+pub async fn auth_login(
+    State(state): State<AppState>,
+    Json(req): Json<LoginReq>,
+) -> Json<ApiResponse<serde_json::Value>> {
     Json(login_handler(state, req).await.into())
 }
 
@@ -55,12 +58,11 @@ async fn login_handler(state: AppState, req: LoginReq) -> AppResult<serde_json::
 
     let pool = state.db.sqlite_pool().ok_or("仅支持 SQLite")?;
 
-    let row: Option<(String, String, String, i32)> = sqlx::query_as(
-        "SELECT code, password, role, status FROM system_users WHERE username = ?",
-    )
-    .bind(&req.username)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(String, String, String, i32)> =
+        sqlx::query_as("SELECT code, password, role, status FROM system_users WHERE username = ?")
+            .bind(&req.username)
+            .fetch_optional(pool)
+            .await?;
 
     let Some((code, hash, role, status)) = row else {
         return Err(AppError::invalid("用户名或密码错误"));

@@ -11,8 +11,10 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::config::ClientConfig;
-use crate::msg::{self, msg_type, CloseProxy, Envelope, Login, LoginResp, NewProxy,
-                 NewProxyResp, NewWorkConn, Ping, Pong, ProxyConfigMsg};
+use crate::msg::{
+    self, msg_type, CloseProxy, Envelope, Login, LoginResp, NewProxy, NewProxyResp, NewWorkConn,
+    Ping, Pong, ProxyConfigMsg,
+};
 use crate::transport::TrafficCounter;
 use crate::ProxyType;
 
@@ -100,7 +102,10 @@ impl AgentService {
 
         let env = Envelope::new(
             msg_type::NEW_PROXY,
-            serde_json::to_value(NewProxy { config: cfg.clone() }).unwrap(),
+            serde_json::to_value(NewProxy {
+                config: cfg.clone(),
+            })
+            .unwrap(),
         );
         tx.send(env).map_err(|_| "发送代理配置失败".to_string())?;
 
@@ -272,7 +277,10 @@ impl AgentService {
                     if let Some(tx) = self.control_tx.read().clone() {
                         let _ = tx.send(Envelope::new(
                             msg_type::PONG,
-                            serde_json::to_value(Pong { interval: p.interval }).unwrap(),
+                            serde_json::to_value(Pong {
+                                interval: p.interval,
+                            })
+                            .unwrap(),
                         ));
                     }
                 }
@@ -376,9 +384,11 @@ impl AgentService {
         };
 
         // 解析本地地址
-        let Ok(local_addr) = local_socket.connect(&local.parse().unwrap_or_else(|_| {
-            "127.0.0.1:0".parse().unwrap()
-        })) else {
+        let Ok(local_addr) = local_socket.connect(
+            &local
+                .parse()
+                .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
+        ) else {
             tracing::error!("UDP 连接本地服务失败: {local}");
             return;
         };
@@ -408,7 +418,12 @@ pub fn make_proxy_name(code: &str, suffix: &str) -> String {
 }
 
 /// 依据类型构造默认代理配置
-pub fn default_proxy_config(name: &str, pt: ProxyType, local_ip: &str, local_port: u16) -> ProxyConfigMsg {
+pub fn default_proxy_config(
+    name: &str,
+    pt: ProxyType,
+    local_ip: &str,
+    local_port: u16,
+) -> ProxyConfigMsg {
     ProxyConfigMsg {
         name: name.to_string(),
         proxy_type: pt.as_str().to_string(),

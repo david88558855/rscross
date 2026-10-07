@@ -213,15 +213,21 @@ jobs:
     needs: check
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    env:
+      # secrets 只能用于 job 级 env，不能直接用于 step 级 if
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+      IMAGE_SERVER: ${{ vars.DOCKER_IMAGE_SERVER || 'david88558855/rscross-server' }}
+      IMAGE_CLIENT: ${{ vars.DOCKER_IMAGE_CLIENT || 'david88558855/rscross-client' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Login Docker
-        if: secrets.DOCKER_USERNAME != ''
+        if: env.DOCKER_USERNAME != ''
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKER_PASSWORD }}
 
       - uses: actions/setup-go@v5
         with:
@@ -250,26 +256,26 @@ jobs:
           echo "TAG=${TAG_NAME:-latest}" >> $GITHUB_ENV
 
       - name: Docker buildx server
-        if: secrets.DOCKER_USERNAME != ''
+        if: env.DOCKER_USERNAME != ''
         run: |
           docker buildx create --name rscross-builder --use
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             -f docker/Dockerfile.server \
-            -t ${{ vars.DOCKER_IMAGE_SERVER || 'david88558855/rscross-server' }}:latest \
-            -t ${{ vars.DOCKER_IMAGE_SERVER || 'david88558855/rscross-server' }}:${{ env.TAG }} \
+            -t "$IMAGE_SERVER:latest" \
+            -t "$IMAGE_SERVER:${TAG:-latest}" \
             --push .
           docker buildx rm rscross-builder
 
       - name: Docker buildx client
-        if: secrets.DOCKER_USERNAME != ''
+        if: env.DOCKER_USERNAME != ''
         run: |
           docker buildx create --name rscross-client-builder --use
           docker buildx build \
             --platform linux/amd64,linux/arm64,linux/arm/v7 \
             -f docker/Dockerfile.client \
-            -t ${{ vars.DOCKER_IMAGE_CLIENT || 'david88558855/rscross-client' }}:latest \
-            -t ${{ vars.DOCKER_IMAGE_CLIENT || 'david88558855/rscross-client' }}:${{ env.TAG }} \
+            -t "$IMAGE_CLIENT:latest" \
+            -t "$IMAGE_CLIENT:${TAG:-latest}" \
             --push .
           docker buildx rm rscross-client-builder
 

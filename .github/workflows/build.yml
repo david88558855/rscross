@@ -105,7 +105,6 @@ jobs:
         run: |
           cargo build \
             --release \
-            --locked \
             -p rscross-server \
             --target ${{ matrix.target }}
 
@@ -170,7 +169,6 @@ jobs:
         run: |
           cargo build \
             --release \
-            --locked \
             -p rscross-client \
             --target ${{ matrix.target }}
 

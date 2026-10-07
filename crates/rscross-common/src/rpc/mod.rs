@@ -1,13 +1,13 @@
 //! RPC 传输层：WebSocket 上的请求/响应 RPC
 //!
-//! 替代原项目的 `github.com/lesismal/arpc`。协议保持等价语义：
+//! rscross 自研的控制面协议，语义如下：
 //! - 传输：WebSocket（文本帧，JSON 编码）
 //! - 调用：`call(method, payload) -> reply`，支持超时
 //! - 通知：`notify(method, payload)`，无响应
 //! - 双向：同一连接上服务端可主动下发指令（`ServerPush`）
 //!
-//! 服务端维护连接级上下文（key/code/userCode 等），与原 arpc 的
-//! `client.Set/Get` 语义一致。
+//! 服务端维护连接级上下文（key/code/userCode 等），
+//! 供各处理函数读取当前连接的身份信息。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -675,7 +675,7 @@ pub async fn normal_cfg_config(
 ) -> Response {
     let _ = &user;
     let result: AppResult<serde_json::Value> = async {
-        if let Some(svc) = state.engine.tunnel 客户端(&req.client_code) {
+        if let Some(svc) = state.engine.agent(&req.client_code) {
             let _ = svc.stop();
         }
         Ok(json!({ "success": true, "message" => "配置已生效" }))
@@ -1137,7 +1137,7 @@ async fn delete_tunnel(
 
         // 通知客户端移除代理
         if let Some(cc) = client_code {
-            if let Some(svc) = state.engine.tunnel 客户端(&cc) {
+            if let Some(svc) = state.engine.agent(&cc) {
                 let _ = svc.remove_proxy(code).await;
             }
         }

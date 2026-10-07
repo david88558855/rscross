@@ -1,4 +1,4 @@
-//! 隧道服务注册表：管理 key -> tunnel 客户端 服务的映射
+//! 隧道服务注册表：管理 key -> agent 服务的映射
 
 use std::sync::Arc;
 

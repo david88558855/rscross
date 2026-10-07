@@ -387,7 +387,7 @@ async fn handle_node_reg(state: AppState, ctx: RpcContext) -> Result<serde_json:
     let server_port = rscross_common::util::str_must_int(&port) as u16;
     let http_vport = rscross_common::util::str_must_int(&http_port) as u16;
 
-    // 启动 tunnel 节点服务
+    // 启动 hub
     let tunnel_cfg = rscross_tunnel::ServerConfig {
         auth_token: code.clone(),
         bind_addr: "0.0.0.0".to_string(),
@@ -410,11 +410,11 @@ async fn handle_node_reg(state: AppState, ctx: RpcContext) -> Result<serde_json:
     let mut tunnel_cfg = tunnel_cfg;
     tunnel_cfg.http_plugin_addr = base_url;
 
-    let tunnel 节点服务 = state.engine.register_node(&code, &req.key, tunnel_cfg);
-    let srv = tunnel 节点服务.clone();
+    let hub = state.engine.register_node(&code, &req.key, tunnel_cfg);
+    let srv = hub.clone();
     tokio::spawn(async move {
         if let Err(e) = srv.serve().await {
-            tracing::error!(code = %code, error = %e, "tunnel 节点服务 启动失败");
+            tracing::error!(code = %code, error = %e, "hub 启动失败");
         }
     });
 
@@ -429,7 +429,7 @@ async fn handle_node_reg(state: AppState, ctx: RpcContext) -> Result<serde_json:
     // 下发节点配置
     dispatch_node_config(&state, &code).await;
 
-    tracing::info!(code = %code, "节点注册成功，tunnel 节点服务 启动于端口 {server_port}");
+    tracing::info!(code = %code, "节点注册成功，hub 启动于端口 {server_port}");
     Ok(serde_json::json!("success"))
 }
 
@@ -438,7 +438,7 @@ pub async fn dispatch_all_client_config(state: &AppState, client_code: &str) {
     let Some(pool) = state.db.sqlite_pool() else {
         return;
     };
-    let Some(svc) = state.engine.tunnel 客户端(client_code) else {
+    let Some(svc) = state.engine.agent(client_code) else {
         tracing::debug!(client_code, "客户端不在线，跳过配置下发");
         return;
     };

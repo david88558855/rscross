@@ -89,7 +89,7 @@ struct TransportBase {
 }
 
 impl BaseCfg {
-    /// 转换为 tunnel 客户端 配置
+    /// 转换为客户端配置
     fn to_tunnel(&self, node_code: &str) -> ClientConfig {
         ClientConfig {
             auth_token: if self.auth.token.is_empty() {
@@ -230,7 +230,7 @@ async fn handle_server_config(state: AppState, payload: Value) -> Result<(), Str
         ..Default::default()
     };
 
-    // 停掉旧的 tunnel 节点服务
+    // 停掉旧的节点服务
     state.services.stop(&req.key);
     state.services.remove(&req.key);
 
@@ -238,12 +238,12 @@ async fn handle_server_config(state: AppState, payload: Value) -> Result<(), Str
     let s = srv.clone();
     tokio::spawn(async move {
         if let Err(e) = s.serve().await {
-            tracing::error!(error = %e, "tunnel 节点服务 退出");
+            tracing::error!(error = %e, "节点服务退出");
         }
     });
 
     state.state.mark_configured(&req.key, &req.update_tag);
-    tracing::info!(key = %req.key, bind_port, vhost_http_port, "tunnel 节点服务 已启动");
+    tracing::info!(key = %req.key, bind_port, vhost_http_port, "节点服务已启动");
     Ok(())
 }
 
@@ -601,7 +601,7 @@ fn ensure_service(state: &AppState, key: &str, cfg: ClientConfig) -> Arc<AgentSe
     let s = svc.clone();
     tokio::spawn(async move {
         if let Err(e) = s.run().await {
-            tracing::error!(error = %e, "tunnel 客户端 循环退出");
+            tracing::error!(error = %e, "agent 循环退出");
         }
     });
     svc
@@ -636,10 +636,10 @@ mod tests {
         let req: serde_json::Value = raw;
         let base: BaseCfg = serde_json::from_value(req["BaseCfg"].clone()).unwrap();
         assert_eq!(base.node_code(), "node1");
-        let tunnel 客户端 = base.to_tunnel("node1");
-        assert_eq!(tunnel 客户端.server_addr, "1.2.3.4");
-        assert_eq!(tunnel 客户端.server_port, 7000);
-        assert_eq!(tunnel 客户端.pool_count, 3);
+        let agent = base.to_tunnel("node1");
+        assert_eq!(agent.server_addr, "1.2.3.4");
+        assert_eq!(agent.server_port, 7000);
+        assert_eq!(agent.pool_count, 3);
     }
 
     #[test]

@@ -707,7 +707,7 @@ macro_rules! admin_tunnel_delete {
                     .execute(pool)
                     .await?;
                 if let Some(cc) = client_code {
-                    if let Some(svc) = state.engine.tunnel 客户端(&cc) {
+                    if let Some(svc) = state.engine.agent(&cc) {
                         let _ = svc.remove_proxy(&req.code).await;
                     }
                 }

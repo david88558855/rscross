@@ -1,6 +1,6 @@
-//! FRP HTTP 插件回调：tunnel 节点服务 将 Login / NewProxy / NewWorkConn 等事件回调到此
+//! 节点侧 HTTP 回调：节点服务 将 Login / NewProxy / NewWorkConn 等事件回调到此
 //!
-//! 这些接口在原项目中也由 tunnel 节点服务 通过 HTTP 调用，是 穿透内核与控制面之间的关键纽带。
+//! 这些接口在原项目中也由节点侧 HubServer 通过 HTTP 调用，是 穿透内核与控制面之间的关键纽带。
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -23,7 +23,7 @@ fn fail(msg: &str) -> Json<ApiResponse<serde_json::Value>> {
     ))
 }
 
-/// Login 回调：tunnel 节点服务 校验客户端令牌
+/// Login 回调：节点服务校验客户端令牌
 pub async fn node_auth_callback(State(state): State<AppState>, body: Bytes) -> Json<ApiResponse<serde_json::Value>> {
     let payload: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,

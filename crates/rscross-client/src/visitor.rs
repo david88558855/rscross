@@ -23,7 +23,7 @@ pub struct Visitor {
     bind_addr: String,
     /// 服务端地址
     server_addr: String,
-    /// 服务集合（复用 tunnel 客户端 连接）
+    /// 服务集合（复用 agent 连接）
     services: Arc<ServiceRegistry>,
 }
 
@@ -110,7 +110,7 @@ pub fn from_args(
         ..Default::default()
     };
     let services = Arc::new(ServiceRegistry::new());
-    // 访客复用 tunnel 客户端 的连接池
+    // 访客复用 agent 的连接池
     let svc = Arc::new(rscross_tunnel::AgentService::new("visitor", cfg));
     services.set("visitor", svc);
 

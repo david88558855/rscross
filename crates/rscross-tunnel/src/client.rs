@@ -1,4 +1,4 @@
-//! tunnel 客户端 客户端：运行在内网机器，注册代理并建立工作连接转发流量
+//! 客户端代理：运行在内网机器，注册代理并建立工作连接转发流量
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,7 +16,7 @@ use crate::msg::{self, msg_type, CloseProxy, Envelope, Login, LoginResp, NewProx
 use crate::transport::TrafficCounter;
 use crate::ProxyType;
 
-/// tunnel 客户端 服务实例：管理一组代理，共享一条到服务端的控制连接
+/// AgentService 实例：管理一组代理，共享一条到服务端的控制连接
 pub struct AgentService {
     /// 服务编号（隧道 key）
     pub key: String,
@@ -147,7 +147,7 @@ impl AgentService {
                     backoff = Duration::from_secs(1);
                 }
                 Err(e) => {
-                    tracing::warn!(%addr, error = %e, "tunnel 客户端 连接失败，准备重试");
+                    tracing::warn!(%addr, error = %e, "客户端连接失败，准备重试");
                 }
             }
 
@@ -205,7 +205,7 @@ impl AgentService {
         if !resp.success {
             return Err(format!("登录失败: {}", resp.reason));
         }
-        tracing::info!(key = %self.key, "tunnel 客户端 登录成功");
+        tracing::info!(key = %self.key, "客户端登录成功");
 
         // 重新注册所有代理
         let names: Vec<ProxyConfigMsg> = self.proxies.read().values().cloned().collect();
@@ -253,7 +253,7 @@ impl AgentService {
         self.pending_work.write().clear();
         writer_task.abort();
         let _ = writer_task.await;
-        tracing::info!(key = %self.key, "tunnel 客户端 连接断开");
+        tracing::info!(key = %self.key, "客户端连接断开");
         Ok(())
     }
 
@@ -442,7 +442,7 @@ pub async fn write_all(stream: &mut TcpStream, data: &[u8]) -> std::io::Result<(
 /// 类型别名
 pub type SharedService = Arc<AgentService>;
 
-/// 服务集合：按 key 管理多个 tunnel 客户端 实例
+/// 服务集合：按 key 管理多个客户端实例
 #[derive(Default)]
 pub struct ServiceRegistry {
     services: dashmap::DashMap<String, SharedService>,

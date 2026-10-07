@@ -78,8 +78,21 @@ dashmap = "6"
 mime_guess = "2"
 
 [profile.release]
-opt-level = 3
-lto = "thin"
+opt-level = "z"
+lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+incremental = false
+
+# 测试与开发配置：需要 panic=unwind 才能正常断言
+[profile.dev]
+panic = "unwind"
+
+[profile.test]
+panic = "unwind"
+opt-level = 1
+
+[profile.release.build-override]
+opt-level = 3
+codegen-units = 1

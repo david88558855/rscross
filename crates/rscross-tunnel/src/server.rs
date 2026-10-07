@@ -1,4 +1,4 @@
-//! tunnel 节点服务 服务端：运行在公网节点，处理控制流、代理注册与流量分发
+//! hub 服务端：运行在公网节点，处理控制流、代理注册与流量分发
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -52,7 +52,7 @@ impl ClientSession {
     }
 }
 
-/// tunnel 节点服务 服务端
+/// hub 服务端
 pub struct HubServer {
     pub config: ServerConfig,
     /// 代理注册表
@@ -128,7 +128,7 @@ impl HubServer {
             .local_addr()
             .map_err(|e| format!("获取监听地址失败: {e}"))?;
         *self.bind_addr.write() = Some(local);
-        tracing::info!("tunnel 节点服务 控制流监听于 {local}");
+        tracing::info!("hub 控制流监听于 {local}");
 
         loop {
             if !self.is_running() {

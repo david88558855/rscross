@@ -31,7 +31,6 @@ rscross/
 │   ├── rscross-server/   # 服务端：axum API + sqlx 数据层 + 调度引擎
 │   └── rscross-client/   # 节点/客户端运行时
 ├── web/                  # 前端（Vue 3 + Naive UI）
-├── docker/               # 容器构建
 ├── configs/              # 配置样例
 └── .github/workflows/    # CI：push 交叉编译
 ```
@@ -48,12 +47,28 @@ rscross 有两套自研协议：
 
 ## 编译
 
-项目通过 GitHub Actions 编译，推送即触发交叉编译：
+项目通过 GitHub Actions 编译，推送即触发交叉编译，**产出无依赖单文件二进制**。
 
-| 目标 | 产物 |
+服务端（musl 全静态，`ldd` 无任何输出）：
+
+| 目标 | 说明 |
 |------|------|
-| 服务端 | Linux x64/arm64、musl、armv7 |
-| 客户端 | Linux 全系列 + Windows x64/arm64/x86 |
+| `x86_64-unknown-linux-musl` | x86_64 Linux |
+| `aarch64-unknown-linux-musl` | ARM64 Linux |
+| `armv7-unknown-linux-musleabihf` | ARMv7 Linux |
+
+客户端：
+
+| 目标 | 说明 |
+|------|------|
+| `x86_64-unknown-linux-musl` | x86_64 Linux |
+| `aarch64-unknown-linux-musl` | ARM64 Linux |
+| `armv7-unknown-linux-musleabihf` | ARMv7 Linux |
+| `x86_64-pc-windows-msvc` | Windows x64 |
+| `aarch64-pc-windows-msvc` | Windows ARM64 |
+
+Linux 产物为全静态链接，拷贝到任意同架构机器即可运行，无需安装运行时或系统库。
+前端资源已通过 `include_dir` 打包进服务端二进制，单文件即包含管理界面。
 
 本地编译需要 Rust 1.82+：
 
@@ -64,12 +79,14 @@ cd web && npm install && npm run build && cd ..
 # 嵌入前端资源
 ./scripts/embed-web.sh
 
-# 编译
+# 编译（默认本机目标）
 cargo build --release
 
-# 运行服务端
-./target/release/rscross-server
+# 交叉编译静态版本
+cargo build --release --target x86_64-unknown-linux-musl
 ```
+
+产物位于 `target/release/`。
 
 ## 部署
 
@@ -108,34 +125,6 @@ openssl rand -hex 32
 ```
 
 随后访问 `127.0.0.1:6000` 即可。
-
-## Docker
-
-```yaml
-services:
-  rscross-server:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.server
-    restart: always
-    network_mode: host
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-
-  rscross-client:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.client
-    restart: always
-    network_mode: host
-    command:
-      - --tls=false
-      - -addr
-      - gost.example.com
-      - -k
-      - REPLACE_WITH_KEY
-```
 
 ## 环境变量
 

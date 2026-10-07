@@ -115,12 +115,12 @@ pub async fn apply_domain_to_node(
     force_https: i32,
     _matcher: i32,
 ) {
-    let Some(tunnel 节点服务) = state.engine.tunnel 节点服务(node_code) else {
+    let Some(hub) = state.engine.hub(node_code) else {
         tracing::debug!(node_code, "节点不在线，跳过域名下发");
         return;
     };
     tracing::info!(node_code, domain, "已下发自定义域名配置");
-    drop(tunnel 节点服务);
+    drop(hub);
 }
 
 #[cfg(test)]

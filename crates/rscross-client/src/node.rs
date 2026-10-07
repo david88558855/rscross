@@ -130,8 +130,8 @@ impl Node {
     }
 }
 
-/// 构建 tunnel 客户端 客户端配置
-pub fn build_tunnel 客户端_config(
+/// 构建 agent 客户端配置
+pub fn build_client_config(
     auth_token: &str,
     server_addr: &str,
     server_port: u16,
@@ -155,8 +155,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_tunnel 客户端_config() {
-        let c = build_tunnel 客户端_config("token", "1.2.3.4", 7000, 3);
+    fn test_build_client_config() {
+        let c = build_client_config("token", "1.2.3.4", 7000, 3);
         assert_eq!(c.auth_token, "token");
         assert_eq!(c.control_addr(), "1.2.3.4:7000");
         assert_eq!(c.pool_count, 3);

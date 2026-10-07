@@ -7,6 +7,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
+// WebSocket 流需要 split()，来自 futures 的 SinkExt / StreamExt
+use futures_util::{SinkExt, StreamExt};
+
 use super::{decode_frame, encode_frame, frame_type, next_id, Frame, PendingMap, SessionCtx};
 
 /// 推送处理器：收到服务端主动下发的指令

@@ -1,4 +1,4 @@
-//! 持久化实体（与 SQLite 表一一对应，同时作为 API 的响应结构）。
+//! 持久化实体（与 SQLite 表一一对应，同时作为控制面 API 的响应结构）。
 
 use serde::{Deserialize, Serialize};
 
@@ -37,11 +37,79 @@ pub struct SessionRecord {
     pub user_agent: Option<String>,
 }
 
+/// 服务端节点记录（控制台管理的「节点」）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeRecord {
+    /// 节点 ID。
+    pub id: String,
+    /// 展示名（唯一）。
+    pub name: String,
+    /// 状态：`pending` / `online` / `offline` / `disabled`。
+    pub status: String,
+    /// node token 摘要。**不对外序列化**。
+    #[serde(skip_serializing)]
+    pub node_token_hash: String,
+    /// FerroTunnel 握手 token。节点与归属该节点的客户端都要用它，
+    /// 因此必须以可读回的形式保存（仅管理员接口可见）。
+    pub tunnel_token: String,
+    /// 对外主机名（管理员可覆盖）。
+    pub public_host: Option<String>,
+    /// 反向隧道控制面监听端口（节点上报）。
+    pub tunnel_port: Option<i64>,
+    /// 公网入口监听端口（节点上报）。
+    pub ingress_port: Option<i64>,
+    /// 节点进程版本。
+    pub version: Option<String>,
+    /// 操作系统。
+    pub os: Option<String>,
+    /// CPU 架构。
+    pub arch: Option<String>,
+    /// Iroh EndpointId。
+    pub endpoint_id: Option<String>,
+    /// Iroh EndpointAddr（JSON）。
+    pub endpoint_addr: Option<String>,
+    /// 控制台观测到的出口 IP。
+    pub public_ip: Option<String>,
+    /// 最近心跳。
+    pub last_seen_at: Option<String>,
+    /// 最近一次错误。
+    pub last_error: Option<String>,
+    /// 创建时间。
+    pub created_at: String,
+    /// 更新时间。
+    pub updated_at: String,
+    /// 是否禁用。
+    pub disabled: bool,
+}
+
+impl NodeRecord {
+    /// 客户端接入该节点时使用的地址：`tunnel_server`。
+    ///
+    /// 优先级：管理员配置的 `public_host` > 控制台观测到的 `public_ip` > `127.0.0.1`。
+    /// 端口优先用节点上报值，其次回落到默认端口。
+    pub fn tunnel_server(&self) -> String {
+        let host = self
+            .public_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .or(self.public_ip.as_deref())
+            .unwrap_or("127.0.0.1");
+        let port = self
+            .tunnel_port
+            .and_then(|p| u16::try_from(p).ok())
+            .unwrap_or(rscross_common::DEFAULT_TUNNEL_PORT);
+        format!("{host}:{port}")
+    }
+}
+
 /// 客户端（内网节点）记录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientRecord {
     /// 客户端 ID。
     pub id: String,
+    /// 归属的服务端节点。
+    pub node_id: Option<String>,
     /// 展示名（唯一）。
     pub name: String,
     /// 在线状态。
@@ -73,11 +141,13 @@ pub struct ClientRecord {
     pub disabled: bool,
 }
 
-/// 接入令牌记录。
+/// 接入令牌记录（客户端用；可绑定到某个节点）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollTokenRecord {
     /// token 摘要。
     pub token_hash: String,
+    /// 绑定的服务端节点。
+    pub node_id: Option<String>,
     /// 绑定的客户端名（可空，表示由客户端自报）。
     pub client_name: Option<String>,
     /// 签发人。
@@ -132,6 +202,8 @@ pub struct TrafficPoint {
     pub tunnel_id: String,
     /// 客户端 ID。
     pub client_id: String,
+    /// 归属节点 ID。
+    pub node_id: Option<String>,
     /// 路径类型（`p2p` / `iroh-relay` / `ferry-relay`）。
     pub path: String,
     /// 入向字节。
@@ -145,7 +217,7 @@ pub struct TrafficPoint {
 /// 日志记录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
-    /// 自增 ID（内存环形缓冲里为 0）。
+    /// 自增 ID（内存环形缓冲里为序号）。
     pub id: i64,
     /// 时间戳。
     pub ts: String,
@@ -183,6 +255,10 @@ pub struct AuditEntry {
 /// 概览统计。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OverviewStats {
+    /// 服务端节点总数。
+    pub nodes_total: i64,
+    /// 在线服务端节点数。
+    pub nodes_online: i64,
     /// 客户端总数。
     pub clients_total: i64,
     /// 在线客户端数。

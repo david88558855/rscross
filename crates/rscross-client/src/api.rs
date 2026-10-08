@@ -1,12 +1,12 @@
 //! 控制面 HTTP 客户端。
 //!
-//! **为什么不复用服务端的 DTO**：客户端刻意不依赖 `rscross-server`，
-//! 否则会把 axum / rusqlite 一起拖进静态二进制。这里的结构体是服务端 JSON 的镜像，
+//! **为什么不复用控制面的 DTO**：客户端刻意不依赖 `rscross-control`，
+//! 否则会把 axum / rusqlite 一起拖进静态二进制。这里的结构体是控制面 JSON 的镜像，
 //! 由 `tests/e2e/e2e.py` 用真实二进制做端到端校验（协议漂移会在 CI 暴露）。
 
 use std::time::Duration;
 
-use rscross_common::{ClientRuntime, DesiredTunnel, Error, Result};
+use rscross_common::{ClientRuntime, DesiredTunnel, Error, NodeEndpoint, Result};
 use serde::{Deserialize, Serialize};
 
 /// 注册请求。
@@ -20,43 +20,22 @@ pub struct EnrollRequest {
     pub runtime: ClientRuntime,
 }
 
-/// 服务端下发的 P2P 参数。
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct P2pInfo {
-    /// 是否启用。
-    pub enabled: bool,
-    /// 路径策略。
-    pub policy: String,
-    /// 服务端节点 ID。
-    pub server_endpoint_id: Option<String>,
-    /// 服务端寻址信息（JSON）。
-    pub server_endpoint_addr: Option<String>,
-    /// Relay 模式。
-    pub relay_mode: String,
-    /// 是否启用地址发现。
-    pub address_lookup: bool,
-}
-
 /// 注册响应。
 #[derive(Debug, Clone, Deserialize)]
 pub struct EnrollResponse {
     /// 分配的客户端 ID。
     pub client_id: String,
+    /// 客户端名。
+    pub name: String,
     /// agent token。
     pub agent_token: String,
     /// 心跳间隔（秒）。
     pub heartbeat_secs: u64,
-    /// FerroTunnel 控制面地址。
-    pub tunnel_server: String,
-    /// FerroTunnel 握手 token。
-    pub tunnel_token: String,
-    /// 服务端对外地址。
+    /// 控制台对外地址。
     #[serde(default)]
     pub public_url: Option<String>,
-    /// P2P 参数。
-    #[serde(default)]
-    pub p2p: P2pInfo,
+    /// 归属的服务端节点（数据面坐标）。
+    pub node: NodeEndpoint,
     /// 初始隧道列表。
     #[serde(default)]
     pub tunnels: Vec<DesiredTunnel>,
@@ -74,21 +53,21 @@ pub struct HeartbeatRequest {
 pub struct HeartbeatResponse {
     /// 下一次心跳间隔。
     pub heartbeat_secs: u64,
-    /// 服务端时间。
+    /// 控制台时间。
     #[serde(default)]
     pub server_time: String,
-    /// 服务端观测到的出口 IP。
+    /// 控制台观测到的出口 IP。
     #[serde(default)]
     pub public_ip: Option<String>,
-    /// P2P 参数。
+    /// 归属节点；`None` 表示已被解绑或节点被删除，客户端应停掉隧道。
     #[serde(default)]
-    pub p2p: P2pInfo,
+    pub node: Option<NodeEndpoint>,
     /// 期望的隧道配置。
     #[serde(default)]
     pub tunnels: Vec<DesiredTunnel>,
 }
 
-/// 上报给服务端的日志条目。
+/// 上报给控制台的日志条目。
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientLogEntry {
     /// 级别。
@@ -127,7 +106,7 @@ impl ApiClient {
         let base = base.trim().trim_end_matches('/').to_string();
         if !(base.starts_with("http://") || base.starts_with("https://")) {
             return Err(Error::config(format!(
-                "服务端地址必须以 http:// 或 https:// 开头: {base}"
+                "控制台地址必须以 http:// 或 https:// 开头: {base}"
             )));
         }
         let http = reqwest::Client::builder()
@@ -209,11 +188,11 @@ async fn decode<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> 
             })
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| body.chars().take(300).collect());
-        return Err(Error::api(format!("控制面返回 {status}: {detail}")));
+        return Err(Error::api(format!("控制台返回 {status}: {detail}")));
     }
 
     serde_json::from_str(&body)
-        .map_err(|e| Error::api(format!("控制面响应解析失败: {e}; body={body}")))
+        .map_err(|e| Error::api(format!("控制台响应解析失败: {e}; body={body}")))
 }
 
 #[cfg(test)]
@@ -229,5 +208,45 @@ mod tests {
     #[test]
     fn base_url_requires_scheme() {
         assert!(ApiClient::new("127.0.0.1:7800").is_err());
+    }
+
+    #[test]
+    fn heartbeat_parses_detached_node() {
+        // 节点被删除时控制台会回 node: null；客户端必须能解析而不是崩在反序列化上。
+        let raw = r#"{
+            "heartbeat_secs": 15,
+            "server_time": "2026-01-01T00:00:00.000Z",
+            "public_ip": null,
+            "node": null,
+            "tunnels": []
+        }"#;
+        let parsed: HeartbeatResponse = serde_json::from_str(raw).expect("解析");
+        assert!(parsed.node.is_none());
+        assert!(parsed.tunnels.is_empty());
+    }
+
+    #[test]
+    fn heartbeat_parses_node_coordinates() {
+        let raw = r#"{
+            "heartbeat_secs": 15,
+            "node": {
+                "node_id": "n1",
+                "name": "node-1",
+                "tunnel_server": "203.0.113.9:7835",
+                "tunnel_token": "tt",
+                "endpoint_id": "aa",
+                "endpoint_addr": "{}"
+            },
+            "tunnels": [{
+                "id": "t1", "name": "web", "proto": "http",
+                "local_addr": "127.0.0.1:8080", "host": "a.example.com",
+                "enabled": true, "rate_limit_kbps": 0, "conn_limit": 0
+            }]
+        }"#;
+        let parsed: HeartbeatResponse = serde_json::from_str(raw).expect("解析");
+        let node = parsed.node.expect("应有节点");
+        assert_eq!(node.tunnel_server, "203.0.113.9:7835");
+        assert_eq!(parsed.tunnels.len(), 1);
+        assert_eq!(parsed.tunnels[0].proto, rscross_common::TunnelProto::Http);
     }
 }

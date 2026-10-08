@@ -116,7 +116,7 @@ pub const DEFAULT_TUNNEL_PORT: u16 = 7835;
 pub const DEFAULT_INGRESS_PORT: u16 = 8081;
 
 /// 默认控制台 / 管理 API 端口。
-pub const DEFAULT_ADMIN_PORT: u16 = 7800;
+pub const DEFAULT_CONSOLE_PORT: u16 = 7800;
 
 /// 默认保活间隔（秒）。
 pub const DEFAULT_HEARTBEAT_SECS: u64 = 15;
@@ -298,12 +298,62 @@ pub struct ClientRuntime {    /// 客户端版本号。
     pub public_ip: Option<String>,
 }
 
+/// 服务端**节点**上报的运行时信息。
+///
+/// 与控制台是两次心跳（`ClientRuntime` 是客户端 → 控制台，本结构是节点 → 控制台），
+/// 两者字段高度相似但不合并：节点额外要汇报数据面监听端口，客户端要汇报被分配的节点。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NodeRuntime {
+    /// 节点进程版本。
+    pub version: String,
+    /// 操作系统。
+    pub os: String,
+    /// CPU 架构。
+    pub arch: String,
+    /// Iroh EndpointId（公钥），未启用 P2P 时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_id: Option<String>,
+    /// Iroh EndpointAddr 的 JSON 形式，控制台据此下发给客户端做直连。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_addr: Option<String>,
+    /// 反向隧道控制面实际监听端口。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_port: Option<u16>,
+    /// 公网入口实际监听端口。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress_port: Option<u16>,
+    /// 节点声明的对外主机名；留空则由控制台按观测到的出口 IP 推导。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_host: Option<String>,
+}
+
+/// 客户端被分配到的服务端节点（数据面坐标）。
+///
+/// 独立控制台管理多个节点时，客户端必须知道「我的反向隧道该连哪台节点」，
+/// 因此控制台在注册/心跳响应里都带上这份信息。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeEndpoint {
+    /// 节点 ID。
+    pub node_id: String,
+    /// 节点名。
+    pub name: String,
+    /// 反向隧道控制面地址，形如 `1.2.3.4:7835`。
+    pub tunnel_server: String,
+    /// 该节点的 FerroTunnel 握手 token。
+    pub tunnel_token: String,
+    /// 节点 Iroh EndpointId。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_id: Option<String>,
+    /// 节点 Iroh 寻址信息（JSON），用于直连该节点。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_addr: Option<String>,
+}
+
 /// 控制面下发给客户端的隧道定义。
 ///
 /// 刻意不复用数据库实体：客户端**不应**把 `rusqlite` 打进静态二进制。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DesiredTunnel {
-    /// 隧道 ID。
+pub struct DesiredTunnel {    /// 隧道 ID。
     pub id: String,
     /// 隧道名（同一客户端内唯一）。
     pub name: String,

@@ -1,4 +1,4 @@
-//! 服务端共享状态。
+//! 控制面共享状态。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::http::{header, HeaderMap};
 use rscross_auth::{extract_bearer, verify_session, LoginThrottle};
 use rscross_common::{Error, Result};
-use rscross_config::ServerFile;
+use rscross_config::ConsoleFile;
 use rscross_store::{Store, UserRecord};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -17,13 +17,13 @@ use crate::logbus::LogBus;
 /// 会话 Cookie 名（控制台用）。
 pub const SESSION_COOKIE: &str = "rscross_session";
 
-/// 服务端全局状态。所有字段均可跨任务共享。
+/// 控制面全局状态。所有字段均可跨任务共享。
 #[derive(Clone)]
 pub struct AppState {
     /// 持久化句柄。
     pub store: Store,
     /// 运行期配置（可由控制台热修改）。
-    pub config: Arc<RwLock<ServerFile>>,
+    pub config: Arc<RwLock<ConsoleFile>>,
     /// 配置文件路径。
     pub config_path: Arc<PathBuf>,
     /// 进程启动时间。
@@ -32,22 +32,20 @@ pub struct AppState {
     pub throttle: Arc<LoginThrottle>,
     /// 日志总线。
     pub logs: LogBus,
-    /// Iroh 节点（`p2p.enabled = false` 时为 `None`）。
-    pub p2p: Option<rscross_transport::P2pNode>,
-    /// 路径选择器（服务端侧用于决定「直连投递还是走中继」）。
-    pub path_selector: Arc<rscross_transport::PathSelector>,
     /// 全局关停信号。
     pub shutdown: CancellationToken,
+    /// 本进程是否是「内嵌控制台」（服务端自带）。影响 UI 上的提示文案。
+    pub embedded: bool,
 }
 
 impl AppState {
     /// 取一份配置快照。
-    pub async fn config_snapshot(&self) -> ServerFile {
+    pub async fn config_snapshot(&self) -> ConsoleFile {
         self.config.read().await.clone()
     }
 
     /// 校验 + 落盘 + 生效。三者顺序固定：先校验，再落盘，最后换内存。
-    pub async fn replace_config(&self, next: ServerFile) -> Result<()> {
+    pub async fn replace_config(&self, next: ConsoleFile) -> Result<()> {
         next.validate()?;
         next.save(self.config_path.as_ref())?;
         let mut guard = self.config.write().await;
@@ -57,7 +55,9 @@ impl AppState {
 
     /// 从请求头里取会话 token：`Authorization: Bearer` / `X-Rscross-Token` / Cookie。
     pub fn session_token(headers: &HeaderMap) -> Option<String> {
-        if let Some(token) = extract_bearer(headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok())) {
+        if let Some(token) =
+            extract_bearer(headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()))
+        {
             return Some(token);
         }
         if let Some(token) = headers
@@ -72,9 +72,12 @@ impl AppState {
     }
 
     /// 要求已登录，返回当前用户。
-    pub async fn require_user(&self, headers: &HeaderMap) -> std::result::Result<UserRecord, ApiError> {
-        let token = Self::session_token(headers)
-            .ok_or_else(|| ApiError::unauthorized("缺少会话凭证"))?;
+    pub async fn require_user(
+        &self,
+        headers: &HeaderMap,
+    ) -> std::result::Result<UserRecord, ApiError> {
+        let token =
+            Self::session_token(headers).ok_or_else(|| ApiError::unauthorized("缺少会话凭证"))?;
         let session = verify_session(&self.store, &token)
             .await
             .map_err(ApiError::from)?
@@ -92,7 +95,10 @@ impl AppState {
     }
 
     /// 要求管理员角色。
-    pub async fn require_admin(&self, headers: &HeaderMap) -> std::result::Result<UserRecord, ApiError> {
+    pub async fn require_admin(
+        &self,
+        headers: &HeaderMap,
+    ) -> std::result::Result<UserRecord, ApiError> {
         let user = self.require_user(headers).await?;
         if user.role != "admin" {
             return Err(ApiError::forbidden("需要管理员权限"));
@@ -100,7 +106,7 @@ impl AppState {
         Ok(user)
     }
 
-    /// 请求来源 IP（优先 `X-Forwarded-For`，用于审计）。
+    /// 请求来源 IP（优先 `X-Forwarded-For`）。
     pub fn client_ip(headers: &HeaderMap) -> Option<String> {
         headers
             .get("x-forwarded-for")
@@ -171,17 +177,20 @@ mod tests {
             header::COOKIE,
             HeaderValue::from_static("a=1; rscross_session=abc123; b=2"),
         );
-        assert_eq!(
-            AppState::session_token(&headers).as_deref(),
-            Some("abc123")
-        );
+        assert_eq!(AppState::session_token(&headers).as_deref(), Some("abc123"));
     }
 
     #[test]
     fn bearer_wins_over_cookie() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer tok1"));
-        headers.insert(header::COOKIE, HeaderValue::from_static("rscross_session=tok2"));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer tok1"),
+        );
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("rscross_session=tok2"),
+        );
         assert_eq!(AppState::session_token(&headers).as_deref(), Some("tok1"));
     }
 

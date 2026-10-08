@@ -1,25 +1,29 @@
-//! Agent（内网节点）侧 API：注册、心跳、拉取隧道、上报日志。
+//! 内网客户端侧 API：注册、心跳、拉取隧道、上报日志。
 //!
-//! 鉴权方式与控制台不同：Agent 用 `X-Rscross-Agent: <agent_token>`，
-//! 服务端只存 token 的 SHA-256 摘要。
+//! 鉴权方式是 `X-Rscross-Agent: <agent_token>`；控制台只存 token 的 SHA-256 摘要。
+//! **客户端归属哪个服务端节点**由注册时使用的接入令牌决定，之后每次心跳都会把
+//! 该节点的数据面坐标（`tunnel_server` / `tunnel_token` / `EndpointAddr`）回带，
+//! 因此控制台可以在不重启客户端的情况下完成「迁移到另一台节点」。
+
+use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use rscross_auth::{new_agent_token, token_hash};
-use rscross_common::{ClientRuntime, DesiredTunnel};
-use rscross_store::ClientRecord;
+use rscross_common::{ClientRuntime, DesiredTunnel, NodeEndpoint};
+use rscross_store::{ClientRecord, ClientRuntimePatch, EnrollTokenRecord};
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 
-use crate::api::AGENT_HEADER;
+use crate::api::nodes::{node_endpoint, resolve_node};
+use crate::api::{desired_tunnels, header_token, AGENT_HEADER};
 use crate::error::ApiError;
 use crate::state::AppState;
 
 /// 注册请求。
 #[derive(Debug, Deserialize)]
 pub struct EnrollRequest {
-    /// 控制台签发的接入令牌（`auth.allow_self_enroll = true` 时可省略）。
+    /// 控制台签发的接入令牌（`auth.allow_self_enroll = true` 且只有一个节点时可省略）。
     pub token: Option<String>,
     /// 期望的节点名。
     pub name: Option<String>,
@@ -33,37 +37,18 @@ pub struct EnrollRequest {
 pub struct EnrollResponse {
     /// 分配到的客户端 ID。
     pub client_id: String,
-    /// agent token（明文，仅此一次返回）。
+    /// 客户端名。
+    pub name: String,
+    /// agent token 明文（**只返回一次**）。
     pub agent_token: String,
     /// 心跳间隔（秒）。
     pub heartbeat_secs: u64,
-    /// FerroTunnel 控制面地址。
-    pub tunnel_server: String,
-    /// FerroTunnel 握手 token。
-    pub tunnel_token: String,
-    /// 服务端对外地址。
+    /// 控制台对外地址。
     pub public_url: Option<String>,
-    /// P2P 参数。
-    pub p2p: P2pInfo,
+    /// 归属的服务端节点（数据面坐标）。
+    pub node: NodeEndpoint,
     /// 已下发的隧道列表。
     pub tunnels: Vec<DesiredTunnel>,
-}
-
-/// P2P 参数（下发给客户端）。
-#[derive(Debug, Clone, Serialize)]
-pub struct P2pInfo {
-    /// 是否启用。
-    pub enabled: bool,
-    /// 路径策略。
-    pub policy: String,
-    /// 服务端节点 ID。
-    pub server_endpoint_id: Option<String>,
-    /// 服务端寻址信息（JSON）。
-    pub server_endpoint_addr: Option<String>,
-    /// Relay 模式。
-    pub relay_mode: String,
-    /// 是否启用地址发现。
-    pub address_lookup: bool,
 }
 
 /// 心跳请求。
@@ -79,12 +64,13 @@ pub struct HeartbeatRequest {
 pub struct HeartbeatResponse {
     /// 下一次心跳间隔（秒）。
     pub heartbeat_secs: u64,
-    /// 服务端当前时间。
+    /// 控制台当前时间。
     pub server_time: String,
-    /// 服务端观测到的出口 IP。
+    /// 控制台观测到的出口 IP。
     pub public_ip: Option<String>,
-    /// P2P 参数。
-    pub p2p: P2pInfo,
+    /// 归属节点；为 `None` 表示该客户端已被解绑或节点被删除，
+    /// 客户端应当停掉本地反向隧道。
+    pub node: Option<NodeEndpoint>,
     /// 期望的隧道配置（客户端据此收敛本地 FerroTunnel 客户端）。
     pub tunnels: Vec<DesiredTunnel>,
 }
@@ -109,7 +95,7 @@ pub async fn enroll(
     let cfg = state.config_snapshot().await;
     let raw_token = req.token.as_deref().unwrap_or("").trim().to_string();
 
-    let enroll = if raw_token.is_empty() {
+    let enroll: Option<EnrollTokenRecord> = if raw_token.is_empty() {
         if !cfg.auth.allow_self_enroll {
             return Err(ApiError::unauthorized(
                 "需要有效的接入令牌（服务端已关闭自助注册）",
@@ -122,10 +108,8 @@ pub async fn enroll(
             .store
             .find_enroll_token(&hash)
             .await
-            .map_err(ApiError::from)?;
-        let Some(rec) = rec else {
-            return Err(ApiError::unauthorized("接入令牌无效"));
-        };
+            .map_err(ApiError::from)?
+            .ok_or_else(|| ApiError::unauthorized("接入令牌无效"))?;
         if rec.used_at.is_some() {
             return Err(ApiError::unauthorized("接入令牌已被使用"));
         }
@@ -145,14 +129,16 @@ pub async fn enroll(
         }
     }
 
+    // 归属节点：令牌里指定的优先，否则在「只有一个节点」时自动选中。
+    let node = resolve_node(&state, enroll.as_ref().and_then(|e| e.node_id.as_deref())).await?;
+
     let desired_name = enroll
         .as_ref()
         .and_then(|e| e.client_name.clone())
         .or_else(|| req.name.clone())
-        .unwrap_or_else(|| format!("node-{}", short_id()));
+        .unwrap_or_else(|| format!("client-{}", short_id()));
 
-    let name = unique_name(&state, desired_name).await?;
-
+    let name = unique_client_name(&state, desired_name).await?;
     let agent_token = new_agent_token();
     let client_id = uuid::Uuid::new_v4().to_string();
     let now = rscross_common::time::now_rfc3339();
@@ -161,6 +147,7 @@ pub async fn enroll(
         .store
         .insert_client(ClientRecord {
             id: client_id.clone(),
+            node_id: Some(node.id.clone()),
             name: name.clone(),
             status: rscross_common::ClientStatus::Pending.as_str().to_string(),
             agent_token_hash: token_hash(&agent_token),
@@ -199,6 +186,7 @@ pub async fn enroll(
     tracing::info!(
         client = %name,
         id = %client_id,
+        node = %node.name,
         peer = %peer,
         os = req.runtime.os,
         arch = req.runtime.arch,
@@ -207,13 +195,12 @@ pub async fn enroll(
 
     Ok(Json(EnrollResponse {
         client_id,
+        name,
         agent_token,
-        heartbeat_secs: cfg.server.heartbeat_secs,
-        tunnel_server: public_tunnel_addr(&cfg),
-        tunnel_token: cfg.tunnel.token.clone(),
-        public_url: cfg.server.public_url.clone(),
-        p2p: p2p_info(&state, &cfg),
-        tunnels: crate::api::desired_tunnels(tunnels),
+        heartbeat_secs: cfg.console.heartbeat_secs,
+        public_url: cfg.console.public_url.clone(),
+        node: node_endpoint(&node),
+        tunnels: desired_tunnels(tunnels),
     }))
 }
 
@@ -230,7 +217,7 @@ pub async fn heartbeat(
         .store
         .touch_client(
             client.id.clone(),
-            rscross_store::ClientRuntimePatch {
+            ClientRuntimePatch {
                 version: non_empty_opt(&req.runtime.version),
                 os: non_empty_opt(&req.runtime.os),
                 arch: non_empty_opt(&req.runtime.arch),
@@ -242,18 +229,40 @@ pub async fn heartbeat(
         .await
         .map_err(ApiError::from)?;
 
-    let tunnels = state
-        .store
-        .list_tunnels_of_client(&client.id)
-        .await
-        .map_err(ApiError::from)?;
+    // 归属节点可能被删除/禁用：两种情况都要让客户端停掉隧道，而不是继续黑跑。
+    let node = match client.node_id.as_deref() {
+        Some(id) => match state.store.find_node(id).await.map_err(ApiError::from)? {
+            Some(node) if !node.disabled => Some(node_endpoint(&node)),
+            Some(node) => {
+                tracing::warn!(client = %client.name, node = %node.name, "归属节点已被禁用，通知客户端下线");
+                None
+            }
+            None => {
+                tracing::warn!(client = %client.name, node_id = %id, "归属节点已被删除，通知客户端下线");
+                None
+            }
+        },
+        None => None,
+    };
+
+    let tunnels = if node.is_some() {
+        desired_tunnels(
+            state
+                .store
+                .list_tunnels_of_client(&client.id)
+                .await
+                .map_err(ApiError::from)?,
+        )
+    } else {
+        Vec::new()
+    };
 
     Ok(Json(HeartbeatResponse {
-        heartbeat_secs: cfg.server.heartbeat_secs,
+        heartbeat_secs: cfg.console.heartbeat_secs,
         server_time: rscross_common::time::now_rfc3339(),
         public_ip: Some(peer.ip().to_string()),
-        p2p: p2p_info(&state, &cfg),
-        tunnels: crate::api::desired_tunnels(tunnels),
+        node,
+        tunnels,
     }))
 }
 
@@ -268,7 +277,7 @@ pub async fn tunnels(
         .list_tunnels_of_client(&client.id)
         .await
         .map_err(ApiError::from)?;
-    Ok(Json(crate::api::desired_tunnels(tunnels)))
+    Ok(Json(desired_tunnels(tunnels)))
 }
 
 /// `POST /api/v1/agent/logs`
@@ -282,23 +291,26 @@ pub async fn push_logs(
 
     for entry in entries.into_iter().take(500) {
         let level = entry.level.to_uppercase();
-        let event = crate::logbus::LogEvent {
+        let target = entry
+            .target
+            .clone()
+            .unwrap_or_else(|| format!("rscross-client/{}", client.name));
+
+        state.logs.push(crate::logbus::LogEvent {
             seq: 0,
             ts: rscross_common::time::now_rfc3339(),
             level: level.clone(),
-            target: entry
-                .target
-                .unwrap_or_else(|| format!("rscross-client/{}", client.name)),
+            target: target.clone(),
             message: entry.message.clone(),
-        };
-        state.logs.push(event);
+        });
+
         if let Err(err) = state
             .store
             .insert_log(rscross_store::LogEntry {
                 id: 0,
                 ts: rscross_common::time::now_rfc3339(),
                 level,
-                target: Some(format!("rscross-client/{}", client.name)),
+                target: Some(target),
                 message: entry.message,
                 client_id: Some(client.id.clone()),
                 tunnel_id: None,
@@ -313,20 +325,17 @@ pub async fn push_logs(
     Ok(Json(serde_json::json!({ "accepted": accepted })))
 }
 
-async fn authenticate_agent(
+/// 客户端鉴权。
+pub async fn authenticate_agent(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<(rscross_config::ServerFile, ClientRecord), ApiError> {
-    let token = headers
-        .get(AGENT_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+) -> Result<(rscross_config::ConsoleFile, ClientRecord), ApiError> {
+    let token = header_token(headers, AGENT_HEADER)
         .ok_or_else(|| ApiError::unauthorized("缺少 X-Rscross-Agent 头"))?;
 
     let client = state
         .store
-        .find_client_by_token_hash(&token_hash(token))
+        .find_client_by_token_hash(&token_hash(&token))
         .await
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::unauthorized("agent token 无效"))?;
@@ -339,58 +348,7 @@ async fn authenticate_agent(
     Ok((cfg, client))
 }
 
-fn p2p_info(state: &AppState, cfg: &rscross_config::ServerFile) -> P2pInfo {
-    let enabled = state.p2p.is_some() && cfg.p2p.enabled;
-    P2pInfo {
-        enabled,
-        policy: state.path_selector.policy().as_str().to_string(),
-        server_endpoint_id: state.p2p.as_ref().map(|node| node.id_string()),
-        server_endpoint_addr: state
-            .p2p
-            .as_ref()
-            .and_then(|node| node.addr_json().ok()),
-        relay_mode: cfg.p2p.relay_mode.clone(),
-        address_lookup: cfg.p2p.address_lookup,
-    }
-}
-
-fn public_tunnel_addr(cfg: &rscross_config::ServerFile) -> String {
-    let host = cfg
-        .server
-        .public_url
-        .as_deref()
-        .map(|url| {
-            let no_scheme = url.split("://").nth(1).unwrap_or(url);
-            let host_port = no_scheme.split('/').next().unwrap_or(no_scheme);
-            host_port.split(':').next().unwrap_or(host_port).to_string()
-        })
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| {
-            cfg.server
-                .tunnel_bind
-                .parse::<SocketAddr>()
-                .map(|a| {
-                    if a.ip().is_unspecified() {
-                        "127.0.0.1".to_string()
-                    } else {
-                        a.ip().to_string()
-                    }
-                })
-                .unwrap_or_else(|_| "127.0.0.1".to_string())
-        });
-
-    let port = cfg
-        .server
-        .tunnel_bind
-        .parse::<SocketAddr>()
-        .map(|a| a.port())
-        .unwrap_or(rscross_common::DEFAULT_TUNNEL_PORT);
-
-    format!("{host}:{port}")
-}
-
-/// 名称去重：`name`、`name-2`、`name-3`… 最多尝试 20 次。
-async fn unique_name(state: &AppState, desired: String) -> Result<String, ApiError> {
+async fn unique_client_name(state: &AppState, desired: String) -> Result<String, ApiError> {
     let existing: std::collections::HashSet<String> = state
         .store
         .list_clients()
@@ -403,25 +361,28 @@ async fn unique_name(state: &AppState, desired: String) -> Result<String, ApiErr
     if !existing.contains(&desired) {
         return Ok(desired);
     }
-    for suffix in 2..=20 {
+    for suffix in 2..=50 {
         let candidate = format!("{desired}-{suffix}");
         if !existing.contains(&candidate) {
             return Ok(candidate);
         }
     }
-    Err(ApiError::conflict(format!("名称 {desired} 及其派生名均已被占用")))
+    Err(ApiError::conflict(format!(
+        "名称 {desired} 及其派生名均已被占用"
+    )))
 }
 
 fn non_empty(value: &str) -> Option<String> {
-    non_empty_opt(&Some(value.to_string()))
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn non_empty_opt(value: &Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    value.as_deref().and_then(non_empty)
 }
 
 fn short_id() -> String {

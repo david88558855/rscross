@@ -25,8 +25,9 @@ pub mod relay;
 
 pub use path::{PathChoice, PathProbe, PathSelector};
 pub use p2p::{
-    addr_from_id, decode_addr, encode_addr, load_or_create_secret_key, P2pDataHandler, P2pNode,
-    P2pOptions, P2pStream, TunnelTargets, ALPN_CONTROL, ALPN_DATA,
+    addr_from_id, decode_addr, encode_addr, load_or_create_secret_key, probe_control,
+    P2pDataHandler, P2pNode, P2pOptions, P2pStream, NodeInfoHandler, TunnelTargets, ALPN_CONTROL,
+    ALPN_DATA,
 };
 pub use relay::{RelayServer, RelayTunnelClient, RelayTunnelState};
 

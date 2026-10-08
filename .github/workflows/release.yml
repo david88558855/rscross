@@ -18,7 +18,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  BINARIES: rscross-server rscross-client
+  BINARIES: rscross-console rscross-server rscross-client
 
 jobs:
   build:
@@ -43,7 +43,7 @@ jobs:
       - name: 交叉编译
         run: |
           cross build --release --target ${{ matrix.target }} \
-            --bin rscross-server --bin rscross-client
+            --bin rscross-console --bin rscross-server --bin rscross-client
 
       - name: 打包与校验和
         run: |
@@ -52,7 +52,7 @@ jobs:
           NAME="rscross-${REF}-${{ matrix.target }}"
           mkdir -p "stage/$NAME"
           OUT="target/${{ matrix.target }}/release"
-          cp "$OUT/rscross-server" "$OUT/rscross-client" "stage/$NAME/"
+          cp "$OUT/rscross-console" "$OUT/rscross-server" "$OUT/rscross-client" "stage/$NAME/"
           cp README.md LICENSE "stage/$NAME/" 2>/dev/null || true
           mkdir -p dist
           tar -C stage -czf "dist/$NAME.tar.gz" "$NAME"
@@ -64,11 +64,15 @@ jobs:
           set -euo pipefail
           OUT="target/${{ matrix.target }}/release"
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
-            ldd "$OUT/rscross-server" 2>&1 | grep -Eq "not a dynamic executable|statically linked"
-            "$OUT/rscross-server" --version
+            for bin in rscross-console rscross-server rscross-client; do
+              ldd "$OUT/$bin" 2>&1 | grep -Eq "not a dynamic executable|statically linked"
+              "$OUT/$bin" --version
+            done
           else
             sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static
-            qemu-aarch64-static "$OUT/rscross-server" --version
+            for bin in rscross-console rscross-server rscross-client; do
+              qemu-aarch64-static "$OUT/$bin" --version
+            done
           fi
           echo "✅ ${{ matrix.target }} 静态产物可用"
 
@@ -106,7 +110,7 @@ jobs:
             echo "|---|---|"
             for f in artifacts/*.tar.gz; do
               base="$(basename "$f")"
-              echo "| \`$base\` | musl 静态二进制（server + client） |"
+              echo "| \`$base\` | musl 静态二进制（console + server + client） |"
             done
             echo
             echo "### 校验"
@@ -116,11 +120,17 @@ jobs:
             echo
             echo "### 快速开始"
             echo '```bash'
-            echo "# 服务端"
-            echo "./rscross-server --config rscross-server.toml"
-            echo "# 客户端（令牌在控制台「客户端管理」里签发）"
-            echo "./rscross-client --server http://<服务端IP>:7800 \\"
-            echo "    --tunnel-server <服务端IP>:7835 --name node-1 --enroll-token <令牌>"
+            echo "# 方式 B：单机自用（服务端内嵌控制台）"
+            echo "./rscross-server --embedded --config rscross-server.toml"
+            echo "# 客户端直连这台服务端的控制台（令牌在「客户端管理」页签发）"
+            echo "./rscross-client --console http://<服务端IP>:7800 \\"
+            echo "    --name node-1 --enroll-token <令牌>"
+            echo
+            echo "# 方式 A：多节点汇聚（独立控制台 + N 台服务端节点）"
+            echo "./rscross-console --config rscross-console.toml"
+            echo "#      在控制台「服务端节点」页创建节点，复制命令到公网机器执行："
+            echo "./rscross-server --managed --console http://<控制台IP>:7800 \\"
+            echo "    --name node-1 --enroll-token <节点令牌>"
             echo '```'
           } >> notes.md
           ls -lh artifacts/

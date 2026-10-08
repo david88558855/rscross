@@ -2,7 +2,7 @@
 
 #[tokio::main]
 async fn main() {
-    if let Err(err) = rscross_server::run().await {
+    if let Err(err) = rscross_server::run_node().await {
         eprintln!("rscross-server 启动失败: {err}");
         std::process::exit(1);
     }

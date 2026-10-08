@@ -1,6 +1,6 @@
 [package]
 name = "rscross-server"
-description = "rscross 服务端：反向隧道中继 + Iroh 节点 + 控制台 API + 内嵌 Web 控制台"
+description = "rscross 服务端节点：反向隧道中继 + Iroh 节点；可单机内嵌控制台，也可加入独立控制台"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,20 +18,15 @@ path = "src/main.rs"
 [dependencies]
 rscross-common = { workspace = true }
 rscross-config = { workspace = true }
-rscross-store = { workspace = true }
-rscross-auth = { workspace = true }
 rscross-transport = { workspace = true }
+# http-client：managed 模式需要向远端控制台注册
+rscross-control = { workspace = true, features = ["http-client"] }
 
-axum = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 clap = { workspace = true }
-rust-embed = { workspace = true }
-mime_guess = { workspace = true }
 chrono = { workspace = true }
-uuid = { workspace = true }

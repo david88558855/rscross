@@ -240,3 +240,7 @@ pre.code {
 .muted { color: var(--muted); }
 .right { text-align: right; }
 .mt0 { margin-top: 0 } .mb0 { margin-bottom: 0 }
+
+/* 快速上手步骤 */
+ol.steps { margin: 0; padding-left: 20px; color: #3c4557; font-size: 13px; line-height: 1.9; }
+ol.steps li { margin-bottom: 6px; }

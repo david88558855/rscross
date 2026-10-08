@@ -1,9 +1,10 @@
-//! 控制台与 Agent 的 HTTP API。
+//! 控制面 HTTP API。
 
 pub mod agent;
 pub mod auth;
 pub mod client;
 pub mod misc;
+pub mod nodes;
 
 use axum::routing::{get, patch, post};
 use axum::Router;
@@ -13,7 +14,9 @@ use rscross_store::TunnelRecord;
 use crate::console;
 use crate::state::AppState;
 
-/// Agent 认证头。
+/// 服务端节点认证头。
+pub const NODE_HEADER: &str = "x-rscross-node";
+/// 内网客户端认证头。
 pub const AGENT_HEADER: &str = "x-rscross-agent";
 
 /// 组装路由。
@@ -34,20 +37,31 @@ pub fn router() -> Router<AppState> {
         // 概览 / 报表
         .route("/api/v1/overview", get(misc::overview))
         .route("/api/v1/traffic", get(misc::traffic))
-        // 客户端
-        .route("/api/v1/clients", get(client::list_clients).post(client::create_client))
+        // 服务端节点（控制台侧管理）
+        .route("/api/v1/nodes", get(nodes::list_nodes).post(nodes::create_node))
+        .route(
+            "/api/v1/nodes/{id}",
+            get(nodes::get_node)
+                .patch(nodes::patch_node)
+                .delete(nodes::delete_node),
+        )
+        .route("/api/v1/nodes/{id}/token", post(nodes::rotate_node_token))
+        // 客户端与隧道
+        .route(
+            "/api/v1/clients",
+            get(client::list_clients).post(client::create_client),
+        )
         .route(
             "/api/v1/clients/{id}",
             get(client::get_client)
                 .patch(client::patch_client)
                 .delete(client::delete_client),
         )
+        .route("/api/v1/tunnels", get(client::list_tunnels))
         .route(
             "/api/v1/clients/{id}/tunnels",
             get(client::list_client_tunnels).post(client::create_tunnel),
         )
-        // 隧道
-        .route("/api/v1/tunnels", get(client::list_tunnels))
         .route(
             "/api/v1/tunnels/{id}",
             patch(client::patch_tunnel).delete(client::delete_tunnel),
@@ -56,7 +70,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/logs", get(misc::logs))
         .route("/api/v1/audit", get(misc::audit_log))
         .route("/api/v1/config", get(misc::get_config).put(misc::put_config))
-        // Agent（内网节点）
+        // 服务端节点侧（节点进程调用）
+        .route("/api/v1/node/enroll", post(nodes::node_enroll))
+        .route("/api/v1/node/heartbeat", post(nodes::node_heartbeat))
+        .route("/api/v1/node/self", get(nodes::node_self))
+        // 内网客户端侧（客户端进程调用）
         .route("/api/v1/agent/enroll", post(agent::enroll))
         .route("/api/v1/agent/heartbeat", post(agent::heartbeat))
         .route("/api/v1/agent/tunnels", get(agent::tunnels))
@@ -105,7 +123,7 @@ pub fn parse_proto(raw: &str) -> Option<rscross_common::TunnelProto> {
     }
 }
 
-/// 归一化并校验客户端名（用于唯一索引与展示）。
+/// 归一化并校验名称（用于唯一索引与展示）。
 pub fn normalize_name(raw: &str) -> Result<String, crate::error::ApiError> {
     let name = raw.trim();
     if name.is_empty() {
@@ -123,4 +141,24 @@ pub fn normalize_name(raw: &str) -> Result<String, crate::error::ApiError> {
         ));
     }
     Ok(name.to_string())
+}
+
+/// 把「唯一约束冲突」翻译成 409，其余保持原样。
+pub fn map_store_conflict(err: rscross_common::Error) -> crate::error::ApiError {
+    let text = err.to_string();
+    if text.contains("UNIQUE") || text.contains("constraint") {
+        crate::error::ApiError::conflict("名称或端口与已有记录冲突")
+    } else {
+        crate::error::ApiError::from(err)
+    }
+}
+
+/// 从请求头取任意认证头的值。
+pub fn header_token(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }

@@ -6,6 +6,8 @@ members = [
     "crates/rscross-store",
     "crates/rscross-auth",
     "crates/rscross-transport",
+    "crates/rscross-control",
+    "crates/rscross-console",
     "crates/rscross-server",
     "crates/rscross-client",
 ]
@@ -25,6 +27,7 @@ rscross-config = { path = "crates/rscross-config" }
 rscross-store = { path = "crates/rscross-store" }
 rscross-auth = { path = "crates/rscross-auth" }
 rscross-transport = { path = "crates/rscross-transport" }
+rscross-control = { path = "crates/rscross-control" }
 
 # --- 传输层核心依赖（要求 1）---
 # Iroh: QUIC + NAT 打洞 + Relay 回退 + 公钥身份/密钥交换 + 地址发现

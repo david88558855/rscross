@@ -2,7 +2,7 @@ name: ci
 
 # 本仓库禁止本地编译：所有验证都在这里完成。
 # 顺序刻意设计为 fmt → check → (test | clippy | musl build) → e2e，
-# 让语法/类型错误在第一层就暴露，而不是等三个平台的交叉编译跑完。
+# 让语法/类型错误在第一层就暴露，而不是等两个平台的交叉编译跑完。
 
 on:
   push:
@@ -14,10 +14,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
-  # 交叉编译目标（musl 静态、无动态依赖）
-  TARGETS: |
-    x86_64-unknown-linux-musl
-    aarch64-unknown-linux-musl
 
 jobs:
   fmt:
@@ -53,26 +49,27 @@ jobs:
     name: cargo test
     needs: check
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - rscross-common
+          - rscross-config
+          - rscross-store
+          - rscross-auth
+          - rscross-transport
+          - rscross-control
+          - rscross-server
+          - rscross-client
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # 逐 crate 跑并加硬超时：出现死锁时能立刻定位到具体 crate，
-      # 而不是挂满 6 小时才失败。
-      - name: test rscross-common
-        run: timeout -k 10 300 cargo test -p rscross-common -- --nocapture --test-threads=1
-      - name: test rscross-config
-        run: timeout -k 10 300 cargo test -p rscross-config -- --nocapture --test-threads=1
-      - name: test rscross-store
-        run: timeout -k 10 300 cargo test -p rscross-store -- --nocapture --test-threads=1
-      - name: test rscross-auth
-        run: timeout -k 10 300 cargo test -p rscross-auth -- --nocapture --test-threads=1
-      - name: test rscross-transport
-        run: timeout -k 10 600 cargo test -p rscross-transport -- --nocapture --test-threads=1
-      - name: test rscross-server
-        run: timeout -k 10 300 cargo test -p rscross-server -- --nocapture --test-threads=1
-      - name: test rscross-client
-        run: timeout -k 10 300 cargo test -p rscross-client -- --nocapture --test-threads=1
+      # 而不是挂满 6 小时才失败。--nocapture --test-threads=1 让日志里
+      # 最后一条就是卡住的那个用例。
+      - name: cargo test -p ${{ matrix.crate }}
+        run: timeout -k 10 600 cargo test -p ${{ matrix.crate }} -- --nocapture --test-threads=1
 
   clippy:
     name: cargo clippy
@@ -86,7 +83,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets --all-features
 
   build-musl:
     name: musl ${{ matrix.target }}
@@ -111,39 +108,44 @@ jobs:
       - name: 交叉编译（静态、无动态依赖）
         run: |
           cross build --release --target ${{ matrix.target }} \
-            --bin rscross-server --bin rscross-client
+            --bin rscross-console --bin rscross-server --bin rscross-client
       - name: 校验产物
         run: |
           set -euo pipefail
           OUT="target/${{ matrix.target }}/release"
-          file "$OUT/rscross-server" "$OUT/rscross-client"
-          ls -lh "$OUT/rscross-server" "$OUT/rscross-client"
+          file "$OUT/rscross-console" "$OUT/rscross-server" "$OUT/rscross-client"
+          ls -lh "$OUT/rscross-console" "$OUT/rscross-server" "$OUT/rscross-client"
           mkdir -p dist
-          cp "$OUT/rscross-server" "$OUT/rscross-client" dist/
-          # --print-default-config 是纯 CPU 路径，可安全用于冒烟
-          ./dist/rscross-server --print-default-config > /dev/null
-          ./dist/rscross-client --print-default-config > /dev/null
+          cp "$OUT/rscross-console" "$OUT/rscross-server" "$OUT/rscross-client" dist/
+          # --print-default-config / --version 是纯 CPU 路径，可安全用于冒烟
+          ./dist/rscross-console --print-default-config > /dev/null
+          ./dist/rscross-server  --print-default-config > /dev/null
+          ./dist/rscross-client  --print-default-config > /dev/null
       - name: 静态链接断言（x86_64 本机可直接验证）
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           set -euo pipefail
-          if ldd dist/rscross-server 2>&1 | grep -q "not a dynamic executable"; then
-            echo "✅ 确认静态链接"
-          elif ldd dist/rscross-server 2>&1 | grep -q "statically linked"; then
-            echo "✅ 确认静态链接"
-          else
-            echo "❌ rscross-server 仍是动态可执行文件："
-            ldd dist/rscross-server
-            exit 1
-          fi
-          ./dist/rscross-server --version
+          for bin in rscross-console rscross-server rscross-client; do
+            if ldd "dist/$bin" 2>&1 | grep -q "not a dynamic executable"; then
+              echo "✅ $bin 静态链接"
+            elif ldd "dist/$bin" 2>&1 | grep -q "statically linked"; then
+              echo "✅ $bin 静态链接"
+            else
+              echo "❌ $bin 仍是动态可执行文件："
+              ldd "dist/$bin"
+              exit 1
+            fi
+            "./dist/$bin" --version
+          done
       - name: 静态链接断言（aarch64 用 qemu 交叉验证）
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-user-static
-          qemu-aarch64-static dist/rscross-server --version
+          for bin in rscross-console rscross-server rscross-client; do
+            qemu-aarch64-static "dist/$bin" --version
+          done
           echo "✅ aarch64 musl 产物可执行"
       - uses: actions/upload-artifact@v4
         with:
@@ -161,6 +163,6 @@ jobs:
         with:
           name: rscross-x86_64-unknown-linux-musl
           path: dist
-      - run: chmod +x dist/rscross-server dist/rscross-client
-      - name: 真实二进制全链路（服务端 + 客户端 + 隧道 + 转发）
+      - run: chmod +x dist/rscross-console dist/rscross-server dist/rscross-client
+      - name: 两种部署形态全链路（单机内嵌 / 多节点汇聚）
         run: python3 tests/e2e/e2e.py dist

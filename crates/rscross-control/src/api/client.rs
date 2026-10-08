@@ -1,4 +1,4 @@
-//! 客户端与隧道管理 API。
+//! 客户端与隧道的管理 API（控制台侧）。
 
 use std::net::SocketAddr;
 
@@ -6,11 +6,12 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use rscross_auth::{new_enroll_token, token_hash};
-use rscross_config::{parse_port_range, ServerFile};
+use rscross_config::{parse_port_range, ConsoleFile};
 use rscross_store::{ClientRecord, EnrollTokenRecord, TunnelPatch, TunnelRecord};
 use serde::{Deserialize, Serialize};
 
-use crate::api::{normalize_name, parse_proto};
+use crate::api::nodes::{console_url_of, resolve_node};
+use crate::api::{map_store_conflict, normalize_name, parse_proto};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -21,6 +22,8 @@ use crate::state::AppState;
 pub struct CreateClientRequest {
     /// 期望的节点名（留空则用随机名）。
     pub name: Option<String>,
+    /// 归属的服务端节点；控制台只有单个节点时可不填。
+    pub node_id: Option<String>,
     /// 接入令牌有效期（分钟），默认取配置。
     pub ttl_minutes: Option<u64>,
 }
@@ -32,6 +35,10 @@ pub struct CreateClientResponse {
     pub enroll_token: String,
     /// 过期时间。
     pub expires_at: String,
+    /// 归属节点 ID。
+    pub node_id: String,
+    /// 归属节点名。
+    pub node_name: String,
     /// 可直接复制执行的接入命令。
     pub command: String,
 }
@@ -43,6 +50,8 @@ pub struct PatchClientRequest {
     pub name: Option<String>,
     /// 启用 / 禁用。
     pub disabled: Option<bool>,
+    /// 改派归属节点；空字符串表示解除归属。
+    pub node_id: Option<String>,
 }
 
 /// `GET /api/v1/clients`
@@ -73,8 +82,13 @@ pub async fn get_client(
         .list_tunnels_of_client(&id)
         .await
         .map_err(ApiError::from)?;
+    let node = match client.node_id.as_deref() {
+        Some(node_id) => state.store.find_node(node_id).await.map_err(ApiError::from)?,
+        None => None,
+    };
     Ok(Json(serde_json::json!({
         "client": client,
+        "node": node,
         "tunnels": tunnels,
     })))
 }
@@ -88,6 +102,9 @@ pub async fn create_client(
     let user = state.require_admin(&headers).await?;
     let cfg = state.config_snapshot().await;
 
+    // 校验/解析归属节点：多节点时必须显式指定。
+    let node = resolve_node(&state, req.node_id.as_deref()).await?;
+
     let name = match req.name.as_deref() {
         Some(raw) if !raw.trim().is_empty() => Some(normalize_name(raw)?),
         _ => None,
@@ -100,14 +117,13 @@ pub async fn create_client(
 
     let token = new_enroll_token();
     let now = rscross_common::time::now();
-    let expires_at = rscross_common::time::to_rfc3339(
-        now + chrono::Duration::minutes(ttl as i64),
-    );
+    let expires_at = rscross_common::time::to_rfc3339(now + chrono::Duration::minutes(ttl as i64));
 
     state
         .store
         .insert_enroll_token(EnrollTokenRecord {
             token_hash: token_hash(&token),
+            node_id: Some(node.id.clone()),
             client_name: name.clone(),
             created_by: Some(user.username.clone()),
             created_at: rscross_common::time::to_rfc3339(now),
@@ -118,18 +134,14 @@ pub async fn create_client(
         .await
         .map_err(ApiError::from)?;
 
-    let command = build_enroll_command(
-        &cfg,
-        name.as_deref().unwrap_or("<节点名>"),
-        &token,
-    );
+    let command = build_enroll_command(&cfg, name.as_deref().unwrap_or("<节点名>"), &token);
 
     state
         .audit(
             Some(&user.id),
             "issue_enroll_token",
             name.clone(),
-            Some(format!("有效期 {ttl} 分钟")),
+            Some(format!("归属节点={} 有效期={ttl}分钟", node.name)),
             &headers,
         )
         .await;
@@ -137,6 +149,8 @@ pub async fn create_client(
     Ok(Json(CreateClientResponse {
         enroll_token: token,
         expires_at,
+        node_id: node.id,
+        node_name: node.name,
         command,
     }))
 }
@@ -158,8 +172,51 @@ pub async fn patch_client(
             .await
             .map_err(map_store_conflict)?;
         state
-            .audit(Some(&user.id), "rename_client", Some(id.clone()), Some(name), &headers)
+            .audit(
+                Some(&user.id),
+                "rename_client",
+                Some(id.clone()),
+                Some(name),
+                &headers,
+            )
             .await;
+    }
+
+    if let Some(raw) = req.node_id.as_deref() {
+        let node_id = raw.trim();
+        if node_id.is_empty() {
+            state
+                .store
+                .reassign_client(&id, None)
+                .await
+                .map_err(ApiError::from)?;
+            state
+                .audit(
+                    Some(&user.id),
+                    "detach_client_node",
+                    Some(id.clone()),
+                    None,
+                    &headers,
+                )
+                .await;
+        } else {
+            // 改派前先确认目标节点存在且启用
+            let node = resolve_node(&state, Some(node_id)).await?;
+            state
+                .store
+                .reassign_client(&id, Some(&node.id))
+                .await
+                .map_err(ApiError::from)?;
+            state
+                .audit(
+                    Some(&user.id),
+                    "reassign_client_node",
+                    Some(id.clone()),
+                    Some(format!("→ {}", node.name)),
+                    &headers,
+                )
+                .await;
+        }
     }
 
     if let Some(disabled) = req.disabled {
@@ -171,7 +228,11 @@ pub async fn patch_client(
         state
             .audit(
                 Some(&user.id),
-                if disabled { "disable_client" } else { "enable_client" },
+                if disabled {
+                    "disable_client"
+                } else {
+                    "enable_client"
+                },
                 Some(id.clone()),
                 None,
                 &headers,
@@ -204,7 +265,11 @@ pub async fn delete_client(
     if !existed {
         return Err(ApiError::not_found("客户端不存在"));
     }
-    state.store.delete_client(&id).await.map_err(ApiError::from)?;
+    state
+        .store
+        .delete_client(&id)
+        .await
+        .map_err(ApiError::from)?;
     state
         .audit(Some(&user.id), "delete_client", Some(id), None, &headers)
         .await;
@@ -222,7 +287,7 @@ pub struct CreateTunnelRequest {
     pub proto: String,
     /// 本地目标地址。
     pub local_addr: String,
-    /// 公网端口（tcp/udp 必填；留空则从端口池自动分配）。
+    /// 公网端口（tcp/udp 可选；留空则从端口池自动分配）。
     pub remote_port: Option<i64>,
     /// HTTP 路由 Host（http/https 必填或由默认域名推导）。
     pub host: Option<String>,
@@ -305,9 +370,9 @@ pub async fn create_tunnel(
     let proto = parse_proto(&req.proto)
         .ok_or_else(|| ApiError::bad_request("proto 只能是 tcp / http / https / udp"))?;
     let local_addr = req.local_addr.trim().to_string();
-    local_addr
-        .parse::<SocketAddr>()
-        .map_err(|e| ApiError::bad_request(format!("local_addr 非法（应形如 127.0.0.1:8080）: {e}")))?;
+    local_addr.parse::<SocketAddr>().map_err(|e| {
+        ApiError::bad_request(format!("local_addr 非法（应形如 127.0.0.1:8080）: {e}"))
+    })?;
 
     let existing = state
         .store
@@ -363,10 +428,7 @@ pub async fn create_tunnel(
         local_addr: local_addr.clone(),
         remote_port,
         host: host.clone(),
-        path_prefix: req
-            .path_prefix
-            .clone()
-            .filter(|s| !s.trim().is_empty()),
+        path_prefix: req.path_prefix.clone().filter(|s| !s.trim().is_empty()),
         enabled: req.enabled.unwrap_or(true),
         rate_limit_kbps: req
             .rate_limit_kbps
@@ -390,7 +452,7 @@ pub async fn create_tunnel(
             Some(&user.id),
             "create_tunnel",
             Some(format!("{}:{}", record.client_id, record.name)),
-            Some(format!("{} ← {}", proto, local_addr)),
+            Some(format!("{proto} ← {local_addr}")),
             &headers,
         )
         .await;
@@ -496,7 +558,7 @@ pub async fn delete_tunnel(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-fn allocate_port(cfg: &ServerFile, existing: &[TunnelRecord]) -> Result<i64, ApiError> {
+fn allocate_port(cfg: &ConsoleFile, existing: &[TunnelRecord]) -> Result<i64, ApiError> {
     let (lo, hi) = parse_port_range(&cfg.ingress.port_range).map_err(ApiError::from)?;
     let used: std::collections::HashSet<i64> =
         existing.iter().filter_map(|t| t.remote_port).collect();
@@ -511,57 +573,15 @@ fn allocate_port(cfg: &ServerFile, existing: &[TunnelRecord]) -> Result<i64, Api
     )))
 }
 
-/// 把「唯一约束冲突」翻译成 409，其余保持原样。
-fn map_store_conflict(err: rscross_common::Error) -> ApiError {
-    let text = err.to_string();
-    if text.contains("UNIQUE") || text.contains("constraint") {
-        ApiError::conflict("名称或端口与已有记录冲突")
-    } else {
-        ApiError::from(err)
-    }
-}
-
 /// 生成客户端接入命令。
-fn build_enroll_command(cfg: &ServerFile, name: &str, token: &str) -> String {
-    let api = cfg
-        .server
-        .public_url
-        .clone()
-        .unwrap_or_else(|| format!("http://{}", cfg.server.admin_bind));
-
-    let host = public_host(cfg);
-    let tunnel_port = cfg
-        .server
-        .tunnel_bind
-        .parse::<SocketAddr>()
-        .map(|a| a.port())
-        .unwrap_or(rscross_common::DEFAULT_TUNNEL_PORT);
-
+///
+/// 客户端只与控制台对话；数据面坐标（连哪台服务端节点）由控制台在注册响应里下发，
+/// 因此命令里**不需要**出现节点地址 —— 这也让「把客户端迁到另一台节点」不需要改客户端配置。
+fn build_enroll_command(cfg: &ConsoleFile, name: &str, token: &str) -> String {
     format!(
-        "rscross-client --server {api} --tunnel-server {host}:{tunnel_port} --name {name} --enroll-token {token}"
+        "rscross-client --console {} --name {name} --enroll-token {token}",
+        console_url_of(cfg)
     )
-}
-
-fn public_host(cfg: &ServerFile) -> String {
-    if let Some(url) = cfg.server.public_url.as_deref() {
-        let no_scheme = url.split("://").nth(1).unwrap_or(url);
-        let host_port = no_scheme.split('/').next().unwrap_or(no_scheme);
-        let host = host_port.split(':').next().unwrap_or(host_port);
-        if !host.is_empty() {
-            return host.to_string();
-        }
-    }
-    cfg.server
-        .admin_bind
-        .parse::<SocketAddr>()
-        .map(|a| {
-            if a.ip().is_unspecified() {
-                "127.0.0.1".to_string()
-            } else {
-                a.ip().to_string()
-            }
-        })
-        .unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
 #[cfg(test)]
@@ -570,7 +590,7 @@ mod tests {
 
     #[test]
     fn port_allocation_skips_used() {
-        let cfg = ServerFile::default();
+        let cfg = ConsoleFile::default();
         let existing = vec![TunnelRecord {
             id: "t".into(),
             client_id: "c".into(),
@@ -586,32 +606,20 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }];
-        let port = allocate_port(&cfg, &existing).expect("allocate");
-        assert_eq!(port, 20001);
+        assert_eq!(allocate_port(&cfg, &existing).expect("allocate"), 20001);
     }
 
     #[test]
-    fn public_host_prefers_public_url() {
-        let mut cfg = ServerFile::default();
-        cfg.server.public_url = Some("https://tunnel.example.com/".to_string());
-        assert_eq!(public_host(&cfg), "tunnel.example.com");
-
-        cfg.server.public_url = None;
-        cfg.server.admin_bind = "0.0.0.0:7800".to_string();
-        assert_eq!(public_host(&cfg), "127.0.0.1");
-
-        cfg.server.admin_bind = "10.0.0.5:7800".to_string();
-        assert_eq!(public_host(&cfg), "10.0.0.5");
-    }
-
-    #[test]
-    fn enroll_command_contains_endpoint_and_token() {
-        let mut cfg = ServerFile::default();
-        cfg.server.public_url = Some("https://t.example.com".to_string());
-        let cmd = build_enroll_command(&cfg, "node-1", "rse_abc");
-        assert!(cmd.contains("--server https://t.example.com"));
-        assert!(cmd.contains("--name node-1"));
+    fn enroll_command_targets_console_not_node() {
+        let mut cfg = ConsoleFile::default();
+        cfg.console.public_url = Some("https://panel.example.com".to_string());
+        let cmd = build_enroll_command(&cfg, "node-1-laptop", "rse_abc");
+        assert!(cmd.contains("--console https://panel.example.com"));
+        assert!(cmd.contains("--name node-1-laptop"));
         assert!(cmd.contains("--enroll-token rse_abc"));
-        assert!(cmd.contains(":7835"));
+        assert!(
+            !cmd.contains("--tunnel-server"),
+            "客户端不应被要求手填节点地址：归属由控制台下发"
+        );
     }
 }

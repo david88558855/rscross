@@ -116,6 +116,11 @@ pub fn new_agent_token() -> String {
     format!("rsa_{}", new_token())
 }
 
+/// 生成服务端**节点** token，形如 `rsn_<32hex>`。
+pub fn new_node_token() -> String {
+    format!("rsn_{}", new_token())
+}
+
 /// 生成 `enroll` token，形如 `rse_<32hex>`。
 pub fn new_enroll_token() -> String {
     format!("rse_{}", new_token())
@@ -298,6 +303,13 @@ mod tests {
         assert_eq!(token_hash(&t), token_hash(&t));
         assert_ne!(token_hash(&t), t);
         assert_eq!(token_hash(&t).len(), 64);
+    }
+
+    #[test]
+    fn token_prefixes_are_distinguishable() {
+        assert!(new_agent_token().starts_with("rsa_"));
+        assert!(new_node_token().starts_with("rsn_"));
+        assert!(new_enroll_token().starts_with("rse_"));
     }
 
     #[test]

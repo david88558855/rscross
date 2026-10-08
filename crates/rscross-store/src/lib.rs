@@ -12,7 +12,7 @@ use rscross_common::{Error, Result};
 pub mod model;
 
 pub use model::{
-    AuditEntry, ClientRecord, EnrollTokenRecord, LogEntry, OverviewStats, SessionRecord,
+    AuditEntry, ClientRecord, EnrollTokenRecord, LogEntry, NodeRecord, OverviewStats, SessionRecord,
     TrafficPoint, TunnelRecord, UserRecord,
 };
 
@@ -78,7 +78,7 @@ impl Store {
 
     /// 执行 schema 迁移（幂等）。
     pub fn migrate(&self) -> Result<()> {
-        let mut guard = self.lock();
+        let guard = self.lock();
         guard
             .execute_batch(SCHEMA)
             .map_err(|e| Error::store(format!("迁移失败: {e}")))?;
@@ -241,7 +241,7 @@ impl Store {
         .await
     }
 
-    /// 按 token 哈希查询有效会话。
+    /// 按 token 哈希查询会话。
     pub async fn find_session(&self, token_hash: &str) -> Result<Option<SessionRecord>> {
         let token_hash = token_hash.to_string();
         self.blocking(move |c| {
@@ -269,8 +269,11 @@ impl Store {
     pub async fn delete_session(&self, token_hash: &str) -> Result<()> {
         let token_hash = token_hash.to_string();
         self.blocking(move |c| {
-            c.execute("DELETE FROM sessions WHERE token_hash = ?1", params![token_hash])
-                .map_err(Error::store)?;
+            c.execute(
+                "DELETE FROM sessions WHERE token_hash = ?1",
+                params![token_hash],
+            )
+            .map_err(Error::store)?;
             Ok(())
         })
         .await
@@ -286,6 +289,237 @@ impl Store {
         .await
     }
 
+    // ---------------------------------------------------------------- nodes
+
+    /// 插入节点。
+    pub async fn insert_node(&self, rec: NodeRecord) -> Result<()> {
+        self.blocking(move |c| {
+            c.execute(
+                "INSERT INTO nodes
+                 (id, name, status, node_token_hash, tunnel_token, public_host, tunnel_port,
+                  ingress_port, version, os, arch, endpoint_id, endpoint_addr, public_ip,
+                  last_seen_at, last_error, created_at, updated_at, disabled)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                params![
+                    rec.id,
+                    rec.name,
+                    rec.status,
+                    rec.node_token_hash,
+                    rec.tunnel_token,
+                    rec.public_host,
+                    rec.tunnel_port,
+                    rec.ingress_port,
+                    rec.version,
+                    rec.os,
+                    rec.arch,
+                    rec.endpoint_id,
+                    rec.endpoint_addr,
+                    rec.public_ip,
+                    rec.last_seen_at,
+                    rec.last_error,
+                    rec.created_at,
+                    rec.updated_at,
+                    rec.disabled as i64,
+                ],
+            )
+            .map_err(Error::store)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 按 ID 查询节点。
+    pub async fn find_node(&self, id: &str) -> Result<Option<NodeRecord>> {
+        let id = id.to_string();
+        self.blocking(move |c| {
+            c.query_row(&format!("{NODE_SELECT} WHERE id = ?1"), params![id], map_node)
+                .optional()
+                .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 按名称查询节点。
+    pub async fn find_node_by_name(&self, name: &str) -> Result<Option<NodeRecord>> {
+        let name = name.to_string();
+        self.blocking(move |c| {
+            c.query_row(
+                &format!("{NODE_SELECT} WHERE name = ?1"),
+                params![name],
+                map_node,
+            )
+            .optional()
+            .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 按 node token 哈希查询（节点心跳鉴权用）。
+    pub async fn find_node_by_token_hash(&self, hash: &str) -> Result<Option<NodeRecord>> {
+        let hash = hash.to_string();
+        self.blocking(move |c| {
+            c.query_row(
+                &format!("{NODE_SELECT} WHERE node_token_hash = ?1"),
+                params![hash],
+                map_node,
+            )
+            .optional()
+            .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 列出全部节点。
+    pub async fn list_nodes(&self) -> Result<Vec<NodeRecord>> {
+        self.blocking(move |c| {
+            let mut stmt = c
+                .prepare(&format!("{NODE_SELECT} ORDER BY created_at ASC"))
+                .map_err(Error::store)?;
+            let rows = stmt.query_map([], map_node).map_err(Error::store)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 节点数量。
+    pub async fn count_nodes(&self) -> Result<i64> {
+        self.blocking(|c| {
+            c.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
+                .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 更新节点心跳与运行时信息。
+    pub async fn touch_node(&self, id: String, patch: NodeRuntimePatch) -> Result<()> {
+        let now = rscross_common::time::now_rfc3339();
+        self.blocking(move |c| {
+            let n = c
+                .execute(
+                    "UPDATE nodes SET status = 'online', last_seen_at = ?2, updated_at = ?2,
+                        version = COALESCE(?3, version), os = COALESCE(?4, os),
+                        arch = COALESCE(?5, arch), endpoint_id = COALESCE(?6, endpoint_id),
+                        endpoint_addr = COALESCE(?7, endpoint_addr),
+                        public_ip = COALESCE(?8, public_ip),
+                        tunnel_port = COALESCE(?9, tunnel_port),
+                        ingress_port = COALESCE(?10, ingress_port),
+                        last_error = NULL
+                     WHERE id = ?1",
+                    params![
+                        id,
+                        now,
+                        patch.version,
+                        patch.os,
+                        patch.arch,
+                        patch.endpoint_id,
+                        patch.endpoint_addr,
+                        patch.public_ip,
+                        patch.tunnel_port,
+                        patch.ingress_port,
+                    ],
+                )
+                .map_err(Error::store)?;
+            if n == 0 {
+                return Err(Error::store("节点不存在"));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// 把「超过阈值未心跳」的节点标记为离线。
+    pub async fn mark_stale_nodes_offline(&self, cutoff_rfc3339: String) -> Result<usize> {
+        self.blocking(move |c| {
+            c.execute(
+                "UPDATE nodes SET status = 'offline', updated_at = ?1
+                 WHERE status = 'online' AND (last_seen_at IS NULL OR last_seen_at < ?2)",
+                params![rscross_common::time::now_rfc3339(), cutoff_rfc3339],
+            )
+            .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 设置节点启用/禁用。
+    pub async fn set_node_disabled(&self, id: &str, disabled: bool) -> Result<()> {
+        let (id, now) = (id.to_string(), rscross_common::time::now_rfc3339());
+        self.blocking(move |c| {
+            let n = c
+                .execute(
+                    "UPDATE nodes SET disabled = ?2, status = CASE WHEN ?2 = 1 THEN 'disabled'
+                        ELSE 'pending' END, updated_at = ?3 WHERE id = ?1",
+                    params![id, disabled as i64, now],
+                )
+                .map_err(Error::store)?;
+            if n == 0 {
+                return Err(Error::store("节点不存在"));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// 更新节点可变字段（名称、对外主机名）。
+    pub async fn update_node(&self, patch: NodePatch) -> Result<()> {
+        let now = rscross_common::time::now_rfc3339();
+        self.blocking(move |c| {
+            let n = c
+                .execute(
+                    "UPDATE nodes SET name = COALESCE(?2, name),
+                        public_host = ?3, updated_at = ?4
+                     WHERE id = ?1",
+                    params![patch.id, patch.name, patch.public_host, now],
+                )
+                .map_err(Error::store)?;
+            if n == 0 {
+                return Err(Error::store("节点不存在"));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// 替换节点的 token 摘要（轮换凭证用）。
+    pub async fn set_node_token_hash(&self, id: &str, token_hash: &str) -> Result<()> {
+        let (id, token_hash, now) = (
+            id.to_string(),
+            token_hash.to_string(),
+            rscross_common::time::now_rfc3339(),
+        );
+        self.blocking(move |c| {
+            let n = c
+                .execute(
+                    "UPDATE nodes SET node_token_hash = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, token_hash, now],
+                )
+                .map_err(Error::store)?;
+            if n == 0 {
+                return Err(Error::store("节点不存在"));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// 删除节点（其下客户端会置空归属而不是级联删除，避免误删内网记录）。
+    pub async fn delete_node(&self, id: &str) -> Result<()> {
+        let id = id.to_string();
+        self.blocking(move |c| {
+            let tx = c.unchecked_transaction().map_err(Error::store)?;
+            tx.execute(
+                "UPDATE clients SET node_id = NULL WHERE node_id = ?1",
+                params![id],
+            )
+            .map_err(Error::store)?;
+            tx.execute("DELETE FROM nodes WHERE id = ?1", params![id])
+                .map_err(Error::store)?;
+            tx.commit().map_err(Error::store)?;
+            Ok(())
+        })
+        .await
+    }
+
     // -------------------------------------------------------------- clients
 
     /// 插入客户端。
@@ -293,11 +527,12 @@ impl Store {
         self.blocking(move |c| {
             c.execute(
                 "INSERT INTO clients
-                 (id, name, status, agent_token_hash, version, os, arch, endpoint_id,
+                 (id, node_id, name, status, agent_token_hash, version, os, arch, endpoint_id,
                   endpoint_addr, public_ip, last_seen_at, last_error, created_at, updated_at, disabled)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                 params![
                     rec.id,
+                    rec.node_id,
                     rec.name,
                     rec.status,
                     rec.agent_token_hash,
@@ -357,7 +592,26 @@ impl Store {
                 .prepare(&format!("{CLIENT_SELECT} ORDER BY created_at DESC"))
                 .map_err(Error::store)?;
             let rows = stmt.query_map([], map_client).map_err(Error::store)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Error::store)
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 列出某节点下的客户端。
+    pub async fn list_clients_of_node(&self, node_id: &str) -> Result<Vec<ClientRecord>> {
+        let node_id = node_id.to_string();
+        self.blocking(move |c| {
+            let mut stmt = c
+                .prepare(&format!(
+                    "{CLIENT_SELECT} WHERE node_id = ?1 ORDER BY created_at DESC"
+                ))
+                .map_err(Error::store)?;
+            let rows = stmt
+                .query_map(params![node_id], map_client)
+                .map_err(Error::store)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Error::store)
         })
         .await
     }
@@ -372,11 +626,7 @@ impl Store {
     }
 
     /// 更新心跳与运行时信息。
-    pub async fn touch_client(
-        &self,
-        id: String,
-        runtime: ClientRuntimePatch,
-    ) -> Result<()> {
+    pub async fn touch_client(&self, id: String, runtime: ClientRuntimePatch) -> Result<()> {
         let now = rscross_common::time::now_rfc3339();
         self.blocking(move |c| {
             let n = c
@@ -461,6 +711,28 @@ impl Store {
         .await
     }
 
+    /// 改派客户端归属节点。
+    pub async fn reassign_client(&self, id: &str, node_id: Option<&str>) -> Result<()> {
+        let (id, node_id, now) = (
+            id.to_string(),
+            node_id.map(str::to_string),
+            rscross_common::time::now_rfc3339(),
+        );
+        self.blocking(move |c| {
+            let n = c
+                .execute(
+                    "UPDATE clients SET node_id = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, node_id, now],
+                )
+                .map_err(Error::store)?;
+            if n == 0 {
+                return Err(Error::store("客户端不存在"));
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// 删除客户端（级联删除隧道与流量采样）。
     pub async fn delete_client(&self, id: &str) -> Result<()> {
         let id = id.to_string();
@@ -468,8 +740,11 @@ impl Store {
             let tx = c.unchecked_transaction().map_err(Error::store)?;
             tx.execute("DELETE FROM tunnels WHERE client_id = ?1", params![id])
                 .map_err(Error::store)?;
-            tx.execute("DELETE FROM traffic_samples WHERE client_id = ?1", params![id])
-                .map_err(Error::store)?;
+            tx.execute(
+                "DELETE FROM traffic_samples WHERE client_id = ?1",
+                params![id],
+            )
+            .map_err(Error::store)?;
             tx.execute("DELETE FROM clients WHERE id = ?1", params![id])
                 .map_err(Error::store)?;
             tx.commit().map_err(Error::store)?;
@@ -485,10 +760,11 @@ impl Store {
         self.blocking(move |c| {
             c.execute(
                 "INSERT INTO enroll_tokens
-                 (token_hash, client_name, created_by, created_at, expires_at)
-                 VALUES (?1,?2,?3,?4,?5)",
+                 (token_hash, node_id, client_name, created_by, created_at, expires_at)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
                 params![
                     rec.token_hash,
+                    rec.node_id,
                     rec.client_name,
                     rec.created_by,
                     rec.created_at,
@@ -506,18 +782,20 @@ impl Store {
         let hash = hash.to_string();
         self.blocking(move |c| {
             c.query_row(
-                "SELECT token_hash, client_name, created_by, created_at, expires_at, used_at, used_client_id
+                "SELECT token_hash, node_id, client_name, created_by, created_at, expires_at,
+                        used_at, used_client_id
                  FROM enroll_tokens WHERE token_hash = ?1",
                 params![hash],
                 |row| {
                     Ok(EnrollTokenRecord {
                         token_hash: row.get(0)?,
-                        client_name: row.get(1)?,
-                        created_by: row.get(2)?,
-                        created_at: row.get(3)?,
-                        expires_at: row.get(4)?,
-                        used_at: row.get(5)?,
-                        used_client_id: row.get(6)?,
+                        node_id: row.get(1)?,
+                        client_name: row.get(2)?,
+                        created_by: row.get(3)?,
+                        created_at: row.get(4)?,
+                        expires_at: row.get(5)?,
+                        used_at: row.get(6)?,
+                        used_client_id: row.get(7)?,
                     })
                 },
             )
@@ -604,7 +882,8 @@ impl Store {
                 .prepare(&format!("{TUNNEL_SELECT} ORDER BY created_at DESC"))
                 .map_err(Error::store)?;
             let rows = stmt.query_map([], map_tunnel).map_err(Error::store)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Error::store)
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Error::store)
         })
         .await
     }
@@ -621,7 +900,28 @@ impl Store {
             let rows = stmt
                 .query_map(params![client_id], map_tunnel)
                 .map_err(Error::store)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Error::store)
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 列出某节点下所有客户端的隧道（节点侧统计用）。
+    pub async fn list_tunnels_of_node(&self, node_id: &str) -> Result<Vec<TunnelRecord>> {
+        let node_id = node_id.to_string();
+        self.blocking(move |c| {
+            let mut stmt = c
+                .prepare(&format!(
+                    "{TUNNEL_SELECT} WHERE client_id IN
+                       (SELECT id FROM clients WHERE node_id = ?1)
+                     ORDER BY created_at DESC"
+                ))
+                .map_err(Error::store)?;
+            let rows = stmt
+                .query_map(params![node_id], map_tunnel)
+                .map_err(Error::store)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Error::store)
         })
         .await
     }
@@ -682,15 +982,25 @@ impl Store {
         .await
     }
 
-    // --------------------------------------------------------------- 流量/日志
+    // -------------------------------------------------------- 流量 / 日志
 
     /// 写入一条流量采样。
     pub async fn insert_traffic(&self, p: TrafficPoint) -> Result<()> {
         self.blocking(move |c| {
             c.execute(
-                "INSERT INTO traffic_samples (ts, tunnel_id, client_id, path, bytes_in, bytes_out, conns)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                params![p.ts, p.tunnel_id, p.client_id, p.path, p.bytes_in, p.bytes_out, p.conns],
+                "INSERT INTO traffic_samples
+                   (ts, tunnel_id, client_id, node_id, path, bytes_in, bytes_out, conns)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    p.ts,
+                    p.tunnel_id,
+                    p.client_id,
+                    p.node_id,
+                    p.path,
+                    p.bytes_in,
+                    p.bytes_out,
+                    p.conns
+                ],
             )
             .map_err(Error::store)?;
             Ok(())
@@ -701,48 +1011,42 @@ impl Store {
     /// 概览统计。
     pub async fn overview(&self) -> Result<OverviewStats> {
         self.blocking(|c| {
-            let clients_total: i64 = c
-                .query_row("SELECT COUNT(*) FROM clients", [], |r| r.get(0))
-                .map_err(Error::store)?;
-            let clients_online: i64 = c
-                .query_row(
-                    "SELECT COUNT(*) FROM clients WHERE status = 'online'",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(Error::store)?;
-            let tunnels_total: i64 = c
-                .query_row("SELECT COUNT(*) FROM tunnels", [], |r| r.get(0))
-                .map_err(Error::store)?;
-            let tunnels_enabled: i64 = c
-                .query_row("SELECT COUNT(*) FROM tunnels WHERE enabled = 1", [], |r| {
-                    r.get(0)
-                })
-                .map_err(Error::store)?;
+            let count = |sql: &str| -> Result<i64> {
+                c.query_row(sql, [], |r| r.get(0)).map_err(Error::store)
+            };
+            let nodes_total = count("SELECT COUNT(*) FROM nodes")?;
+            let nodes_online = count("SELECT COUNT(*) FROM nodes WHERE status = 'online'")?;
+            let clients_total = count("SELECT COUNT(*) FROM clients")?;
+            let clients_online = count("SELECT COUNT(*) FROM clients WHERE status = 'online'")?;
+            let tunnels_total = count("SELECT COUNT(*) FROM tunnels")?;
+            let tunnels_enabled = count("SELECT COUNT(*) FROM tunnels WHERE enabled = 1")?;
+
+            let since = rscross_common::time::to_rfc3339(
+                rscross_common::time::now() - chrono::Duration::hours(24),
+            );
             let (bytes_in, bytes_out, conns): (i64, i64, i64) = c
                 .query_row(
                     "SELECT COALESCE(SUM(bytes_in),0), COALESCE(SUM(bytes_out),0),
                             COALESCE(SUM(conns),0)
                      FROM traffic_samples WHERE ts >= ?1",
-                    params![rscross_common::time::to_rfc3339(
-                        rscross_common::time::now() - chrono::Duration::hours(24)
-                    )],
+                    params![since],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .map_err(Error::store)?;
-            let path_split: (i64, i64) = c
+            let (direct, relayed): (i64, i64) = c
                 .query_row(
                     "SELECT
                         COALESCE(SUM(CASE WHEN path = 'p2p' THEN bytes_in + bytes_out ELSE 0 END),0),
                         COALESCE(SUM(CASE WHEN path <> 'p2p' THEN bytes_in + bytes_out ELSE 0 END),0)
                      FROM traffic_samples WHERE ts >= ?1",
-                    params![rscross_common::time::to_rfc3339(
-                        rscross_common::time::now() - chrono::Duration::hours(24)
-                    )],
+                    params![since],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .map_err(Error::store)?;
+
             Ok(OverviewStats {
+                nodes_total,
+                nodes_online,
                 clients_total,
                 clients_online,
                 tunnels_total,
@@ -750,8 +1054,8 @@ impl Store {
                 bytes_in_24h: bytes_in,
                 bytes_out_24h: bytes_out,
                 conns_24h: conns,
-                bytes_direct_24h: path_split.0,
-                bytes_relayed_24h: path_split.1,
+                bytes_direct_24h: direct,
+                bytes_relayed_24h: relayed,
             })
         })
         .await
@@ -782,7 +1086,8 @@ impl Store {
                     })
                 })
                 .map_err(Error::store)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Error::store)
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Error::store)
         })
         .await
     }
@@ -842,7 +1147,8 @@ impl Store {
                     })
                 })
                 .map_err(Error::store)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Error::store)
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Error::store)
         })
         .await
     }
@@ -883,7 +1189,8 @@ impl Store {
                     })
                 })
                 .map_err(Error::store)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Error::store)
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Error::store)
         })
         .await
     }
@@ -911,7 +1218,39 @@ impl Store {
     }
 }
 
-/// 心跳时更新的运行时字段（None 表示不覆盖）。
+/// 节点心跳时更新的运行时字段（None 表示不覆盖）。
+#[derive(Debug, Clone, Default)]
+pub struct NodeRuntimePatch {
+    /// 节点版本。
+    pub version: Option<String>,
+    /// 操作系统。
+    pub os: Option<String>,
+    /// CPU 架构。
+    pub arch: Option<String>,
+    /// Iroh EndpointId。
+    pub endpoint_id: Option<String>,
+    /// Iroh EndpointAddr（JSON）。
+    pub endpoint_addr: Option<String>,
+    /// 出口公网 IP。
+    pub public_ip: Option<String>,
+    /// 反向隧道监听端口。
+    pub tunnel_port: Option<i64>,
+    /// 公网入口监听端口。
+    pub ingress_port: Option<i64>,
+}
+
+/// 节点可变字段补丁（None 表示不修改）。
+#[derive(Debug, Clone, Default)]
+pub struct NodePatch {
+    /// 节点 ID。
+    pub id: String,
+    /// 名称。
+    pub name: Option<String>,
+    /// 对外主机名（`Some(None)` 表示清空）。
+    pub public_host: Option<Option<String>>,
+}
+
+/// 客户端心跳时更新的运行时字段（None 表示不覆盖）。
 #[derive(Debug, Clone, Default)]
 pub struct ClientRuntimePatch {
     /// 客户端版本。
@@ -939,7 +1278,7 @@ pub struct TunnelPatch {
     pub proto: Option<String>,
     /// 本地地址。
     pub local_addr: Option<String>,
-    /// 公网端口（显式设置，None 表示清空）。
+    /// 公网端口（显式设置）。
     pub remote_port: Option<Option<i64>>,
     /// Host。
     pub host: Option<Option<String>>,
@@ -966,15 +1305,16 @@ pub struct TrafficBucket {
     pub conns: i64,
 }
 
-const CLIENT_SELECT: &str = "SELECT id, name, status, agent_token_hash, version, os, arch,
+const NODE_SELECT: &str = "SELECT id, name, status, node_token_hash, tunnel_token, public_host,
+    tunnel_port, ingress_port, version, os, arch, endpoint_id, endpoint_addr, public_ip,
+    last_seen_at, last_error, created_at, updated_at, disabled FROM nodes";
+
+const CLIENT_SELECT: &str = "SELECT id, node_id, name, status, agent_token_hash, version, os, arch,
     endpoint_id, endpoint_addr, public_ip, last_seen_at, last_error, created_at, updated_at, disabled
     FROM clients";
 
 const TUNNEL_SELECT: &str = "SELECT id, client_id, name, proto, local_addr, remote_port, host,
     path_prefix, enabled, rate_limit_kbps, conn_limit, created_at, updated_at FROM tunnels";
-
-// 结果收集统一走 `rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Error::store)`，
-// 避免在 `MappedRows<'stmt, F>` 上书写高阶生命周期约束。
 
 fn map_user(row: &Row<'_>) -> rusqlite::Result<UserRecord> {
     Ok(UserRecord {
@@ -988,23 +1328,48 @@ fn map_user(row: &Row<'_>) -> rusqlite::Result<UserRecord> {
     })
 }
 
-fn map_client(row: &Row<'_>) -> rusqlite::Result<ClientRecord> {
-    Ok(ClientRecord {
+fn map_node(row: &Row<'_>) -> rusqlite::Result<NodeRecord> {
+    Ok(NodeRecord {
         id: row.get(0)?,
         name: row.get(1)?,
         status: row.get(2)?,
-        agent_token_hash: row.get(3)?,
-        version: row.get(4)?,
-        os: row.get(5)?,
-        arch: row.get(6)?,
-        endpoint_id: row.get(7)?,
-        endpoint_addr: row.get(8)?,
-        public_ip: row.get(9)?,
-        last_seen_at: row.get(10)?,
-        last_error: row.get(11)?,
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
-        disabled: row.get::<_, i64>(14)? != 0,
+        node_token_hash: row.get(3)?,
+        tunnel_token: row.get(4)?,
+        public_host: row.get(5)?,
+        tunnel_port: row.get(6)?,
+        ingress_port: row.get(7)?,
+        version: row.get(8)?,
+        os: row.get(9)?,
+        arch: row.get(10)?,
+        endpoint_id: row.get(11)?,
+        endpoint_addr: row.get(12)?,
+        public_ip: row.get(13)?,
+        last_seen_at: row.get(14)?,
+        last_error: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
+        disabled: row.get::<_, i64>(18)? != 0,
+    })
+}
+
+fn map_client(row: &Row<'_>) -> rusqlite::Result<ClientRecord> {
+    Ok(ClientRecord {
+        id: row.get(0)?,
+        node_id: row.get(1)?,
+        name: row.get(2)?,
+        status: row.get(3)?,
+        agent_token_hash: row.get(4)?,
+        version: row.get(5)?,
+        os: row.get(6)?,
+        arch: row.get(7)?,
+        endpoint_id: row.get(8)?,
+        endpoint_addr: row.get(9)?,
+        public_ip: row.get(10)?,
+        last_seen_at: row.get(11)?,
+        last_error: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+        disabled: row.get::<_, i64>(15)? != 0,
     })
 }
 
@@ -1048,8 +1413,34 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
+-- 服务端节点：独立控制台可以管理多个；内嵌控制台下只有一行。
+CREATE TABLE IF NOT EXISTS nodes (
+  id               TEXT PRIMARY KEY,
+  name             TEXT NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'pending',
+  node_token_hash  TEXT NOT NULL,
+  tunnel_token     TEXT NOT NULL,
+  public_host      TEXT,
+  tunnel_port      INTEGER,
+  ingress_port     INTEGER,
+  version          TEXT,
+  os               TEXT,
+  arch             TEXT,
+  endpoint_id      TEXT,
+  endpoint_addr    TEXT,
+  public_ip        TEXT,
+  last_seen_at     TEXT,
+  last_error       TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  disabled         INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_token ON nodes(node_token_hash);
+
 CREATE TABLE IF NOT EXISTS clients (
   id               TEXT PRIMARY KEY,
+  node_id          TEXT,
   name             TEXT NOT NULL,
   status           TEXT NOT NULL DEFAULT 'pending',
   agent_token_hash TEXT NOT NULL,
@@ -1067,9 +1458,11 @@ CREATE TABLE IF NOT EXISTS clients (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_name ON clients(name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_token ON clients(agent_token_hash);
+CREATE INDEX IF NOT EXISTS idx_clients_node ON clients(node_id);
 
 CREATE TABLE IF NOT EXISTS enroll_tokens (
   token_hash     TEXT PRIMARY KEY,
+  node_id        TEXT,
   client_name    TEXT,
   created_by     TEXT,
   created_at     TEXT NOT NULL,
@@ -1095,13 +1488,13 @@ CREATE TABLE IF NOT EXISTS tunnels (
   UNIQUE(client_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_tunnels_client ON tunnels(client_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tunnels_port ON tunnels(remote_port) WHERE remote_port IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS traffic_samples (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   ts        TEXT NOT NULL,
   tunnel_id TEXT NOT NULL,
   client_id TEXT NOT NULL,
+  node_id   TEXT,
   path      TEXT NOT NULL DEFAULT 'p2p',
   bytes_in  INTEGER NOT NULL DEFAULT 0,
   bytes_out INTEGER NOT NULL DEFAULT 0,
@@ -1136,10 +1529,36 @@ CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
 mod tests {
     use super::*;
 
-    fn client_rec(name: &str) -> ClientRecord {
+    fn node_rec(name: &str) -> NodeRecord {
+        let now = rscross_common::time::now_rfc3339();
+        NodeRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            status: "pending".to_string(),
+            node_token_hash: format!("nhash-{name}"),
+            tunnel_token: format!("ttok-{name}"),
+            public_host: None,
+            tunnel_port: None,
+            ingress_port: None,
+            version: None,
+            os: None,
+            arch: None,
+            endpoint_id: None,
+            endpoint_addr: None,
+            public_ip: None,
+            last_seen_at: None,
+            last_error: None,
+            created_at: now.clone(),
+            updated_at: now,
+            disabled: false,
+        }
+    }
+
+    fn client_rec(name: &str, node_id: Option<String>) -> ClientRecord {
         let now = rscross_common::time::now_rfc3339();
         ClientRecord {
             id: uuid::Uuid::new_v4().to_string(),
+            node_id,
             name: name.to_string(),
             status: "pending".to_string(),
             agent_token_hash: format!("hash-{name}"),
@@ -1158,50 +1577,207 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_crud_roundtrip() {
+    async fn node_lifecycle_and_heartbeat() {
         let store = Store::open_in_memory().expect("open");
-        let rec = client_rec("node-a");
+        let rec = node_rec("node-a");
         let id = rec.id.clone();
-        store.insert_client(rec).await.expect("insert");
+        store.insert_node(rec).await.expect("insert");
 
-        let found = store.find_client(&id).await.expect("find").expect("some");
-        assert_eq!(found.name, "node-a");
+        let found = store.find_node(&id).await.expect("find").expect("some");
         assert_eq!(found.status, "pending");
+        assert_eq!(found.tunnel_server(), "127.0.0.1:7835", "未知出口 IP 时回落到本地默认端口");
 
         store
-            .touch_client(
+            .touch_node(
                 id.clone(),
-                ClientRuntimePatch {
-                    version: Some("0.2.0".to_string()),
+                NodeRuntimePatch {
+                    tunnel_port: Some(17835),
+                    public_ip: Some("203.0.113.9".to_string()),
+                    endpoint_id: Some("aa".repeat(32)),
                     ..Default::default()
                 },
             )
             .await
             .expect("touch");
-        let found = store.find_client(&id).await.expect("find").expect("some");
+
+        let found = store.find_node(&id).await.expect("find").expect("some");
         assert_eq!(found.status, "online");
-        assert_eq!(found.version.as_deref(), Some("0.2.0"));
+        assert_eq!(
+            found.tunnel_server(),
+            "203.0.113.9:17835",
+            "客户端接入地址应由观测到的出口 IP + 上报端口拼出"
+        );
 
-        store.set_client_disabled(&id, true).await.expect("disable");
-        let found = store.find_client(&id).await.expect("find").expect("some");
-        assert_eq!(found.status, "disabled");
-
-        store.delete_client(&id).await.expect("delete");
-        assert!(store.find_client(&id).await.expect("find").is_none());
+        // 管理员显式指定对外主机名时优先
+        store
+            .update_node(NodePatch {
+                id: id.clone(),
+                name: None,
+                public_host: Some(Some("t.example.com".to_string())),
+            })
+            .await
+            .expect("update");
+        let found = store.find_node(&id).await.expect("find").expect("some");
+        assert_eq!(found.tunnel_server(), "t.example.com:17835");
     }
 
     #[tokio::test]
-    async fn tunnels_are_cascaded_on_client_delete() {
+    async fn node_names_and_tokens_are_unique() {
         let store = Store::open_in_memory().expect("open");
-        let rec = client_rec("node-b");
-        let cid = rec.id.clone();
-        store.insert_client(rec).await.expect("insert");
+        store.insert_node(node_rec("dup")).await.expect("first");
+
+        let mut second = node_rec("dup");
+        second.node_token_hash = "other".to_string();
+        assert!(store.insert_node(second).await.is_err(), "重名节点必须被拒绝");
+
+        let mut third = node_rec("dup2");
+        third.node_token_hash = format!("nhash-{}", "dup");
+        assert!(
+            store.insert_node(third).await.is_err(),
+            "token 摘要冲突必须被拒绝"
+        );
+    }
+
+    #[tokio::test]
+    async fn clients_are_grouped_by_node() {
+        let store = Store::open_in_memory().expect("open");
+        let node = node_rec("n1");
+        let node_id = node.id.clone();
+        store.insert_node(node).await.expect("node");
+        let other = node_rec("n2");
+        let other_id = other.id.clone();
+        store.insert_node(other).await.expect("node2");
+
+        store
+            .insert_client(client_rec("c1", Some(node_id.clone())))
+            .await
+            .expect("c1");
+        store
+            .insert_client(client_rec("c2", Some(other_id)))
+            .await
+            .expect("c2");
+        store
+            .insert_client(client_rec("c3", None))
+            .await
+            .expect("c3");
+
+        let of_node = store.list_clients_of_node(&node_id).await.expect("list");
+        assert_eq!(of_node.len(), 1);
+        assert_eq!(of_node[0].name, "c1");
+
+        store.reassign_client(&of_node[0].id, None).await.expect("reassign");
+        assert!(store
+            .list_clients_of_node(&node_id)
+            .await
+            .expect("list")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleting_node_detaches_clients_instead_of_dropping_them() {
+        let store = Store::open_in_memory().expect("open");
+        let node = node_rec("n1");
+        let node_id = node.id.clone();
+        store.insert_node(node).await.expect("node");
+        store
+            .insert_client(client_rec("c1", Some(node_id.clone())))
+            .await
+            .expect("client");
+
+        store.delete_node(&node_id).await.expect("delete node");
+
+        assert!(store.find_node(&node_id).await.expect("find").is_none());
+        let clients = store.list_clients().await.expect("clients");
+        assert_eq!(clients.len(), 1, "客户端必须保留，只解除归属");
+        assert!(clients[0].node_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_nodes_are_marked_offline() {
+        let store = Store::open_in_memory().expect("open");
+        let rec = node_rec("node-c");
+        let id = rec.id.clone();
+        store.insert_node(rec).await.expect("insert");
+        store
+            .touch_node(id.clone(), NodeRuntimePatch::default())
+            .await
+            .expect("touch");
+
+        let cutoff = rscross_common::time::to_rfc3339(
+            rscross_common::time::now() + chrono::Duration::hours(1),
+        );
+        assert_eq!(
+            store.mark_stale_nodes_offline(cutoff).await.expect("mark"),
+            1
+        );
+        let found = store.find_node(&id).await.expect("find").expect("some");
+        assert_eq!(found.status, "offline");
+    }
+
+    #[tokio::test]
+    async fn overview_counts_nodes_and_clients() {
+        let store = Store::open_in_memory().expect("open");
+        let node = node_rec("n1");
+        let node_id = node.id.clone();
+        store.insert_node(node).await.expect("node");
+        store
+            .insert_client(client_rec("c1", Some(node_id)))
+            .await
+            .expect("client");
+
+        let o = store.overview().await.expect("overview");
+        assert_eq!(o.nodes_total, 1);
+        assert_eq!(o.clients_total, 1);
+        assert_eq!(o.tunnels_total, 0);
+    }
+
+    #[tokio::test]
+    async fn enroll_token_binds_to_node() {
+        let store = Store::open_in_memory().expect("open");
+        let now = rscross_common::time::now();
+        store
+            .insert_enroll_token(EnrollTokenRecord {
+                token_hash: "h1".to_string(),
+                node_id: Some("node-1".to_string()),
+                client_name: Some("n".to_string()),
+                created_by: None,
+                created_at: rscross_common::time::to_rfc3339(now),
+                expires_at: rscross_common::time::to_rfc3339(now + chrono::Duration::minutes(30)),
+                used_at: None,
+                used_client_id: None,
+            })
+            .await
+            .expect("insert");
+
+        let found = store
+            .find_enroll_token("h1")
+            .await
+            .expect("find")
+            .expect("some");
+        assert_eq!(found.node_id.as_deref(), Some("node-1"));
+
+        store
+            .consume_enroll_token("h1", "c1")
+            .await
+            .expect("first use ok");
+        assert!(store.consume_enroll_token("h1", "c2").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn tunnels_of_node_follow_client_ownership() {
+        let store = Store::open_in_memory().expect("open");
+        let node = node_rec("n1");
+        let node_id = node.id.clone();
+        store.insert_node(node).await.expect("node");
+        let client = client_rec("c1", Some(node_id.clone()));
+        let client_id = client.id.clone();
+        store.insert_client(client).await.expect("client");
 
         let now = rscross_common::time::now_rfc3339();
         store
             .insert_tunnel(TunnelRecord {
                 id: uuid::Uuid::new_v4().to_string(),
-                client_id: cid.clone(),
+                client_id: client_id.clone(),
                 name: "web".to_string(),
                 proto: "http".to_string(),
                 local_addr: "127.0.0.1:8080".to_string(),
@@ -1215,109 +1791,28 @@ mod tests {
                 updated_at: now,
             })
             .await
-            .expect("insert tunnel");
+            .expect("tunnel");
 
-        assert_eq!(store.count_tunnels().await.expect("count"), 1);
-        store.delete_client(&cid).await.expect("delete client");
-        assert_eq!(store.count_tunnels().await.expect("count"), 0);
+        assert_eq!(
+            store.list_tunnels_of_node(&node_id).await.expect("by node").len(),
+            1
+        );
+        store.delete_client(&client_id).await.expect("delete");
+        assert_eq!(
+            store.list_tunnels_of_node(&node_id).await.expect("by node").len(),
+            0
+        );
     }
 
     #[tokio::test]
-    async fn overview_reflects_inserted_traffic() {
+    async fn disabling_node_marks_status() {
         let store = Store::open_in_memory().expect("open");
-        store
-            .insert_traffic(TrafficPoint {
-                ts: rscross_common::time::now_rfc3339(),
-                tunnel_id: "t1".to_string(),
-                client_id: "c1".to_string(),
-                path: "p2p".to_string(),
-                bytes_in: 100,
-                bytes_out: 200,
-                conns: 3,
-            })
-            .await
-            .expect("traffic");
-        let o = store.overview().await.expect("overview");
-        assert_eq!(o.bytes_in_24h, 100);
-        assert_eq!(o.bytes_out_24h, 200);
-        assert_eq!(o.bytes_direct_24h, 300);
-        assert_eq!(o.bytes_relayed_24h, 0);
-    }
-
-    #[tokio::test]
-    async fn stale_clients_are_marked_offline() {
-        let store = Store::open_in_memory().expect("open");
-        let rec = client_rec("node-c");
+        let rec = node_rec("n1");
         let id = rec.id.clone();
-        store.insert_client(rec).await.expect("insert");
-        store
-            .touch_client(id.clone(), ClientRuntimePatch::default())
-            .await
-            .expect("touch");
-
-        // 未来时间作为 cutoff，必然命中「已过期」分支
-        let cutoff =
-            rscross_common::time::to_rfc3339(rscross_common::time::now() + chrono::Duration::hours(1));
-        let affected = store
-            .mark_stale_clients_offline(cutoff)
-            .await
-            .expect("mark");
-        assert_eq!(affected, 1);
-        let found = store.find_client(&id).await.expect("find").expect("some");
-        assert_eq!(found.status, "offline");
-    }
-
-    #[tokio::test]
-    async fn enroll_token_can_only_be_used_once() {
-        let store = Store::open_in_memory().expect("open");
-        let now = rscross_common::time::now();
-        store
-            .insert_enroll_token(EnrollTokenRecord {
-                token_hash: "h1".to_string(),
-                client_name: Some("n".to_string()),
-                created_by: None,
-                created_at: rscross_common::time::to_rfc3339(now),
-                expires_at: rscross_common::time::to_rfc3339(now + chrono::Duration::minutes(30)),
-                used_at: None,
-                used_client_id: None,
-            })
-            .await
-            .expect("insert");
-        store
-            .consume_enroll_token("h1", "c1")
-            .await
-            .expect("first use ok");
-        assert!(store.consume_enroll_token("h1", "c2").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn logs_are_filtered_by_level_and_keyword() {
-        let store = Store::open_in_memory().expect("open");
-        for (level, msg) in [("info", "隧道已建立"), ("error", "连接被拒绝"), ("info", "心跳正常")] {
-            store
-                .insert_log(LogEntry {
-                    id: 0,
-                    ts: rscross_common::time::now_rfc3339(),
-                    level: level.to_string(),
-                    target: Some("test".to_string()),
-                    message: msg.to_string(),
-                    client_id: None,
-                    tunnel_id: None,
-                })
-                .await
-                .expect("log");
-        }
-        let all = store.query_logs(None, None, 100).await.expect("all");
-        assert_eq!(all.len(), 3);
-        let errs = store
-            .query_logs(Some("error".to_string()), None, 100)
-            .await
-            .expect("errors");
-        assert_eq!(errs.len(), 1);
-        let hits = store
-            .query_logs(None, Some("心跳".to_string()), 100)
-            .await
-            .expect("kw");
-        assert_eq!(hits.len(), 1);
+        store.insert_node(rec).await.expect("insert");
+        store.set_node_disabled(&id, true).await.expect("disable");
+        let found = store.find_node(&id).await.expect("find").expect("some");
+        assert_eq!(found.status, "disabled");
+        assert!(found.disabled);
     }
 }

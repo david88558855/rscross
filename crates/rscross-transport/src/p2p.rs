@@ -278,8 +278,7 @@ impl TunnelTargets {
 
 /// 客户端侧的数据面处理器：接受远端开来的流，转发到对应本地服务。
 #[derive(Debug, Clone)]
-pub struct P2pDataHandler {
-    targets: TunnelTargets,
+pub struct P2pDataHandler {    targets: TunnelTargets,
     dial_timeout: Duration,
 }
 
@@ -366,6 +365,94 @@ impl ProtocolHandler for P2pDataHandler {
         }
         Ok(())
     }
+}
+
+/// 服务端节点侧的控制面处理器：在 [`ALPN_CONTROL`] 上回应一条能力描述。
+///
+/// 存在的意义有两个，都很具体：
+/// 1. **让 P2P 直连可被判真**。客户端用 [`probe_control`] 真正建立一条 QUIC 连接，
+///    成功即说明「打洞/直连这条路径通了」，结果直接喂给 [`crate::PathSelector`]，
+///    而不是靠猜。
+/// 2. **提供一条不过 HTTP 的节点信息通道**，用于排障与后续的配置推送。
+#[derive(Debug, Clone)]
+pub struct NodeInfoHandler {
+    /// 节点名。
+    pub node_name: String,
+    /// 附加说明（例如监听端口），会原样回给对端。
+    pub detail: String,
+}
+
+impl NodeInfoHandler {
+    /// 创建。
+    pub fn new(node_name: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            node_name: node_name.into(),
+            detail: detail.into(),
+        }
+    }
+
+    fn payload(&self) -> String {
+        format!(
+            "rscross-node/{}|{}|{}",
+            rscross_common::VERSION,
+            self.node_name,
+            self.detail
+        )
+    }
+}
+
+impl ProtocolHandler for NodeInfoHandler {
+    async fn accept(&self, connection: Connection) -> std::result::Result<(), AcceptError> {
+        loop {
+            match connection.accept_bi().await {
+                Ok((mut send, _recv)) => {
+                    if let Err(err) = send.write_all(self.payload().as_bytes()).await {
+                        tracing::debug!(error = %err, "回应节点信息失败");
+                    }
+                    let _ = send.finish();
+                }
+                Err(err) => {
+                    tracing::debug!(error = %err, "节点信息通道关闭");
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 在 [`ALPN_CONTROL`] 上探测远端节点，成功时返回对方回应的文本。
+///
+/// 这是「P2P 直连是否真的可用」的唯一可信判据：TCP 连得上不代表打洞成功，
+/// 必须真的建立一条 QUIC 连接。
+pub async fn probe_control(
+    endpoint: &Endpoint,
+    remote: &EndpointAddr,
+    timeout: Duration,
+) -> Result<String> {
+    let started = std::time::Instant::now();
+    let connecting = tokio::time::timeout(timeout, endpoint.connect(remote.clone(), ALPN_CONTROL))
+        .await
+        .map_err(|_| Error::transport("P2P 探测超时"))?
+        .map_err(Error::transport)?;
+
+    let (mut send, mut recv) = connecting.open_bi().await.map_err(Error::transport)?;
+    // 触发对端 accept：QUIC 的流是惰性创建的，必须先发数据。
+    send.write_all(b"ping").await.map_err(Error::transport)?;
+    let _ = send.finish();
+
+    let mut buf = Vec::with_capacity(128);
+    tokio::io::AsyncReadExt::read_to_end(&mut recv, &mut buf)
+        .await
+        .map_err(Error::transport)?;
+
+    let text = String::from_utf8_lossy(&buf).to_string();
+    tracing::debug!(
+        rtt_ms = started.elapsed().as_millis() as u64,
+        reply = %text,
+        "P2P 直连探测成功"
+    );
+    Ok(text)
 }
 
 /// 写入长度前缀（u16，大端）的隧道标识。

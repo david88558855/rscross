@@ -1,4 +1,8 @@
-//! 客户端主运行时：注册、心跳、隧道收敛、日志上报。
+//! 客户端主运行时：注册、心跳、隧道收敛、P2P 探测、日志上报。
+//!
+//! 关键设计：**客户端只与控制台对话**。它拿不到也不需要「服务端节点地址」的配置项
+//! —— 归属节点由控制台在注册/心跳响应里下发。因此把客户端从节点 A 迁到节点 B，
+//! 只需要在控制台改一行归属，客户端在下一个心跳周期自动收敛。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -6,24 +10,29 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use rscross_common::{ClientRuntime, DesiredTunnel, Error, Result};
+use rscross_common::{ClientRuntime, DesiredTunnel, Error, NodeEndpoint, Result};
 use rscross_config::{ClientFile, TunnelSection};
-use rscross_transport::{P2pDataHandler, P2pNode, P2pOptions, RelayTunnelClient, TunnelTargets};
+use rscross_transport::{
+    probe_control, P2pDataHandler, P2pNode, P2pOptions, PathProbe, PathSelector, RelayTunnelClient,
+    TunnelTargets,
+};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use crate::api::{ApiClient, EnrollRequest, HeartbeatRequest};
-use crate::identity::{Identity, P2pSettings, StateDir};
+use crate::identity::{Identity, StateDir};
 use crate::logsink::{LogSink, LogSinkLayer};
 
-/// 心跳失败后的指数退避上限。
+/// 注册失败后的指数退避上限。
 const MAX_BACKOFF_SECS: u64 = 60;
 /// 客户端日志上报周期。
 const LOG_FLUSH_SECS: u64 = 30;
 /// 单次上报的日志条数上限。
 const LOG_FLUSH_BATCH: usize = 100;
+/// P2P 直连探测周期。
+const P2P_PROBE_SECS: u64 = 60;
 
 /// 命令行参数。
 #[derive(Debug, Parser)]
@@ -36,12 +45,9 @@ pub struct Args {
     /// 配置文件路径（不存在时自动生成默认配置）。
     #[arg(short, long, default_value = "rscross-client.toml", env = "RSROSS_CLIENT_CONFIG")]
     pub config: PathBuf,
-    /// 控制面地址，例如 `http://1.2.3.4:7800`。
-    #[arg(long, env = "RSROSS_SERVER")]
-    pub server: Option<String>,
-    /// FerroTunnel 控制面地址，例如 `1.2.3.4:7835`。
-    #[arg(long)]
-    pub tunnel_server: Option<String>,
+    /// 控制台地址，例如 `http://1.2.3.4:7800`。
+    #[arg(long, env = "RSROSS_CONSOLE")]
+    pub console: Option<String>,
     /// 控制台签发的一次性接入令牌。
     #[arg(long, env = "RSROSS_ENROLL_TOKEN")]
     pub enroll_token: Option<String>,
@@ -60,7 +66,7 @@ pub struct Args {
     /// 打印默认配置后退出。
     #[arg(long)]
     pub print_default_config: bool,
-    /// 强制关闭 P2P（只走 FerroTunnel 中继）。
+    /// 强制关闭 P2P（只走中继）。
     #[arg(long)]
     pub no_p2p: bool,
 }
@@ -81,11 +87,8 @@ pub async fn run_with_args(args: Args) -> Result<()> {
     }
 
     let mut cfg = ClientFile::load_or_init(&args.config)?;
-    if let Some(v) = args.server.clone() {
-        cfg.client.server_url = v;
-    }
-    if let Some(v) = args.tunnel_server.clone() {
-        cfg.client.tunnel_server = v;
+    if let Some(v) = args.console.clone() {
+        cfg.client.console_url = v;
     }
     if let Some(v) = args.name.clone() {
         cfg.client.name = v;
@@ -103,11 +106,11 @@ pub async fn run_with_args(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    let state_root = args
-        .state_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(&cfg.client.state_dir));
-    let state_dir = StateDir::open(state_root)?;
+    let state_dir = StateDir::open(
+        args.state_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(&cfg.client.state_dir)),
+    )?;
 
     let sink = LogSink::new(512);
     init_tracing(&cfg, sink.clone());
@@ -116,17 +119,17 @@ pub async fn run_with_args(args: Args) -> Result<()> {
         version = rscross_common::VERSION,
         config = %args.config.display(),
         state_dir = %state_dir.root().display(),
-        server = %cfg.client.server_url,
+        console = %cfg.client.console_url,
         "rscross-client 启动中"
     );
 
-    let api = ApiClient::new(&cfg.client.server_url)?;
+    let api = ApiClient::new(&cfg.client.console_url)?;
     let shutdown = CancellationToken::new();
 
     // ---- 1. Iroh 节点（先建，注册时要把 EndpointId 一并上报）----
     let p2p = build_p2p(&cfg, &state_dir).await;
 
-    // ---- 2. 注册（拿 agent token）----
+    // ---- 2. 注册 ----
     let mut identity = state_dir.load_identity();
     let provided_token = args
         .enroll_token
@@ -134,27 +137,35 @@ pub async fn run_with_args(args: Args) -> Result<()> {
         .or_else(|| cfg.client.enroll_token.clone())
         .or_else(|| state_dir.load_enroll_token());
 
-    let explicit_agent_token = cfg
-        .client
-        .agent_token
-        .clone()
-        .filter(|t| !t.trim().is_empty());
-
     if identity.agent_token.is_none() {
-        identity.agent_token = explicit_agent_token;
+        identity.agent_token = cfg
+            .client
+            .agent_token
+            .clone()
+            .filter(|t| !t.trim().is_empty());
     }
 
-    if identity.agent_token.is_none() {
-        register_with_retry(
+    if !identity.is_registered() {
+        identity = register_with_retry(
             &api,
             &state_dir,
-            &mut identity,
             &cfg,
             provided_token,
             &p2p,
             &shutdown,
         )
         .await?;
+    } else {
+        tracing::info!(
+            client_id = identity.client_id.as_deref().unwrap_or("-"),
+            name = identity.name.as_deref().unwrap_or("-"),
+            node = identity
+                .node
+                .as_ref()
+                .map(|n| n.name.as_str())
+                .unwrap_or("未分配"),
+            "复用已持久化的客户端身份"
+        );
     }
 
     let agent_token = identity
@@ -162,23 +173,7 @@ pub async fn run_with_args(args: Args) -> Result<()> {
         .clone()
         .expect("注册成功后必然存在 agent token");
 
-    // ---- 3. 反向隧道参数（token 以服务端下发为准）----
-    let mut tunnel_section = cfg.tunnel.clone();
-    if let Some(token) = identity.tunnel_token.clone() {
-        if !token.trim().is_empty() {
-            tunnel_section.token = token;
-        }
-    }
-    let tunnel_server = identity
-        .tunnel_server
-        .clone()
-        .unwrap_or_else(|| cfg.client.tunnel_server.clone());
-
-    if tunnel_section.token.trim().is_empty() {
-        tracing::warn!("未获得 FerroTunnel 握手 token，反向隧道路径将不可用（请检查服务端 tunnel.token）");
-    }
-
-    // ---- 4. P2P 数据面：接受服务端/对端开来的直连流 ----
+    // ---- 3. P2P 数据面：接受对端开来的直连流 ----
     let targets = TunnelTargets::new();
     let router = p2p.as_ref().map(|node| {
         node.spawn_router(
@@ -186,41 +181,43 @@ pub async fn run_with_args(args: Args) -> Result<()> {
             P2pDataHandler::new(targets.clone(), Duration::from_secs(5)),
         )
     });
-    if let Some(info) = identity.p2p.as_ref() {
-        tracing::info!(
-            enabled = info.enabled,
-            policy = %info.policy,
-            server_endpoint = info.server_endpoint_id.as_deref().unwrap_or("-"),
-            "P2P 参数已从控制面同步"
-        );
-    }
 
-    // ---- 5. 后台任务 ----
+    // ---- 4. 后台任务 ----
     let heartbeat_secs = identity
         .heartbeat_secs
         .unwrap_or(rscross_common::DEFAULT_HEARTBEAT_SECS)
         .max(3);
 
-    let heartbeat_task = {
+    let heartbeat_task = tokio::spawn({
         let api = api.clone();
         let shutdown = shutdown.clone();
         let token = agent_token.clone();
         let p2p = p2p.clone();
         let targets = targets.clone();
-        tokio::spawn(async move {
+        let section = cfg.tunnel.clone();
+        let identity = identity.clone();
+        async move {
             heartbeat_loop(
                 api,
                 token,
                 heartbeat_secs,
-                tunnel_server,
-                tunnel_section,
+                section,
                 targets,
                 p2p,
+                identity,
                 shutdown,
             )
             .await;
+        }
+    });
+
+    let probe_task = p2p.as_ref().and_then(|_| {
+        identity.node.clone().map(|node| {
+            let p2p = p2p.clone();
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move { p2p_probe_loop(p2p, node, shutdown).await })
         })
-    };
+    });
 
     let log_task = {
         let api = api.clone();
@@ -234,8 +231,19 @@ pub async fn run_with_args(args: Args) -> Result<()> {
     wait_for_signal().await;
     shutdown.cancel();
 
-    let _ = heartbeat_task.await;
-    let _ = log_task.await;
+    for (name, handle) in [
+        ("heartbeat", Some(heartbeat_task)),
+        ("p2p-probe", probe_task),
+        ("log-flush", Some(log_task)),
+    ] {
+        if let Some(handle) = handle {
+            match tokio::time::timeout(Duration::from_secs(10), handle).await {
+                Ok(Ok(())) => tracing::debug!(task = name, "任务已退出"),
+                Ok(Err(err)) => tracing::warn!(task = name, error = %err, "任务 panic"),
+                Err(_) => tracing::warn!(task = name, "任务未在宽限期内退出"),
+            }
+        }
+    }
 
     if let Some(router) = router {
         if let Err(err) = router.shutdown().await {
@@ -266,7 +274,7 @@ async fn build_p2p(cfg: &ClientFile, state_dir: &StateDir) -> Option<P2pNode> {
     let secret_key = match rscross_transport::load_or_create_secret_key(&key_path) {
         Ok(key) => Some(key),
         Err(err) => {
-            tracing::warn!(error = %err, "节点私钥不可用，本次运行将使用临时身份（重启后会变化）");
+            tracing::warn!(error = %err, "节点私钥不可用，本次使用临时身份（重启后会变化）");
             None
         }
     };
@@ -283,24 +291,22 @@ async fn build_p2p(cfg: &ClientFile, state_dir: &StateDir) -> Option<P2pNode> {
             Some(node)
         }
         Err(err) => {
-            tracing::error!(error = %err, "Iroh 节点绑定失败，本次运行只使用反向隧道");
+            tracing::error!(error = %err, "Iroh 节点绑定失败，本次只使用反向隧道");
             None
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn register_with_retry(
     api: &ApiClient,
     state_dir: &StateDir,
-    identity: &mut Identity,
     cfg: &ClientFile,
     provided_token: Option<String>,
     p2p: &Option<P2pNode>,
     shutdown: &CancellationToken,
-) -> Result<()> {
+) -> Result<Identity> {
     if provided_token.is_none() {
-        tracing::warn!("没有可用的接入令牌，尝试自助注册（需要服务端 auth.allow_self_enroll = true）");
+        tracing::warn!("没有可用的接入令牌，尝试自助注册（需要控制台 auth.allow_self_enroll = true）");
     }
 
     let mut attempt: u32 = 0;
@@ -313,30 +319,25 @@ async fn register_with_retry(
 
         match api.enroll(&request).await {
             Ok(response) => {
-                identity.client_id = Some(response.client_id.clone());
-                identity.agent_token = Some(response.agent_token.clone());
-                identity.heartbeat_secs = Some(response.heartbeat_secs);
-                identity.tunnel_server = Some(response.tunnel_server.clone());
-                identity.tunnel_token = Some(response.tunnel_token.clone());
-                identity.name = Some(cfg.client.name.clone());
-                identity.p2p = Some(P2pSettings {
-                    enabled: response.p2p.enabled,
-                    policy: response.p2p.policy.clone(),
-                    server_endpoint_id: response.p2p.server_endpoint_id.clone(),
-                    server_endpoint_addr: response.p2p.server_endpoint_addr.clone(),
-                    relay_mode: response.p2p.relay_mode.clone(),
-                    address_lookup: response.p2p.address_lookup,
-                });
-                state_dir.save_identity(identity)?;
+                let identity = Identity {
+                    client_id: Some(response.client_id.clone()),
+                    agent_token: Some(response.agent_token.clone()),
+                    name: Some(response.name.clone()),
+                    heartbeat_secs: Some(response.heartbeat_secs),
+                    node: Some(response.node.clone()),
+                };
+                state_dir.save_identity(&identity)?;
                 state_dir.clear_enroll_token();
 
                 tracing::info!(
                     client_id = %response.client_id,
-                    name = %cfg.client.name,
+                    name = %response.name,
+                    node = %response.node.name,
+                    tunnel_server = %response.node.tunnel_server,
                     public_url = response.public_url.as_deref().unwrap_or("-"),
                     "注册成功"
                 );
-                return Ok(());
+                return Ok(identity);
             }
             Err(err) => {
                 // 鉴权类错误重试没有意义（令牌错 / 已用过），直接失败并给出可操作的提示。
@@ -361,17 +362,19 @@ async fn heartbeat_loop(
     api: ApiClient,
     agent_token: String,
     initial_heartbeat_secs: u64,
-    tunnel_server: String,
-    tunnel_section: TunnelSection,
+    section: TunnelSection,
     targets: TunnelTargets,
     p2p: Option<P2pNode>,
+    identity: Identity,
     shutdown: CancellationToken,
 ) {
     let mut interval = initial_heartbeat_secs.max(3);
-    let mut manager = TunnelManager::new(tunnel_server, tunnel_section, targets.clone());
-    let mut consecutive_failures: u32 = 0;
+    let mut failures: u32 = 0;
+    let mut manager = TunnelManager::new(section, targets.clone());
 
-    // 先立即做一次，不等第一个 tick。
+    // 用注册时下发的节点坐标先跑一次收敛，避免等到第一次心跳才有隧道。
+    manager.reconcile(identity.node.clone(), Vec::new()).await;
+
     loop {
         let request = HeartbeatRequest {
             runtime: runtime_info(&p2p),
@@ -379,38 +382,32 @@ async fn heartbeat_loop(
 
         match api.heartbeat(&agent_token, &request).await {
             Ok(response) => {
-                consecutive_failures = 0;
-                if response.heartbeat_secs.max(3) != interval {
-                    tracing::debug!(
-                        from = interval,
-                        to = response.heartbeat_secs,
-                        "按控制面要求调整心跳间隔"
-                    );
-                    interval = response.heartbeat_secs.max(3);
-                }
-                manager.reconcile(response.tunnels).await;
+                failures = 0;
+                interval = response.heartbeat_secs.max(3);
+                manager.reconcile(response.node, response.tunnels).await;
                 tracing::debug!(
                     tunnels = manager.running_count(),
-                    p2p_peers = targets.len(),
+                    p2p_streams = targets.len(),
                     "心跳成功"
                 );
             }
             Err(err) => {
-                consecutive_failures = consecutive_failures.saturating_add(1);
+                failures = failures.saturating_add(1);
                 tracing::warn!(
                     error = %err,
-                    consecutive = consecutive_failures,
-                    "心跳失败，控制面可能不可达"
+                    consecutive = failures,
+                    "心跳失败，控制台可能不可达"
                 );
             }
         }
 
-        // 心跳失败时逐步退避，但不超过 5 倍间隔，避免控制面恢复后长期失联。
-        let sleep_secs = if consecutive_failures == 0 {
+        // 心跳失败时逐步退避，但不超过 5 倍间隔，避免控制台恢复后长期失联。
+        let sleep_secs = if failures == 0 {
             interval
         } else {
-            let bounded = interval.saturating_mul(u64::from(consecutive_failures.min(5)));
-            bounded.min(MAX_BACKOFF_SECS * 5)
+            interval
+                .saturating_mul(u64::from(failures.min(5)))
+                .min(MAX_BACKOFF_SECS * 5)
         };
 
         if !sleep_or_cancel(&shutdown, Duration::from_secs(sleep_secs)).await {
@@ -419,6 +416,65 @@ async fn heartbeat_loop(
     }
 
     manager.shutdown_all().await;
+}
+
+/// P2P 直连探测：定期真的建一条 QUIC 连接到归属节点，并把结果喂给路径选择器。
+///
+/// 为什么不能省：TCP 连得上不代表打洞成功；只有真的建立了 QUIC 连接才算直连可用。
+/// 结果会写进日志（成功一次 INFO，之后失败 WARN），因此控制台的「日志」页能看到。
+async fn p2p_probe_loop(p2p: Option<P2pNode>, node: NodeEndpoint, shutdown: CancellationToken) {
+    let Some(endpoint) = p2p else { return };
+    let Some(addr_raw) = node.endpoint_addr.clone() else {
+        tracing::debug!("控制台未下发节点寻址信息，跳过 P2P 探测");
+        return;
+    };
+    let remote = match rscross_transport::decode_addr(&addr_raw) {
+        Ok(addr) => addr,
+        Err(err) => {
+            tracing::warn!(error = %err, "节点寻址信息无法解析，跳过 P2P 探测");
+            return;
+        }
+    };
+
+    let selector = PathSelector::new(rscross_common::PathPolicy::Auto);
+    let mut reported_success = false;
+
+    loop {
+        let started = std::time::Instant::now();
+        let probe = match probe_control(endpoint.endpoint(), &remote, Duration::from_secs(10)).await
+        {
+            Ok(_reply) => {
+                let rtt = started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+                PathProbe::ok(rtt)
+            }
+            Err(err) => PathProbe::failed(err.to_string()),
+        };
+
+        if probe.ok {
+            if !reported_success {
+                tracing::info!(
+                    node = %node.name,
+                    rtt_ms = probe.rtt_ms.unwrap_or(0),
+                    "与归属节点建立 P2P 直连成功"
+                );
+                reported_success = true;
+            }
+        } else {
+            tracing::warn!(
+                node = %node.name,
+                error = probe.error.as_deref().unwrap_or("-"),
+                "与归属节点无法直连，隧道流量走中继"
+            );
+        }
+
+        selector.observe(&probe);
+        let choice = selector.choose();
+        tracing::debug!(path = %choice.kind, reason = choice.reason, "当前数据面路径偏好");
+
+        if !sleep_or_cancel(&shutdown, Duration::from_secs(P2P_PROBE_SECS)).await {
+            break;
+        }
+    }
 }
 
 async fn log_flush_loop(
@@ -447,11 +503,14 @@ async fn log_flush_loop(
     }
 }
 
-/// 隧道收敛器：让本地运行的 FerroTunnel 客户端集合与「期望配置」一致。
+/// 隧道收敛器：让本地运行的 FerroTunnel 客户端集合与「控制台期望配置」一致。
+///
+/// 它同时负责响应**归属节点变化**：换节点等价于「全部隧道重建」，
+/// 这正是「在控制台把客户端迁到另一台节点」的实现方式。
 struct TunnelManager {
-    server_addr: String,
     section: TunnelSection,
     targets: TunnelTargets,
+    node: Option<NodeEndpoint>,
     running: HashMap<String, RunningTunnel>,
 }
 
@@ -463,11 +522,11 @@ struct RunningTunnel {
 }
 
 impl TunnelManager {
-    fn new(server_addr: String, section: TunnelSection, targets: TunnelTargets) -> Self {
+    fn new(section: TunnelSection, targets: TunnelTargets) -> Self {
         Self {
-            server_addr,
             section,
             targets,
+            node: None,
             running: HashMap::new(),
         }
     }
@@ -476,7 +535,33 @@ impl TunnelManager {
         self.running.len()
     }
 
-    async fn reconcile(&mut self, desired: Vec<DesiredTunnel>) {
+    async fn reconcile(&mut self, node: Option<NodeEndpoint>, desired: Vec<DesiredTunnel>) {
+        // 0) 归属节点变化（含「被解绑」）→ 全部重建
+        if !same_node(self.node.as_ref(), node.as_ref()) {
+            match node.as_ref() {
+                Some(n) => tracing::info!(
+                    node = %n.name,
+                    tunnel_server = %n.tunnel_server,
+                    "归属节点已变更，重建全部隧道"
+                ),
+                None => tracing::warn!("控制台未分配归属节点，停止全部隧道"),
+            }
+            self.shutdown_all().await;
+            self.node = node.clone();
+        }
+
+        let Some(node) = node else {
+            self.targets.replace_all(Vec::new());
+            return;
+        };
+
+        let mut section = self.section.clone();
+        section.token = node.tunnel_token.clone();
+        if section.token.trim().is_empty() {
+            tracing::warn!(node = %node.name, "节点未下发隧道 token，无法建立反向隧道");
+            return;
+        }
+
         let wanted: HashMap<String, DesiredTunnel> = desired
             .into_iter()
             .map(|tunnel| (tunnel.id.clone(), tunnel))
@@ -515,9 +600,9 @@ impl TunnelManager {
             let route_key = target.route_key();
             let mut client = match RelayTunnelClient::build(
                 route_key.clone(),
-                self.server_addr.clone(),
+                node.tunnel_server.clone(),
                 target.local_addr.clone(),
-                &self.section,
+                &section,
             ) {
                 Ok(client) => client,
                 Err(err) => {
@@ -542,6 +627,7 @@ impl TunnelManager {
                 proto = %target.proto,
                 local = %target.local_addr,
                 route = %route_key,
+                node = %node.name,
                 "隧道已建立"
             );
             self.running.insert(
@@ -566,6 +652,18 @@ impl TunnelManager {
                 }
             }
         }
+    }
+}
+
+fn same_node(a: Option<&NodeEndpoint>, b: Option<&NodeEndpoint>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.node_id == b.node_id
+                && a.tunnel_server == b.tunnel_server
+                && a.tunnel_token == b.tunnel_token
+        }
+        _ => false,
     }
 }
 
@@ -645,18 +743,14 @@ mod tests {
     use super::*;
     use rscross_common::TunnelProto;
 
-    fn tunnel(id: &str, name: &str, local: &str) -> DesiredTunnel {
-        DesiredTunnel {
-            id: id.to_string(),
-            name: name.to_string(),
-            proto: TunnelProto::Tcp,
-            local_addr: local.to_string(),
-            remote_port: None,
-            host: None,
-            path_prefix: None,
-            enabled: true,
-            rate_limit_kbps: 0,
-            conn_limit: 0,
+    fn node(id: &str, server: &str, token: &str) -> NodeEndpoint {
+        NodeEndpoint {
+            node_id: id.to_string(),
+            name: id.to_string(),
+            tunnel_server: server.to_string(),
+            tunnel_token: token.to_string(),
+            endpoint_id: None,
+            endpoint_addr: None,
         }
     }
 
@@ -670,15 +764,45 @@ mod tests {
     }
 
     #[test]
-    fn tunnel_manager_tracks_targets() {
+    fn node_change_is_detected_on_any_field() {
+        let a = node("n1", "10.0.0.1:7835", "t1");
+        assert!(same_node(Some(&a), Some(&a.clone())));
+
+        let mut b = a.clone();
+        b.tunnel_server = "10.0.0.2:7835".to_string();
+        assert!(!same_node(Some(&a), Some(&b)), "换节点地址要重建隧道");
+
+        let mut c = a.clone();
+        c.tunnel_token = "t2".to_string();
+        assert!(!same_node(Some(&a), Some(&c)), "换 token 要重建隧道");
+
+        assert!(!same_node(Some(&a), None), "被解绑要停止隧道");
+        assert!(same_node(None, None));
+    }
+
+    #[test]
+    fn route_key_follows_protocol() {
+        let http = DesiredTunnel {
+            id: "1".into(),
+            name: "web".into(),
+            proto: TunnelProto::Http,
+            local_addr: "127.0.0.1:8080".into(),
+            remote_port: None,
+            host: Some("a.example.com".into()),
+            path_prefix: None,
+            enabled: true,
+            rate_limit_kbps: 0,
+            conn_limit: 0,
+        };
+        assert_eq!(http.route_key(), "a.example.com");
+    }
+
+    #[tokio::test]
+    async fn manager_without_node_keeps_targets_empty() {
         let targets = TunnelTargets::new();
-        let manager = TunnelManager::new(
-            "127.0.0.1:7835".to_string(),
-            TunnelSection::default(),
-            targets.clone(),
-        );
+        let mut manager = TunnelManager::new(TunnelSection::default(), targets.clone());
+        manager.reconcile(None, Vec::new()).await;
         assert_eq!(manager.running_count(), 0);
         assert!(targets.is_empty());
-        assert_eq!(tunnel("1", "a", "127.0.0.1:1").route_key(), "a");
     }
 }

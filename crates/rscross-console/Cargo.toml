@@ -1,0 +1,16 @@
+[package]
+name = "rscross-console"
+description = "rscross 独立控制台：汇聚多个服务端节点与内网客户端"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rscross-console"
+path = "src/main.rs"
+
+[dependencies]
+rscross-control = { workspace = true }
+tokio = { workspace = true }

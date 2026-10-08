@@ -1,19 +1,23 @@
-//! `rscross-server`：控制面 + 中继 + 控制台。
+//! `rscross-server`：**服务端节点**（数据面）。
 //!
-//! 进程内并发的六条任务：
-//! 1. **HTTP 服务**（axum）：控制台静态资源 + `/api/v1/*`。
-//! 2. **FerroTunnel 中继服务端**：反向隧道控制面 + 公网 HTTP 入口。
-//! 3. **Iroh 节点**：本进程内绑定，供控制面做直连探测与投递；无 accept 循环时不占额外任务。
-//! 4. **日志持久化**：订阅 [`logbus::LogBus`]，按配置落库。
-//! 5. **内务循环**：离线判定、会话清理、保留期清理、登录限流清扫。
-//! 6. **信号监听**：SIGINT/SIGTERM → 触发 `CancellationToken` → 各任务收敛。
+//! 无论哪种部署形态，本进程都以「节点」身份工作：向控制台注册 → 心跳 → 承载反向隧道。
+//! 区别只在于控制台跑在哪里：
+//!
+//! - `--embedded`（默认）：**单机自用**。本进程内嵌一个完整的控制面（含 Web 控制台），
+//!   内网客户端直接连这台机器的控制台地址即可。此时进程内同时有控制面与数据面。
+//! - `--managed`：**多节点汇聚**。加入远端 `rscross-console`，由它统一下发配置。
+//!
+//! 进程内任务：
+//! 1. 控制台 HTTP（仅 embedded）/ 控制台 HTTP 客户端（仅 managed）
+//! 2. FerroTunnel 中继服务端（反向隧道控制面 + 公网入口）
+//! 3. Iroh 节点 + `ALPN_CONTROL` 处理器（让客户端能真正建立 P2P 直连并被判真）
+//! 4. 心跳循环（上报运行时信息、感知 tunnel token 轮换）
+//! 5. 信号监听 → `CancellationToken` → 各任务收敛
 
-pub mod api;
-pub mod bootstrap;
-pub mod console;
-pub mod error;
-pub mod logbus;
-pub mod state;
+pub mod identity;
+pub mod link;
+pub mod node;
 
-pub use bootstrap::run;
-pub use state::AppState;
+pub use identity::{NodeIdentity, NodeStateDir};
+pub use link::{ControlLink, HeartbeatOutcome};
+pub use node::{run_node, NodeArgs};

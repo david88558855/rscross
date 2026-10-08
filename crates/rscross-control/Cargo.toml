@@ -1,0 +1,39 @@
+[package]
+name = "rscross-control"
+description = "rscross 控制面：管理 API + Web 控制台 + 持久化（供独立控制台二进制与服务端内嵌模式复用）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "rscross_control"
+path = "src/lib.rs"
+
+[features]
+default = []
+# 节点侧的 HTTP 客户端。独立控制台二进制不启用它，
+# 因此控制台产物里不会出现 reqwest / hyper / h2 这一整棵子树。
+http-client = ["dep:reqwest"]
+
+[dependencies]
+rscross-common = { workspace = true }
+rscross-config = { workspace = true }
+rscross-store = { workspace = true }
+rscross-auth = { workspace = true }
+
+axum = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true, optional = true }

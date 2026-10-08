@@ -109,6 +109,14 @@ pub const ALPN_RSROSS_CONTROL: &[u8] = b"rscross/control/1";
 /// Iroh 数据面 ALPN（把公网连接通过 P2P 直连投递给目标客户端）。
 pub const ALPN_RSROSS_DATA: &[u8] = b"rscross/data/1";
 
+/// 访问端 ALPN（私有 / P2P 隧道的访问端向节点申请通道）。
+///
+/// 与数据面 ALPN 分开，是因为两者语义不同：
+/// - 数据面：**节点 → 客户端**投递，首部是隧道路由键；
+/// - 访问端：**访问端 → 节点**申请，首部是访问密钥（节点据此判定它有权访问哪条隧道）。
+/// 混用同一个 ALPN 会让节点无法区分「我是被投递方」还是「我要申请投递」。
+pub const ALPN_RSROSS_ACCESS: &[u8] = b"rscross/access/1";
+
 /// 默认隧道控制面端口（与 FerroTunnel 默认值保持一致，便于排障）。
 pub const DEFAULT_TUNNEL_PORT: u16 = 7835;
 
@@ -248,12 +256,13 @@ impl TunnelKind {
 
     /// 数据面是否已接入。
     ///
-    /// 目前只有域名解析可直接工作：它的入口是 FerroTunnel 自带的 HTTP 入口
-    /// （按 `Host` 路由到客户端）。其余三类都需要节点侧自建 ingress / 访问端
-    /// 运行模式 —— FerroTunnel 的服务端只提供控制面 + HTTP 入口，给不了
-    /// 任意端口监听。前端据此标注状态，避免让人以为配置完就能通。
+    /// - 域名解析：走 FerroTunnel 自带的 HTTP 入口（按 `Host` 路由）。
+    /// - 端口转发：走节点侧自建 ingress（[`crate::TunnelKind::Port`] 会在节点上
+    ///   监听公网端口并由节点主动向客户端投递）。
+    /// - 私有 / P2P：还需要访问端（`rscross-client access --key ...` 形态），
+    ///   尚未交付。前端据此标注「待接入」，避免让人以为配置完就能通。
     pub fn data_plane_ready(self) -> bool {
-        matches!(self, Self::Domain)
+        matches!(self, Self::Domain | Self::Port)
     }
 }
 
@@ -742,10 +751,16 @@ mod tests {
 
     #[test]
     fn data_plane_status_is_explicit_not_optimistic() {
-        // 这是给前端标注状态用的：只有域名解析目前真的能通，
-        // 其余三类还没接数据面。不要让 UI 假装它们可用。
-        assert!(TunnelKind::Domain.data_plane_ready());
-        assert!(!TunnelKind::Port.data_plane_ready());
+        // 这是给前端标注状态用的：已接入的是域名解析与端口转发，
+        // 私有 / P2P 还要等访问端工具。不要让 UI 假装它们可用。
+        assert!(
+            TunnelKind::Domain.data_plane_ready(),
+            "域名解析走 FerroTunnel 的 HTTP 入口"
+        );
+        assert!(
+            TunnelKind::Port.data_plane_ready(),
+            "端口转发走节点侧自建的 TCP ingress"
+        );
         assert!(!TunnelKind::Private.data_plane_ready());
         assert!(!TunnelKind::P2p.data_plane_ready());
     }

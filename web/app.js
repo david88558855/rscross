@@ -154,16 +154,16 @@
       desc: '公网域名指向内网服务，按 Host 路由，走节点的 HTTP 入口。',
     },
     {
-      key: 'port', label: '端口转发', ico: '⇄', ready: false, protos: ['tcp', 'udp'],
-      desc: '节点的公网端口转发到内网服务，适合数据库、SSH 这类非 HTTP 场景。',
+      key: 'port', label: '端口转发', ico: '⇄', ready: true, protos: ['tcp', 'udp'],
+      desc: '节点监听公网端口，收到连接后经 Iroh 投递给客户端本地服务；适合数据库、SSH 这类非 HTTP 场景。',
     },
     {
       key: 'private', label: '私有隧道', ico: '⊘', ready: false, protos: ['tcp', 'udp'],
-      desc: '不暴露公网端口：访问端凭访问密钥在自己那边监听，流量经节点转发。',
+      desc: '不暴露公网端口：访问端凭访问密钥在自己那边监听，流量经节点转发（访问端工具待交付）。',
     },
     {
       key: 'p2p', label: 'P2P 隧道', ico: '⇉', ready: false, protos: ['tcp'],
-      desc: '同私有隧道，但优先点对点直连；直连成功不占服务端带宽，仅支持 TCP。',
+      desc: '同私有隧道，但优先点对点直连；直连成功不占服务端带宽，仅支持 TCP（访问端工具待交付）。',
     },
   ];
 
@@ -415,8 +415,8 @@
             '<li>' + (state.embedded ? '本进程已内嵌控制台' : '在「服务端节点」页创建一个节点') +
               '，拿到节点接入命令并在公网机器上执行。</li>' +
             '<li>在「客户端管理」页签发接入令牌，把生成的命令贴到内网机器上执行。</li>' +
-            '<li>在「隧道管理」新建隧道：<b>域名解析</b>把公网域名指向内网服务（当前可用）；' +
-            '端口转发 / 私有隧道 / P2P 隧道的数据面见该页的分类说明。</li>' +
+            '<li>在「隧道管理」新建隧道：<b>域名解析</b>按域名暴露、<b>端口转发</b>按端口暴露；' +
+            '私有隧道与 P2P 隧道需要访问端，见该页分类说明。</li>' +
           '</ol>' +
         '</div></div>' +
       '</div>';
@@ -893,6 +893,8 @@
     }
     if (meta.key === 'port') {
       fields += '<label class="field"><span>公网端口</span><input id="t-port" placeholder="留空则自动分配" /></label>';
+      fields += '<div class="hint">节点会直接监听这个端口。当前入口只实现了 <b>TCP</b>：' +
+        '选 UDP 可以保存配置，但暂时不会真正转发。</div>';
     }
     if (meta.key === 'p2p') {
       fields += '<label class="field"><span>直连失败时允许中继回退</span>' +

@@ -10,7 +10,7 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use rscross_auth::{new_node_token, token_hash};
-use rscross_common::{NodeEndpoint, NodeRuntime};
+use rscross_common::{DesiredTunnel, NodeEndpoint, NodeRuntime};
 use rscross_config::ConsoleFile;
 use rscross_store::{NodePatch, NodeRecord, NodeRuntimePatch};
 use serde::{Deserialize, Serialize};
@@ -474,6 +474,28 @@ pub struct NodeHeartbeatRequest {
     pub runtime: NodeRuntime,
 }
 
+/// 节点侧要承载的一条隧道。
+///
+/// 节点不参与业务语义，它只需要知道「这条隧道的流量往哪个客户端投递、
+/// 用哪个路由键」，以及（对私有 / P2P）访问端凭密钥查询时能拿到客户端坐标。
+/// 隧道定义与下发给客户端的**完全一致**，两侧路由键算法同源 —— 否则会出现
+/// 「隧道建立了但流量投递不到」。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeTunnelPlan {
+    /// 隧道定义。
+    pub tunnel: DesiredTunnel,
+    /// 归属客户端 ID。
+    pub client_id: String,
+    /// 归属客户端名（日志用）。
+    pub client_name: String,
+    /// 归属客户端的 Iroh 坐标（JSON）。
+    ///
+    /// 客户端还没上报时为 `None`：此时节点无法主动投递（端口转发会拒绝连接、
+    /// 访问端只能走中继），节点会跳过并说明原因，而不是假装隧道可用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_endpoint: Option<String>,
+}
+
 /// 节点心跳响应。
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeHeartbeatResponse {
@@ -485,6 +507,12 @@ pub struct NodeHeartbeatResponse {
     pub public_ip: Option<String>,
     /// 当前生效的 FerroTunnel 握手 token（便于节点感知轮换）。
     pub tunnel_token: String,
+    /// 本节点当前要承载的隧道。
+    ///
+    /// 「端口转发」据此开公网端口监听；私有 / P2P 据此响应访问端的密钥查询。
+    /// 域名解析虽然走 FerroTunnel 的 HTTP 入口，也一并下发（节点侧统计与排障要用）。
+    #[serde(default)]
+    pub tunnels: Vec<NodeTunnelPlan>,
 }
 
 /// `POST /api/v1/node/enroll`
@@ -607,12 +635,53 @@ pub async fn apply_node_heartbeat(
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::not_found("节点不存在"))?;
 
+    let tunnels = collect_node_plans(state, node_id).await?;
+
     Ok(NodeHeartbeatResponse {
         heartbeat_secs: cfg.console.heartbeat_secs,
         server_time: rscross_common::time::now_rfc3339(),
         public_ip: node.public_ip.clone(),
         tunnel_token: node.tunnel_token.clone(),
+        tunnels,
     })
+}
+
+/// 汇总某节点需要承载的隧道（含归属客户端的 Iroh 坐标）。
+///
+/// 用的是与客户端下发同一个 [`crate::api::desired_tunnels`]：只保留启用项、
+/// 校验协议与访问密钥。两侧走同一段转换逻辑，才不会出现「客户端建了、节点不知道」。
+async fn collect_node_plans(
+    state: &AppState,
+    node_id: &str,
+) -> Result<Vec<NodeTunnelPlan>, ApiError> {
+    let clients = state
+        .store
+        .list_clients_of_node(node_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    let mut plans = Vec::new();
+    for client in clients {
+        // 被禁用的客户端整条不下发：它的隧道本来就不该工作。
+        if client.disabled {
+            continue;
+        }
+        let records = state
+            .store
+            .list_tunnels_of_client(&client.id)
+            .await
+            .map_err(ApiError::from)?;
+        for tunnel in crate::api::desired_tunnels(records) {
+            plans.push(NodeTunnelPlan {
+                tunnel,
+                client_id: client.id.clone(),
+                client_name: client.name.clone(),
+                client_endpoint: client.endpoint_addr.clone(),
+            });
+        }
+    }
+    plans.sort_by(|a, b| a.tunnel.name.cmp(&b.tunnel.name));
+    Ok(plans)
 }
 
 fn non_empty(value: &str) -> Option<String> {

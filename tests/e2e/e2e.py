@@ -461,6 +461,91 @@ secret_key_file = "{(state_dir / 'node.key').as_posix()}"
     )
 
 
+def check_port_forward(label: str, base: str, token: str, client_id: str) -> None:
+    """端口转发：节点监听公网端口 → 经 Iroh 投递到客户端本地服务。
+
+    覆盖的是节点侧**自建 ingress** 这条新链路：客户端不为这类隧道建 FerroTunnel
+    反向隧道，只把「路由键 → 本地地址」登记进 targets；节点在公网端口上 accept 后
+    主动向客户端开流。这是 FerroTunnel 给不了的能力（它的服务端只有控制面 + HTTP 入口），
+    所以必须单独验证，否则很容易写成「配置能存、端口没开」。
+    """
+    # 1) 内网侧：一个带前缀的回显服务，用于确认数据真的走了整条链路
+    echo = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    echo.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    echo.bind(("127.0.0.1", 0))
+    echo.listen(16)
+    echo.settimeout(1.0)
+    echo_port = echo.getsockname()[1]
+    stop = threading.Event()
+
+    def serve() -> None:
+        while not stop.is_set():
+            try:
+                conn, _ = echo.accept()
+            except (socket.timeout, OSError):
+                continue
+            try:
+                data = conn.recv(4096)
+                if data:
+                    conn.sendall(b"port-forward:" + data)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+
+    # 2) 指定公网端口（用空闲端口，避免与 CI 上其它进程撞车）
+    public_port = free_port()
+    status, tunnel = http_json(
+        "POST",
+        f"{base}/api/v1/clients/{client_id}/tunnels",
+        {
+            "kind": "port",
+            "name": "e2e-port-fwd",
+            "proto": "tcp",
+            "local_addr": f"127.0.0.1:{echo_port}",
+            "remote_port": public_port,
+        },
+        token=token,
+    )
+    created = status == 200 and (tunnel or {}).get("remote_port") == public_port
+    if not check(
+        f"{label}: 可创建「端口转发」隧道并指定公网端口",
+        created,
+        f"status={status} {str(tunnel)[:140]}",
+    ):
+        stop.set()
+        echo.close()
+        return
+
+    # 3) 等配置经心跳下发（默认 2 秒）并真的连一次
+    def forwarded():
+        try:
+            with socket.create_connection(("127.0.0.1", public_port), timeout=5) as sock:
+                sock.sendall(b"ping")
+                sock.settimeout(5)
+                reply = sock.recv(64)
+        except OSError:
+            return None
+        return reply if reply.startswith(b"port-forward:") else None
+
+    ok, reply = wait_until(
+        f"{label}: 公网端口转发可用",
+        forwarded,
+        timeout=90,
+        interval=1.0,
+    )
+    check(
+        f"{label}: 公网端口 → 节点 ingress → Iroh → 客户端本地服务（端到端数据面）",
+        ok,
+        f"reply={reply!r}",
+    )
+
+    stop.set()
+    echo.close()
+
+
 def check_tunnel_kinds(label: str, base: str, token: str, client_id: str) -> None:
     """四类隧道的创建、字段组合、访问密钥与非法组合拦截。
 
@@ -827,6 +912,8 @@ def scenario_embedded(dist: Path, work: Path) -> None:
         str(clients_now)[:120],
     ):
         check_tunnel_kinds(label, console_base, token, clients_now[0]["id"])
+        # 端口转发的完整链路（节点自建 ingress → Iroh → 客户端本地服务）
+        check_port_forward(label, console_base, token, clients_now[0]["id"])
 
     # 概览与日志
     status, overview = http_json("GET", console_base + "/api/v1/overview", token=token)

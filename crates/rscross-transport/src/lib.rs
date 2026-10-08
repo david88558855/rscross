@@ -18,11 +18,16 @@
 //! - 二者组合成「直连优先 + 中继兜底」，并且 Iroh 的公钥身份把「节点发现 + 认证」从
 //!   「共享 token」升级为「每个节点一把密钥」。
 
+pub mod dispatch;
 pub mod forward;
 pub mod path;
 pub mod p2p;
 pub mod relay;
 
+pub use dispatch::{
+    bridge_tcp_to_stream, AccessHandler, AccessReply, DispatchEntry, IndexChange, PortIngress,
+    TunnelDispatcher, TunnelIndex, ALPN_ACCESS,
+};
 pub use path::{PathChoice, PathProbe, PathSelector};
 pub use p2p::{
     addr_from_id, decode_addr, encode_addr, load_or_create_secret_key, probe_control,

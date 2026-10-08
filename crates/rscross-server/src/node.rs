@@ -16,9 +16,12 @@ use std::time::Duration;
 use clap::Parser;
 use rscross_common::{Error, NodeRuntime, Result};
 use rscross_config::{ConsoleFile, NodeFile};
-use rscross_control::{build_plane, init_logging, wait_for_signal, ControlPlane, LogBus};
+use rscross_control::{
+    build_plane, init_logging, wait_for_signal, ControlPlane, LogBus, NodeTunnelPlan,
+};
 use rscross_transport::{
-    load_or_create_secret_key, NodeInfoHandler, P2pNode, P2pOptions, RelayServer,
+    decode_addr, load_or_create_secret_key, AccessHandler, DispatchEntry, NodeInfoHandler, P2pNode,
+    P2pOptions, PortIngress, RelayServer, TunnelDispatcher, TunnelIndex, ALPN_ACCESS,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -27,6 +30,12 @@ use crate::link::ControlLink;
 
 /// 心跳失败后的指数退避上限。
 const MAX_BACKOFF_SECS: u64 = 60;
+
+/// 节点向客户端投递时的连接超时（秒）。
+///
+/// 给得比打洞探测宽松一些：首次投递可能触发 relay 回退，太短会把
+/// 「其实能通但要绕一圈」误判成失败。
+const DISPATCH_DIAL_TIMEOUT_SECS: u64 = 12;
 
 /// 命令行参数。
 #[derive(Debug, Parser)]
@@ -208,6 +217,30 @@ async fn run_configured(cfg: NodeFile, args: NodeArgs) -> Result<()> {
         )
     });
 
+    // ---- 2b. 数据面：端口转发入口 + 访问端密钥校验 ----
+    //
+    // FerroTunnel 只给「控制面 + HTTP 入口」，任意端口监听与「访问端凭密钥自建入口」
+    // 都必须由 rscross 自己实现，这一块就是它。没有 Iroh 节点时整块不可用，
+    // 那时只剩域名解析（走 FerroTunnel 的 HTTP 入口）。
+    let tunnel_index = TunnelIndex::new();
+    let (access_router, port_ingress) = match p2p.as_ref() {
+        Some(node) => {
+            let dispatcher = TunnelDispatcher::new(
+                node.clone(),
+                tunnel_index.clone(),
+                Duration::from_secs(DISPATCH_DIAL_TIMEOUT_SECS),
+            );
+            let router = node.spawn_router(ALPN_ACCESS, AccessHandler::new(dispatcher.clone()));
+            (Some(router), Some(PortIngress::new(dispatcher)))
+        }
+        None => {
+            tracing::warn!(
+                "p2p.enabled = false：端口转发与私有 / P2P 隧道不可用，仅保留 HTTP 域名解析"
+            );
+            (None, None)
+        }
+    };
+
     // ---- 3. 注册 ----
     let public_host = cfg
         .node
@@ -294,8 +327,20 @@ async fn run_configured(cfg: NodeFile, args: NodeArgs) -> Result<()> {
         let p2p = p2p.clone();
         let state_dir = state_dir.clone();
         let shutdown = shutdown.clone();
+        let tunnel_index = tunnel_index.clone();
+        let port_ingress = port_ingress.clone();
         async move {
-            heartbeat_loop(link, link_identity, cfg, p2p, state_dir, shutdown).await;
+            heartbeat_loop(
+                link,
+                link_identity,
+                cfg,
+                p2p,
+                state_dir,
+                tunnel_index,
+                port_ingress,
+                shutdown,
+            )
+            .await;
         }
     });
 
@@ -321,7 +366,10 @@ async fn run_configured(cfg: NodeFile, args: NodeArgs) -> Result<()> {
     if let Some(handle) = relay_task {
         let _ = tokio::time::timeout(grace, handle).await;
     }
-    if let Some(router) = node_router {
+    if let Some(ingress) = port_ingress.as_ref() {
+        ingress.shutdown().await;
+    }
+    for router in [node_router, access_router].into_iter().flatten() {
         if let Err(err) = router.shutdown().await {
             tracing::warn!(error = %err, "关闭 Iroh accept 循环失败");
         }
@@ -339,6 +387,79 @@ async fn run_configured(cfg: NodeFile, args: NodeArgs) -> Result<()> {
 
     tracing::info!("rscross-server 已退出");
     Ok(())
+}
+
+/// 应用控制面下发的隧道编排。
+async fn apply_tunnel_plan(
+    index: &TunnelIndex,
+    ingress: Option<&PortIngress>,
+    plans: Vec<NodeTunnelPlan>,
+) {
+    let change = index.replace_all(to_dispatch_entries(plans));
+
+    if !change.is_empty() {
+        tracing::info!(
+            added_ports = ?change.added_ports,
+            removed_ports = ?change.removed_ports,
+            "端口转发监听发生变化"
+        );
+    }
+    if let Some(ingress) = ingress {
+        let wanted = index.listen_ports();
+        if wanted != ingress.listening_ports().await {
+            ingress.reconcile(wanted).await;
+        }
+    }
+}
+
+/// 把控制面下发的隧道编排转成节点侧的投递目标。
+///
+/// 客户端的端点坐标由**客户端自己上报**，缺失或无法解析时无法主动投递：
+/// 这类隧道直接跳过并说明原因，而不是在索引里留一条永远连不上的记录
+/// （那会让人以为隧道已经好了）。
+fn to_dispatch_entries(plans: Vec<NodeTunnelPlan>) -> Vec<DispatchEntry> {
+    plans
+        .into_iter()
+        .filter_map(|plan| {
+            let raw = match plan.client_endpoint.as_deref() {
+                Some(raw) if !raw.trim().is_empty() => raw,
+                _ => {
+                    tracing::warn!(
+                        tunnel = %plan.tunnel.name,
+                        client = %plan.client_name,
+                        "客户端尚未上报 Iroh 坐标，暂不承载该隧道"
+                    );
+                    return None;
+                }
+            };
+            let client_endpoint = match decode_addr(raw) {
+                Ok(addr) => addr,
+                Err(err) => {
+                    tracing::warn!(
+                        tunnel = %plan.tunnel.name,
+                        client = %plan.client_name,
+                        error = %err,
+                        "客户端 Iroh 坐标无法解析，暂不承载该隧道"
+                    );
+                    return None;
+                }
+            };
+            Some(DispatchEntry {
+                tunnel_id: plan.tunnel.id.clone(),
+                name: plan.tunnel.name.clone(),
+                kind: plan.tunnel.kind,
+                // 与客户端侧 TunnelTargets 用同一个函数算路由键，
+                // 否则会出现「隧道建立了但流量投递不到」。
+                tunnel_key: plan.tunnel.route_key(),
+                client_id: plan.client_id,
+                client_name: plan.client_name,
+                client_endpoint,
+                remote_port: plan.tunnel.remote_port,
+                access_key: plan.tunnel.access_key.clone(),
+                allow_relay: plan.tunnel.allow_relay,
+            })
+        })
+        .collect()
 }
 
 /// 启动内嵌控制台：返回控制面句柄与后台任务。
@@ -481,12 +602,15 @@ async fn enroll_with_retry(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn heartbeat_loop(
     link: ControlLink,
     mut identity: NodeIdentity,
     cfg: NodeFile,
     p2p: Option<P2pNode>,
     state_dir: NodeStateDir,
+    tunnel_index: TunnelIndex,
+    port_ingress: Option<PortIngress>,
     shutdown: CancellationToken,
 ) {
     let mut interval = identity
@@ -511,6 +635,10 @@ async fn heartbeat_loop(
                         tracing::warn!(error = %err, "持久化节点身份失败");
                     }
                 }
+                // 配置下发走「拉」：心跳响应里带着本节点要承载的隧道，
+                // 这里把它变成端口监听与访问端索引 —— 这是节点感知
+                // 「隧道被创建 / 修改 / 删除」的唯一入口。
+                apply_tunnel_plan(&tunnel_index, port_ingress.as_ref(), outcome.tunnels).await;
                 tracing::debug!(node = %cfg.node.name, "节点心跳成功");
             }
             Err(err) => {

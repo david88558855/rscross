@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use rscross_common::{ClientRuntime, DesiredTunnel, Error, NodeEndpoint, Result};
+use rscross_common::{ClientRuntime, DesiredTunnel, Error, NodeEndpoint, Result, TunnelKind};
 use rscross_config::{ClientFile, TunnelSection};
 use rscross_transport::{
     probe_control, P2pDataHandler, P2pNode, P2pOptions, PathProbe, PathSelector, RelayTunnelClient,
@@ -567,25 +567,40 @@ impl TunnelManager {
             return;
         }
 
-        // 数据面还没接入的分类：明确跳过并说明原因。
+        // 两条承载路径，客户端只负责其中一半：
         //
-        // 这里刻意不「尽力而为」—— 给一条永远投递不到流量的隧道建连接，
-        // 只会让人误以为它已经好了。真实状态是：配置已保存、数据面待接入。
+        // - 域名解析：客户端主动外连，用 FerroTunnel 反向隧道把本地服务挂到
+        //   节点的 HTTP 入口上（FerroTunnel 自己知道本地地址，不需要 targets）；
+        // - 端口转发：入口在节点侧（节点监听公网端口并主动向客户端开流），
+        //   客户端只要把「路由键 → 本地地址」登记进 targets，等节点来连即可。
+        //
+        // 无论走哪条路径，路由键都必须用 `DesiredTunnel::route_key()` 计算 ——
+        // 两侧算法不同就会出现「隧道建立了但流量投递不到」。
         let mut wanted: HashMap<String, DesiredTunnel> = HashMap::new();
+        let mut targets_wanted: Vec<(String, String)> = Vec::new();
         let mut present: HashSet<String> = HashSet::new();
+
         for tunnel in desired {
             present.insert(tunnel.id.clone());
-            if tunnel.kind.data_plane_ready() {
+
+            if tunnel.kind == TunnelKind::Domain {
                 wanted.insert(tunnel.id.clone(), tunnel);
                 continue;
             }
-            if self.reported_unsupported.insert(tunnel.id.clone()) {
-                tracing::warn!(
-                    tunnel = %tunnel.name,
-                    kind = %tunnel.kind,
-                    category = tunnel.kind.label(),
-                    "该分类的数据面尚未接入，本版本不会为它建立连接；配置已保存，待数据面支持后自动生效"
-                );
+
+            // 节点侧要根据这个键来开流，所以先登记，与数据面是否就绪无关：
+            // 这样访问端上线后不需要再改客户端。
+            targets_wanted.push((tunnel.route_key(), tunnel.local_addr.clone()));
+
+            if !tunnel.kind.data_plane_ready() {
+                if self.reported_unsupported.insert(tunnel.id.clone()) {
+                    tracing::warn!(
+                        tunnel = %tunnel.name,
+                        kind = %tunnel.kind,
+                        category = tunnel.kind.label(),
+                        "该分类还需要访问端（rscross-client access）才能访问；配置已保存，届时无需改动客户端"
+                    );
+                }
             }
         }
         self.reported_unsupported.retain(|id| present.contains(id));
@@ -663,6 +678,10 @@ impl TunnelManager {
                 },
             );
         }
+
+        // 投递目标表整体替换（幂等）。放在最后：启动循环里的 `targets.set`
+        // 只覆盖本次新建的隧道，这里一次性对齐「控制面期望」与「本地登记」。
+        self.targets.replace_all(targets_wanted);
     }
 
     async fn shutdown_all(&mut self) {

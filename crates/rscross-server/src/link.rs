@@ -11,6 +11,7 @@
 //! 也就不存在「自己给自己发一个 token 再拿去鉴权」这种绕圈设计。
 
 use rscross_common::{Error, NodeRuntime, Result};
+use rscross_control::NodeTunnelPlan;
 use rscross_control::ControlPlane;
 
 use rscross_control::node_client::NodeApiClient;
@@ -26,6 +27,11 @@ pub struct HeartbeatOutcome {
     pub tunnel_token: String,
     /// 控制台观测到的出口 IP（仅 managed 模式有值）。
     pub public_ip: Option<String>,
+    /// 本节点需要承载的隧道（含归属客户端的 Iroh 坐标）。
+    ///
+    /// 节点据此收敛端口转发监听与访问端索引 —— 配置下发走「拉」，
+    /// 所以这里是节点感知「隧道被创建 / 修改 / 删除」的唯一入口。
+    pub tunnels: Vec<NodeTunnelPlan>,
 }
 
 /// 控制台链路。
@@ -143,6 +149,7 @@ impl ControlLink {
                     heartbeat_secs: response.heartbeat_secs,
                     tunnel_token: response.tunnel_token,
                     public_ip: response.public_ip,
+                    tunnels: response.tunnels,
                 })
             }
                     Self::Http { client } => {
@@ -155,6 +162,7 @@ impl ControlLink {
                     heartbeat_secs: response.heartbeat_secs,
                     tunnel_token: response.tunnel_token,
                     public_ip: response.public_ip,
+                    tunnels: response.tunnels,
                 })
             }
         }

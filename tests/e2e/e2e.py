@@ -548,10 +548,16 @@ def scenario_embedded(dist: Path, work: Path) -> None:
             proc.stop()
         return
 
-    status, nodes = http_json("GET", console_base + "/api/v1/nodes", token=token)
+    def self_node_registered():
+        status, nodes = http_json("GET", console_base + "/api/v1/nodes", token=token)
+        if status == 200 and nodes and len(nodes) == 1 and nodes[0].get("name") == "local-node":
+            return nodes
+        return None
+
+    ok, nodes = wait_until("服务端自动注册本机节点", self_node_registered, timeout=60, interval=0.5)
     check(
         f"{label}: 服务端启动后自动注册为本机节点",
-        status == 200 and len(nodes) == 1 and nodes[0]["name"] == "local-node",
+        ok,
         str(nodes)[:200],
     )
 

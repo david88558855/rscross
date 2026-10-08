@@ -280,7 +280,11 @@ impl ClientStatus {
 }
 
 /// 客户端上报的运行时信息。
+///
+/// 结构体级别的 `#[serde(default)]`：允许心跳只带部分字段
+/// （老版本客户端、精简上报、手工 curl 调试都依赖这一点）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ClientRuntime {    /// 客户端版本号。
     pub version: String,
     /// 操作系统。
@@ -303,6 +307,7 @@ pub struct ClientRuntime {    /// 客户端版本号。
 /// 与控制台是两次心跳（`ClientRuntime` 是客户端 → 控制台，本结构是节点 → 控制台），
 /// 两者字段高度相似但不合并：节点额外要汇报数据面监听端口，客户端要汇报被分配的节点。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NodeRuntime {
     /// 节点进程版本。
     pub version: String,

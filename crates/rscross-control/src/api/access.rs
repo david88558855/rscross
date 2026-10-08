@@ -77,9 +77,13 @@ pub async fn resolve(
     // 限流键用**来源 IP**，不用密钥本体：密钥是秘密，把它写进计数表
     // 等于在内存里留下一份「被尝试过的密钥」清单。
     let throttle_key = format!("access:{}", peer.ip());
-    if let Err(err) = state.throttle.check_with(&throttle_key, "访问密钥校验") {
+    if let Some(remain) = state.throttle.locked_for(&throttle_key) {
         // 用 429 而不是 401/403：这是「试得太频繁」，不是「你没权限」。
-        return Err(ApiError::too_many_requests(err.to_string()));
+        // 文案由这里拼（而不是让限流器代拟），这样 429 的响应体里
+        // 不会出现「鉴权错误: 」这种与状态码矛盾的类型前缀。
+        return Err(ApiError::too_many_requests(format!(
+            "访问密钥校验已锁定，请 {remain} 秒后再试"
+        )));
     }
 
     let key = req.access_key.trim();

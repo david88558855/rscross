@@ -245,25 +245,17 @@ impl Throttle {
         Self::default()
     }
 
-    /// 检查是否被锁定（动作名固定为「登录」，保持既有调用点不变）。
-    pub fn check(&self, key: &str) -> Result<()> {
-        self.check_with(key, "登录")
-    }
-
-    /// 检查是否被锁定；被锁定时返回 `Err`，消息里带上动作名与剩余秒数。
+    /// 若该 key 处于锁定中，返回**剩余秒数**；未锁定则 `None`。
     ///
-    /// `action` 只影响文案，但很重要：「访问密钥校验已锁定」与「登录已锁定」
-    /// 指向完全不同的排查方向。
-    pub fn check_with(&self, key: &str, action: &str) -> Result<()> {
+    /// 只返回事实、不代拟文案，是刻意的：文案里必须带上「是哪一类被锁了」
+    /// （登录 / 访问密钥校验指向完全不同的排查方向），而「鉴权错误: 」这种
+    /// 类型前缀不该出现在 HTTP 429 的响应体里 —— 429 说的是「太频繁」，
+    /// 不是「你没权限」。所以拼文案交给调用方。
+    pub fn locked_for(&self, key: &str) -> Option<u64> {
         let now = rscross_common::time::now().timestamp();
         let guard = self.lock();
-        if let Some(a) = guard.get(key) {
-            if a.locked_until_unix > now {
-                let remain = a.locked_until_unix - now;
-                return Err(Error::auth(format!("{action}已锁定，请 {remain} 秒后再试")));
-            }
-        }
-        Ok(())
+        let attempt = guard.get(key)?;
+        (attempt.locked_until_unix > now).then(|| (attempt.locked_until_unix - now) as u64)
     }
 
     /// 记录一次失败；达到阈值则上锁。
@@ -373,13 +365,30 @@ mod tests {
     }
 
     #[test]
-    fn throttle_reports_which_action_was_locked() {
-        // 文案要能区分是「登录」还是「访问密钥校验」被锁，
-        // 否则用户看到「登录已锁定」会去查密码，而问题其实在密钥上。
+    fn throttle_exposes_only_the_facts_and_keys_are_independent() {
         let t = Throttle::new();
-        t.record_failure("ip", 1, 1);
-        let err = t.check_with("ip", "访问密钥校验").expect_err("应当被锁定");
-        assert!(err.to_string().contains("访问密钥校验"), "{err}");
+
+        // 未失败过：不算锁定
+        assert_eq!(t.locked_for("ip"), None);
+
+        t.record_failure("ip", 2, 1);
+        assert_eq!(t.locked_for("ip"), None, "一次失败还不锁");
+
+        // 达到阈值 → 锁定，且能给出剩余秒数（文案由调用方拼）
+        t.record_failure("ip", 2, 1);
+        let remain = t.locked_for("ip").expect("达到阈值后应锁定");
+        assert!(remain > 0 && remain <= 60, "剩余秒数应在 1..=60，实际 {remain}");
+
+        // 计数键之间必须互相独立：否则一个人输错密码会锁掉同 IP 的其他人
+        assert_eq!(t.locked_for("other-ip"), None);
+
+        // 成功后立刻解锁
+        t.record_success("ip");
+        assert_eq!(t.locked_for("ip"), None);
+
+        // max_attempts = 0 表示「不启用限流」
+        t.record_failure("never", 0, 1);
+        assert_eq!(t.locked_for("never"), None);
     }
 
     #[test]
@@ -393,13 +402,13 @@ mod tests {
     #[test]
     fn throttle_locks_after_threshold() {
         let t = LoginThrottle::new();
-        t.check("k").expect("首次放行");
+        assert_eq!(t.locked_for("k"), None, "首次放行");
         t.record_failure("k", 2, 1);
-        t.check("k").expect("一次失败还不锁");
+        assert_eq!(t.locked_for("k"), None, "一次失败还不锁");
         t.record_failure("k", 2, 1);
-        assert!(t.check("k").is_err(), "达到阈值后必须锁定");
+        assert!(t.locked_for("k").is_some(), "达到阈值后必须锁定");
         t.record_success("k");
-        t.check("k").expect("成功后解锁");
+        assert_eq!(t.locked_for("k"), None, "成功后解锁");
     }
 
     #[tokio::test]

@@ -93,8 +93,11 @@ pub async fn login(
         username,
         AppState::client_ip(&headers).unwrap_or_else(|| "unknown".to_string())
     );
-    if let Err(err) = state.throttle.check(&throttle_key) {
-        return Err(ApiError::too_many_requests(err.to_string()));
+    if let Some(remain) = state.throttle.locked_for(&throttle_key) {
+        // 自己拼文案：429 的意思是「试得太频繁」，不该带上「鉴权错误: 」前缀。
+        return Err(ApiError::too_many_requests(format!(
+            "登录已锁定，请 {remain} 秒后再试"
+        )));
     }
 
     let Some(user) = state

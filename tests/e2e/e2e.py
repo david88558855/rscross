@@ -710,6 +710,15 @@ def check_private_tunnel(
         f"good={masked(body_good)} bad={masked(body_bad)}",
     )
 
+    # 429 说的是「试得太频繁」，不是「你没权限」，所以文案里不该带
+    # 「鉴权错误: 」这种错误类型前缀 —— 那是内部 Error 的 Display 泄漏到了 API。
+    message = (body_bad or {}).get("message") or ""
+    check(
+        f"{label}: 限流提示文案干净（无错误类型前缀，且说清了原因）",
+        "鉴权错误" not in message and "已锁定" in message,
+        f"message={message!r}",
+    )
+
 
 def check_port_forward(label: str, base: str, token: str, client_id: str) -> None:
     """端口转发：节点监听公网端口 → 经 Iroh 投递到客户端本地服务。

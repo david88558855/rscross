@@ -129,6 +129,8 @@ impl Store {
     ) -> Result<UserRecord> {
         let now = rscross_common::time::now_rfc3339();
         let id = uuid::Uuid::new_v4().to_string();
+        // 闭包会拿走 username，查询用的副本先留好。
+        let lookup = username.clone();
         let (id2, now2) = (id.clone(), now.clone());
         self.blocking(move |c| {
             c.execute(
@@ -140,7 +142,7 @@ impl Store {
             Ok(())
         })
         .await?;
-        self.find_user_by_name(&username)
+        self.find_user_by_name(&lookup)
             .await?
             .ok_or_else(|| Error::store("用户创建后立即查询失败"))
     }

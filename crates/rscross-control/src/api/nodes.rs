@@ -270,8 +270,11 @@ pub async fn create_node(
         )
         .await;
 
+    // 先把命令拼好，避免下面把 node / token 移动进结构体后再去借用它们。
+    let command = node_command(&cfg, &node.name, &token);
+
     Ok(Json(CreateNodeResponse {
-        command: node_command(&cfg, &node.name, &token),
+        command,
         node,
         node_token: token,
     }))

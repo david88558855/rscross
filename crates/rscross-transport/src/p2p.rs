@@ -144,13 +144,36 @@ impl P2pNode {
 
     /// 以给定 ALPN 注册一个协议处理器，返回 `Router`。
     ///
-    /// **注意**：`Router` 必须在调用方持有；drop 会中止 accept 循环。
+    /// **注意**：`Router` 必须在调用方持有，drop 会中止 accept 循环；
+    /// 而且**一个 `Endpoint` 上只能有一个 Router** —— 需要同时服务多个 ALPN 时
+    /// 必须用 [`Self::spawn_dual_router`]，否则后注册的那个不会报错，
+    /// 而是以 `Ignoring connection: unsupported ALPN protocol` 的形式静默失效。
     pub fn spawn_router<H>(&self, alpn: &[u8], handler: H) -> Router
     where
         H: ProtocolHandler,
     {
         Router::builder(self.endpoint.clone())
             .accept(alpn, handler)
+            .spawn()
+    }
+
+    /// 同时服务两个 ALPN 的 accept 循环。
+    ///
+    /// 节点侧需要同时接住两类连接：客户端来的**控制面探测**（`ALPN_CONTROL`）
+    /// 与访问端来的**密钥握手**（`ALPN_ACCESS`）。一个 Endpoint 只能挂一个
+    /// Router，所以必须把它们注册在同一个 Router 上。
+    pub fn spawn_dual_router<H1, H2>(
+        &self,
+        first: (&[u8], H1),
+        second: (&[u8], H2),
+    ) -> Router
+    where
+        H1: ProtocolHandler,
+        H2: ProtocolHandler,
+    {
+        Router::builder(self.endpoint.clone())
+            .accept(first.0, first.1)
+            .accept(second.0, second.1)
             .spawn()
     }
 

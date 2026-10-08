@@ -204,18 +204,6 @@ async fn run_configured(cfg: NodeFile, args: NodeArgs) -> Result<()> {
 
     // ---- 2. Iroh 节点 ----
     let p2p = build_p2p(&cfg, &state_dir).await;
-    let node_router = p2p.as_ref().map(|node| {
-        node.spawn_router(
-            rscross_transport::ALPN_CONTROL,
-            NodeInfoHandler::new(
-                cfg.node.name.clone(),
-                format!(
-                    "tunnel={} ingress={}",
-                    cfg.node.tunnel_bind, cfg.node.ingress_bind
-                ),
-            ),
-        )
-    });
 
     // ---- 2b. 数据面：端口转发入口 + 访问端密钥校验 ----
     //
@@ -223,23 +211,39 @@ async fn run_configured(cfg: NodeFile, args: NodeArgs) -> Result<()> {
     // 都必须由 rscross 自己实现，这一块就是它。没有 Iroh 节点时整块不可用，
     // 那时只剩域名解析（走 FerroTunnel 的 HTTP 入口）。
     let tunnel_index = TunnelIndex::new();
-    let (access_router, port_ingress) = match p2p.as_ref() {
-        Some(node) => {
-            let dispatcher = TunnelDispatcher::new(
-                node.clone(),
-                tunnel_index.clone(),
-                Duration::from_secs(DISPATCH_DIAL_TIMEOUT_SECS),
-            );
-            let router = node.spawn_router(ALPN_ACCESS, AccessHandler::new(dispatcher.clone()));
-            (Some(router), Some(PortIngress::new(dispatcher)))
+    let dispatcher = p2p.as_ref().map(|node| {
+        TunnelDispatcher::new(
+            node.clone(),
+            tunnel_index.clone(),
+            Duration::from_secs(DISPATCH_DIAL_TIMEOUT_SECS),
+        )
+    });
+
+    // 一个 Endpoint 只能挂一个 Router：控制面探测与访问端握手必须注册在同一个
+    // accept 循环上（分别用两个 Router 时，后者会被静默忽略）。
+    let node_router = p2p.as_ref().map(|node| {
+        let control = NodeInfoHandler::new(
+            cfg.node.name.clone(),
+            format!(
+                "tunnel={} ingress={}",
+                cfg.node.tunnel_bind, cfg.node.ingress_bind
+            ),
+        );
+        match dispatcher.as_ref() {
+            Some(dispatcher) => node.spawn_dual_router(
+                (rscross_transport::ALPN_CONTROL, control),
+                (ALPN_ACCESS, AccessHandler::new(dispatcher.clone())),
+            ),
+            None => node.spawn_router(rscross_transport::ALPN_CONTROL, control),
         }
-        None => {
-            tracing::warn!(
-                "p2p.enabled = false：端口转发与私有 / P2P 隧道不可用，仅保留 HTTP 域名解析"
-            );
-            (None, None)
-        }
-    };
+    });
+
+    let port_ingress = dispatcher.map(PortIngress::new);
+    if p2p.is_none() {
+        tracing::warn!(
+            "p2p.enabled = false：端口转发与私有 / P2P 隧道不可用，仅保留 HTTP 域名解析"
+        );
+    }
 
     // ---- 3. 注册 ----
     let public_host = cfg
@@ -369,7 +373,7 @@ async fn run_configured(cfg: NodeFile, args: NodeArgs) -> Result<()> {
     if let Some(ingress) = port_ingress.as_ref() {
         ingress.shutdown().await;
     }
-    for router in [node_router, access_router].into_iter().flatten() {
+    for router in [node_router].into_iter().flatten() {
         if let Err(err) = router.shutdown().await {
             tracing::warn!(error = %err, "关闭 Iroh accept 循环失败");
         }

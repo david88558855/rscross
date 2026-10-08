@@ -232,9 +232,9 @@ build(matrix ×2)  →  package(.tar.gz + sha256)  →  publish(GitHub Release)
 - **先让 `main` 的 CI 绿了再打 tag**：tag 流水线的第一个 job 也是同样的门禁。
 
 ```bash
-git tag -a v0.1.0 -F tag_msg.txt     # 必须 -a：轻量 tag 没有正文
-git push origin v0.1.0
-git ls-remote origin refs/tags/v0.1.0   # 复核，不看 push 的输出
+git tag -a v0.1.2 -F tag_msg.txt     # 必须 -a：轻量 tag 没有正文
+git push origin v0.1.2
+git ls-remote origin refs/tags/v0.1.2   # 复核，不看 push 的输出
 ```
 
 ---

@@ -138,15 +138,18 @@ impl TunnelIndex {
 
         for entry in entries {
             if let Some(port) = entry.listen_port() {
-                // 同一端口出现两次说明控制面数据有冲突；保留第一条并告警，
-                // 而不是让后一条静默覆盖（那会让排障时对不上号）。
-                if let Some(existing) = guard.by_port.insert(port, entry.tunnel_id.clone()) {
+                // 同一端口出现两次说明控制面数据有冲突。注意这里必须**先查再插**：
+                // `HashMap::insert` 的返回值是被覆盖掉的旧值，用它判断「已存在」
+                // 时覆盖已经发生，结果会变成「后者生效」，与保留先出现者的意图相反。
+                if let Some(existing) = guard.by_port.get(&port) {
                     tracing::warn!(
                         port,
                         kept = %existing,
                         dropped = %entry.tunnel_id,
                         "多条隧道争用同一公网端口，已保留先出现的"
                     );
+                } else {
+                    guard.by_port.insert(port, entry.tunnel_id.clone());
                 }
             }
             if let Some(key) = entry.access_key.as_deref().filter(|k| !k.is_empty()) {

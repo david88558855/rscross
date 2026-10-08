@@ -81,6 +81,24 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+def free_port_in_pool() -> int:
+    """在控制台的公网端口池范围内取一个空闲端口。
+
+    不能直接用 free_port()：内核给的随机端口多半落在 20000-30000 之外，
+    而控制面会直接拒绝池外的 remote_port（400）。从 25000 起扫是为了避开
+    控制面自动分配区（它从池子起点开始找）。
+    """
+    for port in range(25000, 30000):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError("20000-30000 内没有空闲端口")
+
+
 def port_is_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         try:
@@ -495,8 +513,8 @@ def check_port_forward(label: str, base: str, token: str, client_id: str) -> Non
 
     threading.Thread(target=serve, daemon=True).start()
 
-    # 2) 指定公网端口（用空闲端口，避免与 CI 上其它进程撞车）
-    public_port = free_port()
+    # 2) 指定公网端口（必须在控制台端口池内，且尽量避开自动分配区）
+    public_port = free_port_in_pool()
     status, tunnel = http_json(
         "POST",
         f"{base}/api/v1/clients/{client_id}/tunnels",

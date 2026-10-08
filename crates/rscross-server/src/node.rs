@@ -389,27 +389,37 @@ async fn run_configured(cfg: NodeFile, args: NodeArgs) -> Result<()> {
     Ok(())
 }
 
-/// 应用控制面下发的隧道编排。
+/// 应用控制面下发的隧道编排，返回当前承载的隧道数。
+///
+/// 只在「隧道数变化或端口增删」时打一条 info：心跳每几秒一次，
+/// 每轮都打会把日志刷满，而刷屏的日志等于没有日志。这条 info 同时是
+/// e2e 失败时判断「节点到底有没有承载隧道」的直接依据。
 async fn apply_tunnel_plan(
     index: &TunnelIndex,
     ingress: Option<&PortIngress>,
     plans: Vec<NodeTunnelPlan>,
-) {
+    known_tunnels: usize,
+) -> usize {
     let change = index.replace_all(to_dispatch_entries(plans));
+    let count = index.len();
 
-    if !change.is_empty() {
+    if count != known_tunnels || !change.is_empty() {
         tracing::info!(
+            tunnels = count,
+            ports = ?index.listen_ports(),
             added_ports = ?change.added_ports,
             removed_ports = ?change.removed_ports,
-            "端口转发监听发生变化"
+            "节点承载的隧道已更新"
         );
     }
+
     if let Some(ingress) = ingress {
         let wanted = index.listen_ports();
         if wanted != ingress.listening_ports().await {
             ingress.reconcile(wanted).await;
         }
     }
+    count
 }
 
 /// 把控制面下发的隧道编排转成节点侧的投递目标。
@@ -618,6 +628,8 @@ async fn heartbeat_loop(
         .unwrap_or(rscross_common::DEFAULT_HEARTBEAT_SECS)
         .max(3);
     let mut failures: u32 = 0;
+    // 用一个不可能出现的初值，保证第一次心跳一定打一条摘要日志。
+    let mut known_tunnels: usize = usize::MAX;
 
     loop {
         let runtime = runtime_info(&cfg, &p2p);
@@ -638,7 +650,13 @@ async fn heartbeat_loop(
                 // 配置下发走「拉」：心跳响应里带着本节点要承载的隧道，
                 // 这里把它变成端口监听与访问端索引 —— 这是节点感知
                 // 「隧道被创建 / 修改 / 删除」的唯一入口。
-                apply_tunnel_plan(&tunnel_index, port_ingress.as_ref(), outcome.tunnels).await;
+                known_tunnels = apply_tunnel_plan(
+                    &tunnel_index,
+                    port_ingress.as_ref(),
+                    outcome.tunnels,
+                    known_tunnels,
+                )
+                .await;
                 tracing::debug!(node = %cfg.node.name, "节点心跳成功");
             }
             Err(err) => {

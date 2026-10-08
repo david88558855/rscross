@@ -200,7 +200,11 @@ impl Database {
     }
 }
 
-fn config_key_pair(key: &str, value: &str, group: &str) -> (&str, &str, &str) {
+fn config_key_pair<'a>(
+    key: &'a str,
+    value: &'a str,
+    group: &'a str,
+) -> (&'a str, &'a str, &'a str) {
     (key, value, group)
 }
 

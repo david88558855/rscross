@@ -122,3 +122,15 @@ impl IntoResponse for AppError {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
+
+impl From<&str> for AppError {
+    fn from(s: &str) -> Self {
+        AppError::Msg(s.to_string())
+    }
+}
+
+impl From<String> for AppError {
+    fn from(s: String) -> Self {
+        AppError::Msg(s)
+    }
+}

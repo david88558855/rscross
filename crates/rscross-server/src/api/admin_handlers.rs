@@ -1,6 +1,6 @@
 //! 管理接口：管理员视角的全部数据操作
 
-use axum::extract::{Extension, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
@@ -9,7 +9,7 @@ use rscross_common::error::{AppError, AppResult};
 use rscross_common::response::{ApiResponse, PageQuery};
 
 use super::normal_handlers::OpReq;
-use crate::api::UserAuth;
+use crate::api::{json_result, UserAuth};
 use crate::AppState;
 
 // ==================== 仪表盘 ====================
@@ -70,27 +70,27 @@ async fn obs_aggregate(
 }
 
 pub async fn admin_dashboard_user_obs(State(state): State<AppState>) -> Response {
-    Json(obs_aggregate(&state, "user", 20).await.into()).into_response()
+    json_result(obs_aggregate(&state, "user", 20).await)
 }
 
 pub async fn admin_dashboard_node_obs(State(state): State<AppState>) -> Response {
-    Json(obs_aggregate(&state, "node", 20).await.into()).into_response()
+    json_result(obs_aggregate(&state, "node", 20).await)
 }
 
 pub async fn admin_dashboard_client_obs_date(State(state): State<AppState>) -> Response {
-    Json(obs_aggregate(&state, "client", 20).await.into()).into_response()
+    json_result(obs_aggregate(&state, "client", 20).await)
 }
 
 pub async fn admin_dashboard_host_obs_date(State(state): State<AppState>) -> Response {
-    Json(obs_aggregate(&state, "host", 20).await.into()).into_response()
+    json_result(obs_aggregate(&state, "host", 20).await)
 }
 
 pub async fn admin_dashboard_forward_obs_date(State(state): State<AppState>) -> Response {
-    Json(obs_aggregate(&state, "forward", 20).await.into()).into_response()
+    json_result(obs_aggregate(&state, "forward", 20).await)
 }
 
 pub async fn admin_dashboard_tunnel_obs_date(State(state): State<AppState>) -> Response {
-    Json(obs_aggregate(&state, "tunnel", 20).await.into()).into_response()
+    json_result(obs_aggregate(&state, "tunnel", 20).await)
 }
 
 async fn obs_by_date(state: &AppState, user_code: Option<&str>) -> AppResult<serde_json::Value> {
@@ -980,15 +980,15 @@ async fn config_by_group(state: &AppState, group: &str) -> AppResult<serde_json:
 }
 
 pub async fn admin_config_base(State(state): State<AppState>) -> Response {
-    Json(config_by_group(&state, "base").await.into()).into_response()
+    json_result(config_by_group(&state, "base").await)
 }
 
 pub async fn admin_config_gost(State(state): State<AppState>) -> Response {
-    Json(config_by_group(&state, "gost").await.into()).into_response()
+    json_result(config_by_group(&state, "gost").await)
 }
 
 pub async fn admin_config_email(State(state): State<AppState>) -> Response {
-    Json(config_by_group(&state, "email").await.into()).into_response()
+    json_result(config_by_group(&state, "email").await)
 }
 
 // ==================== 公告 ====================

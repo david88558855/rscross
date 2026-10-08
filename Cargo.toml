@@ -42,6 +42,7 @@ sqlx = { version = "0.8", features = [
     "sqlite",
     "macros",
     "migrate",
+    "chrono",
 ] }
 
 # 加密与认证

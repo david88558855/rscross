@@ -1,7 +1,6 @@
 //! HTTP API：路由、处理器与中间件
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use axum::extract::{Request, State};
 use axum::middleware::Next;
@@ -360,7 +359,7 @@ async fn rpc_ws_handler(
     let rpc = crate::rpc::build_rpc_server(state);
 
     ws.on_upgrade(move |socket| async move {
-        if let Err(e) = rpc.serve(socket).await {
+        if let Err(e) = rpc.handle_connection(socket).await {
             tracing::error!(error = %e, "RPC 服务异常");
         }
     })
@@ -369,6 +368,11 @@ async fn rpc_ws_handler(
 /// 便捷：Ok 响应
 pub fn ok<T: serde::Serialize>(data: T) -> Response {
     ApiResponse::ok(data).into_response()
+}
+
+/// 便捷：把 `AppResult` 包成统一 JSON 响应（避免 `.into()` 目标类型歧义）
+pub fn json_result(r: rscross_common::AppResult<serde_json::Value>) -> Response {
+    axum::Json(ApiResponse::from(r)).into_response()
 }
 
 /// 便捷：空成功响应

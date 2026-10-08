@@ -177,6 +177,7 @@ impl TrafficCounter {
 /// 为避免额外依赖与握手复杂度，这里采用「每帧独立压缩」策略：
 /// 写入时对每块数据压缩并加 1 字节标记（0=原文，1=压缩），
 /// 读取时按标记还原。开销可控且实现可靠。
+#[derive(Clone, Copy, Default)]
 pub struct Compressor {
     cfg: CompressionCfg,
 }
@@ -192,14 +193,6 @@ impl Default for CompressionCfg {
         Self {
             enabled: false,
             level: 6,
-        }
-    }
-}
-
-impl Default for Compressor {
-    fn default() -> Self {
-        Self {
-            cfg: CompressionCfg::default(),
         }
     }
 }

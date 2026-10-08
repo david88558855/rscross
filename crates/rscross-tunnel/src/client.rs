@@ -37,6 +37,7 @@ pub struct AgentService {
     /// 流量统计
     pub traffic: Arc<TrafficCounter>,
     /// 状态变更回调（供上层感知）
+    #[allow(clippy::type_complexity)]
     on_change: RwLock<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
 }
 
@@ -57,6 +58,23 @@ impl AgentService {
 
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
+    }
+
+    /// 分配下一个工作连接序号
+    pub fn next_work_seq(&self) -> u64 {
+        self.work_seq.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// 设置状态变更回调
+    pub fn set_on_change(&self, f: Arc<dyn Fn(&str) + Send + Sync>) {
+        *self.on_change.write() = Some(f);
+    }
+
+    /// 触发状态变更回调
+    fn notify_change(&self, event: &str) {
+        if let Some(f) = self.on_change.read().as_ref() {
+            f(event);
+        }
     }
 
     pub fn stop(&self) {

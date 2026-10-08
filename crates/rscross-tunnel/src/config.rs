@@ -224,8 +224,9 @@ impl ProxyBaseConfig {
                 }
             }
             ProxyType::Stcp | ProxyType::Sudp | ProxyType::Xtcp => {
-                if self.secret_key_required() && self.metadatas.get("secret_key").is_none() {
-                    // 密钥通过 metadatas 传递
+                // 密钥通过 metadatas 传递
+                if self.secret_key_required() && !self.metadatas.contains_key("secret_key") {
+                    return Err("私有隧道必须提供 secret_key".to_string());
                 }
             }
         }

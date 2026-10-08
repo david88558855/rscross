@@ -115,6 +115,16 @@ impl HubServer {
         *self.bind_addr.read()
     }
 
+    /// 传输层共享密钥
+    pub fn secret(&self) -> &str {
+        &self.secret
+    }
+
+    /// 待建立的工作连接登记表
+    pub fn pending_work_conns(&self) -> &Arc<DashMap<String, mpsc::UnboundedSender<TcpStream>>> {
+        &self.pending_work_conns
+    }
+
     /// 启动控制流监听，阻塞直到停止
     pub async fn serve(self: Arc<Self>) -> Result<(), String> {
         self.config

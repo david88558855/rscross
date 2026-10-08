@@ -113,7 +113,7 @@ pub async fn run_with_args(args: Args) -> Result<()> {
     )?;
 
     let sink = LogSink::new(512);
-    init_tracing(&cfg, sink.clone());
+    init_tracing(&cfg.log, sink.clone());
 
     tracing::info!(
         version = rscross_common::VERSION,

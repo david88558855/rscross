@@ -12,7 +12,9 @@ use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMap, RelayMode, SecretKey};
 use rscross_common::{Error, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+// 注意：iroh 的 SendStream/RecvStream 自带 write_all / read_exact 固有方法，
+// 因此不需要把 tokio 的 AsyncReadExt / AsyncWriteExt 引入作用域；
+// 下面 `probe_control` 里的 read_to_end 走的是全限定路径，也不依赖导入。
 use tokio::net::TcpStream;
 
 use crate::path::PathProbe;

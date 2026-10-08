@@ -72,6 +72,7 @@ pub async fn run_console_with(args: ConsoleArgs) -> Result<()> {
 
     if args.check {
         println!("配置校验通过: {}", args.config.display());
+        println!("控制台前端: {}", crate::console::diagnose());
         return Ok(());
     }
 

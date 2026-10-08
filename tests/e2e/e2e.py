@@ -103,6 +103,20 @@ def http_json(method: str, url: str, body=None, token: str | None = None, timeou
             return err.code, raw
 
 
+def http_raw(url: str, timeout: float = 10.0):
+    """返回 (status, headers_lower, text)。用于校验 HTTP 层（状态码 / Content-Type / 原文）。"""
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", "replace")
+            headers = {k.lower(): v for k, v in response.headers.items()}
+            return response.status, headers, body
+    except urllib.error.HTTPError as err:
+        body = err.read().decode("utf-8", "replace")
+        headers = {k.lower(): v for k, v in (err.headers or {}).items()}
+        return err.code, headers, body
+
+
 def request_with_host(port: int, host_header: str, path: str = "/", timeout: float = 10.0):
     """显式设置 Host 头（http.client 检测到 Host 会 skip_host，因此可覆盖）。"""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
@@ -244,6 +258,56 @@ def wait_console_ready(base: str, proc: "Proc | None" = None, timeout: float = 6
                 return False
         time.sleep(0.5)
     return False
+
+
+def check_web_console(label: str, base: str) -> None:
+    """验证「浏览器打开控制台」这条路径本身。
+
+    历史教训：e2e 过去只探 `/api/v1/health`，所以前端资源缺失、Content-Type 错、
+    静态文件回落到 HTML 这类故障可以一路全绿 —— 而用户看到的正是白屏。
+    """
+
+    def web(name: str, ok: bool, detail: str = "") -> bool:
+        # 通过时不必刷屏，失败时一定要给出证据。
+        return check(f"{label}: {name}", ok, "" if ok else detail)
+
+    status, headers, html = http_raw(base + "/")
+    ct = headers.get("content-type", "")
+    web("控制台首页返回 HTML 200", status == 200 and "text/html" in ct,
+        f"status={status} content-type={ct} body={html[:120]!r}")
+    web("首页包含 SPA 挂载点 #app", 'id="app"' in html, html[:160])
+
+    status, headers, js = http_raw(base + "/app.js")
+    ct = headers.get("content-type", "")
+    web("/app.js 可加载且 Content-Type 为 JavaScript",
+        status == 200 and "javascript" in ct and len(js) > 1000,
+        f"status={status} content-type={ct} len={len(js)}")
+    web("app.js 确实调用控制台 API", "/api/v1/" in js, js[:160])
+
+    status, headers, css = http_raw(base + "/app.css")
+    ct = headers.get("content-type", "")
+    web("/app.css 可加载且 Content-Type 为 CSS",
+        status == 200 and "css" in ct and len(css) > 200,
+        f"status={status} content-type={ct} len={len(css)}")
+
+    status, _, deep = http_raw(base + "/tunnels")
+    web("前端深链接回落到首页（SPA 路由可用）",
+        status == 200 and 'id="app"' in deep, f"status={status}")
+
+    status, headers, _ = http_raw(base + "/does-not-exist.js")
+    web("缺失的静态资源返回 404（不用 HTML 冒充 JS）",
+        status == 404, f"status={status} content-type={headers.get('content-type')}")
+
+    status, headers, _ = http_raw(base + "/api/v1/definitely-not-here")
+    web("未知 API 返回 JSON 404",
+        status == 404 and "json" in headers.get("content-type", ""),
+        f"status={status} content-type={headers.get('content-type')}")
+
+    status, payload = http_json("GET", base + "/api/v1/health")
+    assets = payload.get("console_assets") if isinstance(payload, dict) else None
+    web("health 汇报内嵌前端资源数 > 0",
+        status == 200 and isinstance(assets, int) and assets > 0,
+        f"status={status} console_assets={assets}")
 
 
 def wait_node_online(base: str, token: str, name: str | None = None, timeout: float = 90.0):
@@ -541,6 +605,9 @@ def scenario_embedded(dist: Path, work: Path) -> None:
     flap = sum(1 for _ in range(3) if not health_ok(console_base))
     check(f"{label}: 控制台探活稳定（复测 3 次）", flap == 0, f"失败 {flap}/3")
 
+    # 探活只证明 API 活着；这里证明「浏览器里能看见界面」。
+    check_web_console(label, console_base)
+
     token = login(console_base, "e2e-password-123")
     if not check(f"{label}: 可登录内嵌控制台", bool(token), console_base):
         dump_all()
@@ -673,6 +740,9 @@ def scenario_standalone(dist: Path, work: Path) -> None:
 
     flap = sum(1 for _ in range(3) if not health_ok(console_base))
     check(f"{label}: 控制台探活稳定（复测 3 次）", flap == 0, f"失败 {flap}/3")
+
+    # 探活只证明 API 活着；这里证明「浏览器里能看见界面」。
+    check_web_console(label, console_base)
 
     token = login(console_base, "e2e-password-456")
     if not check(f"{label}: 可登录独立控制台", bool(token), console_base):

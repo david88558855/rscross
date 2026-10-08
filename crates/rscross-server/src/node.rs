@@ -108,6 +108,13 @@ pub async fn run_with_args(args: NodeArgs) -> Result<()> {
             args.config.display(),
             cfg.node.control_mode
         );
+        // 「浏览器打不开控制台」时，这条输出能立刻区分是「页面没打进二进制」
+        // 还是「网络/安全组问题」。
+        if cfg.is_embedded() {
+            println!("内嵌控制台前端: {}", rscross_control::console::diagnose());
+        } else {
+            println!("控制台形态: managed（前端由远端控制台提供，本机不内嵌页面）");
+        }
         return Ok(());
     }
 

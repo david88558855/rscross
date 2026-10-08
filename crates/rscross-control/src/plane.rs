@@ -80,11 +80,49 @@ impl ControlPlane {
         let bound = listener
             .local_addr()
             .map_err(|e| Error::config(format!("读取实际监听地址失败: {e}")))?;
-        tracing::info!(
-            console = %format!("http://{bound}"),
-            embedded = state.embedded,
-            "控制台已就绪"
-        );
+        // 监听在 0.0.0.0 时 `http://0.0.0.0:7800` 对使用者毫无意义，换成占位提示。
+        let console_url = if bound.ip().is_unspecified() {
+            format!("http://<本机IP或域名>:{}", bound.port())
+        } else {
+            format!("http://{bound}")
+        };
+
+        let missing = crate::console::missing_assets();
+        if missing.is_empty() {
+            tracing::info!(
+                console = %console_url,
+                bind = %bound,
+                assets = crate::console::asset_count(),
+                embedded = state.embedded,
+                "控制台已就绪：浏览器打开上面的地址即可"
+            );
+        } else {
+            tracing::error!(
+                bind = %bound,
+                missing = ?missing,
+                embedded = state.embedded,
+                "前端资源未内嵌，浏览器打开控制台只会看到 404 或空白；\
+                 请确认构建时仓库根的 web/ 目录存在且已被提交"
+            );
+        }
+
+        // 「浏览器打开 ip:7800 没反应」十有八九不是前端的问题，而是网络可达性。
+        // 这里把三种最常见成因直接点出来，省得去猜。
+        if bound.ip().is_unspecified() {
+            tracing::info!(
+                port = bound.port(),
+                "浏览器打不开时按顺序排查：1) 云服务器安全组 / 系统防火墙已放行该端口；\
+                 2) 用 http:// 而不是 https:// 访问；3) 从外部机器执行 \
+                 curl -v http://<公网IP>:<端口>/api/v1/health 看是否通"
+            );
+        } else if bound.ip().is_loopback() {
+            tracing::warn!(
+                bind = %bound,
+                "控制台只监听回环地址，其他机器访问不到；如需对外开放，\
+                 请把 console.bind 改为 \"0.0.0.0:{}\"",
+                bound.port()
+            );
+        }
 
         let app = self.router();
         let serve_result = axum::serve(

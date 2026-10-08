@@ -127,7 +127,7 @@ rscross/
 │   ├── rscross-common/            # ① 共享层：Error/Result、ID、协议常量、控制面 DTO
 │   ├── rscross-config/            # ② 三份配置模型：ConsoleFile / NodeFile / ClientFile
 │   ├── rscross-store/             # ③ 持久化：SQLite schema、DAO、统计聚合
-│   ├── rscross-auth/              # ④ 鉴权原语：Argon2id、三类令牌、会话、登录限流
+│   ├── rscross-auth/              # ④ 鉴权原语：Argon2id、四类令牌、会话、失败限流
 │   ├── rscross-transport/         # ⑤ 传输层：Iroh 适配 + FerroTunnel 适配 + 路径选择 + 转发
 │   │   ├── p2p.rs                 #    Iroh：绑定/拨号/ALPN 处理器/流首部协议/私钥/P2P 探测
 │   │   ├── relay.rs               #    FerroTunnel：Server 与 per-tunnel Client 封装
@@ -186,7 +186,7 @@ rscross-common ──┬─ rscross-config ──┐
 | 任务 | 数量 | 说明 |
 |---|---|---|
 | HTTP（axum） | 1 | 控制台静态资源 + `/api/v1/*`；`with_graceful_shutdown` 绑定关停令牌 |
-| 内务循环 | 1 | 15 秒一 tick：节点/客户端离线判定、清理过期会话、清扫登录限流；每 240 tick 做保留期清理 |
+| 内务循环 | 1 | 15 秒一 tick：节点/客户端离线判定、清理过期会话、清扫失败限流；每 240 tick 做保留期清理 |
 | 日志落库 | 0 或 1 | `log.persist = true` 时订阅 `LogBus` 的 `broadcast` 并写库 |
 | 信号监听 | 1 | 独立控制台：SIGINT/SIGTERM → `cancel()`；内嵌模式由节点进程统一监听 |
 
@@ -211,7 +211,7 @@ rscross-common ──┬─ rscross-config ──┐
 | 运行期配置 | `tokio::sync::RwLock<ConsoleFile>` | 写路径 = 校验 → 落盘 → 换内存，顺序固定，避免「内存生效了但磁盘没写入」 |
 | 隧道本地目标表 | `std::sync::RwLock<HashMap>` | 纯内存查表、临界区无 `await` |
 | 路径选择器状态 | `AtomicBool` / `AtomicU32` | 读多写极少的标志位；选路时不取锁 |
-| 登录限流 | `std::sync::Mutex<HashMap>` | 临界区极短 |
+| 失败限流 | `std::sync::Mutex<HashMap>` | 临界区极短；登录与访问密钥校验共用同一原语，key 不同 |
 | 日志分发 | `std::sync::Mutex<VecDeque>` + `broadcast::Sender` | 环形缓冲给首屏、broadcast 给增量；`Lagged` 时显式记录丢弃条数 |
 
 ---
@@ -286,6 +286,9 @@ rscross-common::Error          # 全工程唯一错误类型（thiserror）
 4. **节点的 `tunnel_token` 轮换需要重启节点**：FerroTunnel 的 relay 只在
    启动时读取 token。控制台目前只对 `node_token` 提供轮换，心跳发现 token 不一致时
    会明确提示重启。
-5. **多副本控制台时登录限流是进程内的**，跨副本生效需要共享存储。
+5. **多副本控制台时限流是进程内的**（登录 + 访问密钥校验共用 `Throttle`），
+   跨副本生效需要共享存储。
+6. **隧道访问密钥是 16 位十六进制（64 bit）**，刻意短到人能抄对；配套的
+   失败限流是这套设计的一部分，不是可选项 —— 改长改短时必须一起看。
 6. **`detect_public_host()` 只是启发式**：用 UDP `connect` 读本地路由地址。
    多网卡 / 沙箱环境请显式配置 `node.public_host`。

@@ -22,6 +22,7 @@ import http.client
 import http.server
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -554,10 +555,8 @@ def check_private_tunnel(
         str((resolved or {}).get("mode")),
     )
 
-    status, _ = http_json(
-        "POST", f"{base}/api/v1/access/resolve", {"access_key": "rsv_" + "0" * 64}
-    )
-    check_eq(f"{label}: 无效访问密钥被拒", 401, status)
+    # 注意：这里刻意不测「无效密钥」—— 那会计入下面的失败限流计数，
+    # 让「第几次被锁」变成依赖前面步骤的脆弱断言。无效密钥统一放在限流段里测。
 
     # 4) 真的起一个访问端进程，通过它的本地入口访问内网服务
     access_dir = work / "access"
@@ -606,6 +605,56 @@ def check_private_tunnel(
     access.stop()
     stop.set()
     echo.close()
+
+    # 5) 密钥只有 16 位十六进制，缩短它必须同时收紧猜测的代价。
+    #
+    # 这一组断言刻意放在**最后**：一旦触发锁定，同一来源 IP 的后续请求
+    # 都会被 429（包括正确密钥），放前面会把后面的用例全带崩。
+    #
+    # 也从这里开始才第一次出现无效密钥 —— 上面刻意没有无效密钥的用例，
+    # 否则「第几次被锁」会变成依赖前面步骤次数的脆弱断言。
+    # 10 次探测里第 10 条是形状非法的 `rsv_ab`：它同样按 401 处理
+    # （服务端只做精确匹配、不按长度过滤，所以历史的长密钥仍然可用）。
+    probes = [f"rsv_{i:016x}" for i in range(9)] + ["rsv_ab"]
+    codes = []
+    for probe in probes:
+        status, _ = http_json(
+            "POST", f"{base}/api/v1/access/resolve", {"access_key": probe}
+        )
+        codes.append(status)
+    check(
+        f"{label}: 连续猜错 10 次访问密钥都是 401（含形状非法的一条）",
+        codes == [401] * 10,
+        f"codes={codes}",
+    )
+
+    status_bad, body_bad = http_json(
+        "POST", f"{base}/api/v1/access/resolve", {"access_key": "rsv_0000000000000001"}
+    )
+    check_eq(f"{label}: 第 11 次起被限流（429）", 429, status_bad)
+
+    # 被锁定时连**正确**的密钥也要挡住，否则攻击者可以用它当探针
+    # 判断「这把锁有没有生效」。
+    status_good, body_good = http_json(
+        "POST", f"{base}/api/v1/access/resolve", {"access_key": access_key}
+    )
+    check_eq(f"{label}: 限流生效期间正确密钥同样被挡（429）", 429, status_good)
+
+    # 更强的一条：锁定期间，正确密钥与错误密钥的响应必须**一模一样** ——
+    # 只要有一丝差异，这个接口就又变回了「密钥是否存在」的探测器。
+    #
+    # 比较时把数字抹掉：「请 N 秒后再试」里的 N 会随请求时刻变化，
+    # 跨秒边界就可能差 1；直接比原文会变成偶发失败（flaky 比不测更糟）。
+    def masked(body):
+        return re.sub(r"\d+", "N", json.dumps(body, ensure_ascii=False, sort_keys=True))
+
+    check(
+        f"{label}: 限流期间无法区分密钥是否存在（响应除秒数外逐字一致）",
+        body_bad is not None
+        and body_good is not None
+        and masked(body_bad) == masked(body_good),
+        f"good={masked(body_good)} bad={masked(body_bad)}",
+    )
 
 
 def check_port_forward(label: str, base: str, token: str, client_id: str) -> None:
@@ -745,10 +794,12 @@ def check_tunnel_kinds(label: str, base: str, token: str, client_id: str) -> Non
         "local_addr": "127.0.0.1:3306",
     })
     key = (priv or {}).get("access_key") or ""
+    # 精确断言长度：密钥是给人抄的，长度本身就是产品决策，
+    # 用 `> 20` 这种宽松写法会让「哪天不小心又变长」静默通过。
     check(
-        f"{label}: 私有隧道自动签发访问密钥",
-        status == 200 and key.startswith("rsv_") and len(key) > 20,
-        f"status={status} key={key[:12]}",
+        f"{label}: 私有隧道签发 20 位访问密钥（rsv_ + 16 位十六进制）",
+        status == 200 and key.startswith("rsv_") and len(key) == 20,
+        f"status={status} key={key[:12]} len={len(key)}",
     )
     check(
         f"{label}: 私有隧道不暴露公网入口",
@@ -764,11 +815,10 @@ def check_tunnel_kinds(label: str, base: str, token: str, client_id: str) -> Non
         "local_addr": "127.0.0.1:6379",
         "allow_relay": False,
     })
+    p2p_key = (p2p or {}).get("access_key") or ""
     check(
         f"{label}: 可创建「P2P 隧道」并关闭中继回退",
-        status == 200
-        and (p2p or {}).get("allow_relay") is False
-        and ((p2p or {}).get("access_key") or "").startswith("rsv_"),
+        status == 200 and (p2p or {}).get("allow_relay") is False and len(p2p_key) == 20,
         f"status={status} {str(p2p)[:140]}",
     )
 
@@ -812,8 +862,9 @@ def check_tunnel_kinds(label: str, base: str, token: str, client_id: str) -> Non
         new_key = (rotated or {}).get("access_key") or ""
         check(
             f"{label}: 可轮换访问密钥且新旧不同",
-            status == 200 and new_key.startswith("rsv_") and new_key != key,
-            f"status={status}",
+            status == 200 and new_key.startswith("rsv_") and len(new_key) == 20
+            and new_key != key,
+            f"status={status} len={len(new_key)}",
         )
 
     if (domain or {}).get("id"):

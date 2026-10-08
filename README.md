@@ -142,6 +142,14 @@
 之后访问 `http://127.0.0.1:8080` 就等于访问内网服务；内网那台机器不需要任何入站端口。
 P2P 隧道会先尝试与客户端直连，直连失败且允许回退时自动走节点中继（不会中断连接）。
 
+> **访问密钥是 20 个字符**（`rsv_` + 16 位十六进制）。它比其它令牌短得多，
+> 因为它是要被人从浏览器抄到另一台机器的终端里的 —— 长度直接决定会不会抄错。
+> 与之配套：`/api/v1/access/resolve` 对同一来源 IP **连续 10 次猜错就锁定 1 分钟**，
+> 锁定期间无论密钥对错一律 429。缩短密钥必须同时收紧猜测的代价，否则就是单向降低强度。
+>
+> 抄错了会在本地就被拦下并告诉你期望形状（例如「应为 rsv_ 加 16 位十六进制」），
+> 不必等到连上节点才知道 —— 「你抄错了」和「隧道还没生效」是两件事。
+
 ## 从源码构建
 
 **本仓库禁止本地编译**。所有验证与产物都在 GitHub Actions 完成：
@@ -158,7 +166,7 @@ crates/
 ├── rscross-common/      共享错误、ID、协议常量、控制面 DTO
 ├── rscross-config/      三份配置模型：ConsoleFile / NodeFile / ClientFile
 ├── rscross-store/       SQLite 持久化（nodes / clients / tunnels / …）
-├── rscross-auth/        Argon2id、三类令牌、会话、登录限流
+├── rscross-auth/        Argon2id、四类令牌（含访问密钥）、会话、失败限流
 ├── rscross-transport/   Iroh + FerroTunnel 适配、路径选择、字节转发
 ├── rscross-control/     控制面（API + Web + 持久化），两种形态共用
 ├── rscross-console/     独立控制台二进制
@@ -219,10 +227,17 @@ ufw allow 7800/tcp && ufw reload                                        # ufw
 
 1. FerroTunnel 只用单一服务端 token，故它只作**传输层握手凭证**，业务身份由
    per-client `agent_token` 承担。
-2. 原始 TCP/UDP 的公网入口依赖「自建 ingress + Iroh 直连投递」，规划在阶段 3。
+2. 端口转发的公网入口目前**只实现了 TCP**：节点侧自建 ingress 按配置监听端口，
+    UDP 可以保存配置但不会真正转发（控制台表单里有标注）。
+    代码里用 `data_plane_ready()` 与 `proto_ready()` 两层区分「分类」与「分类 + 协议」，
+    并有单测守着这一点。
 3. `p2p.relay_mode = custom` 需要自建 `iroh-relay`，仓库不提供部署编排。
 4. 节点的 `tunnel_token` 轮换需要重启节点（FerroTunnel 只在启动时读 token）。
-5. 登录限流目前是进程内的，多副本控制台需接共享存储。
+5. 登录与访问密钥校验的限流目前是**进程内**的（同一套 `Throttle` 原语，
+   key 分别是「用户名 + 来源 IP」与「来源 IP」），多副本控制台需接共享存储。
+6. 节点侧的访问端握手（`ALPN_ACCESS`）不做限流：猜密钥必须先在控制面
+   `/api/v1/access/resolve` 拿到节点坐标，而那一步已经受限流保护；
+   且节点侧每次尝试都要新建一条 QUIC 连接，成本远高于一次 HTTP 请求。
 
 ## 许可
 

@@ -97,7 +97,8 @@
 ### 交付物
 
 - `rscross-auth`：Argon2id 原始 KDF（`v1$salt$hash`）、常数时间比较、
-  三类令牌（`rsa_`/`rsn_`/`rse_`）、会话签发与校验、进程级登录限流。
+  四类令牌（`rsa_`/`rsn_`/`rse_`/`rsv_`）、会话签发与校验、进程级失败限流
+  （`Throttle`，登录与访问密钥校验共用）。
 - 控制面 `api/auth.rs`（登录/登出/当前用户/改密）、`api/nodes.rs` 与 `api/agent.rs`
   的 `X-Rscross-Node` / `X-Rscross-Agent` 鉴权、`AppState::require_user/require_admin`、审计落库。
 - 一次性接入令牌：消费即失效 + **注册失败回滚已建客户端**（避免孤儿记录）。
@@ -118,7 +119,7 @@
 - [ ] **C7 按节点派生 FerroTunnel token**：把「一节点一 token」收敛为
       「服务端向 FerroTunnel 注册钩子表」，让 token 泄漏影响面收敛到单节点，
       并去掉 `nodes.tunnel_token` 的明文存储（改为进程内派生）。
-- [ ] **C8 多副本登录限流**：抽 `LoginThrottle` 为 trait，提供 Redis 实现。
+- [ ] **C8 多副本限流**：抽 `Throttle` 为 trait，提供 Redis 实现（登录与访问密钥校验都要走它）。
 - [ ] **C9 角色细化**：`viewer`（只读）/ `operator`（可管隧道，不可管用户）/ `admin`。
 - [ ] **C10 会话列表与踢下线**：`sessions` 表已存 `user_agent`，补一个管理页即可。
 
@@ -194,6 +195,13 @@
 - [x] **E12 私有 / P2P 数据面**：访问端（`rscross-client access`）凭访问密钥在本机建入口，
       经节点中继到达客户端本地服务；`/api/v1/access/resolve` 免鉴权换坐标，
       无效密钥统一 401；e2e 起真实访问端进程跑通全链路。
+- [x] **E14 访问密钥长度是产品决策而非随手取值**：`rsv_` + 16 位十六进制（共 20 字符），
+      形状校验收敛到 `rscross-common::access_key_shape_ok` 一处；e2e 精确断言长度
+      （不用 `> 20` 这种宽松写法），并对「抄错一位」「前缀不对」「两侧空白」各有单测。
+- [x] **E15 缩短密钥必须同步收紧猜测代价**：`/api/v1/access/resolve` 按来源 IP 计数，
+      连续 10 次猜错锁定 1 分钟；锁定期间**正确密钥同样 429**（否则它会变成探针），
+      且正确与错误密钥的响应体逐字节一致。限流键用 IP 而非密钥本体
+      —— 密钥是秘密，写进计数表等于在内存里留一份「被尝试过的密钥」清单。
 - [x] **E13 状态如实标注**：`data_plane_ready()` 与 `proto_ready()` 区分「分类」与「分类+协议」，
       端口转发 UDP 未实现这类差异有单测守着（`udp_port_forwarding_is_declared_unavailable`）。
 - [x] **E10 危险操作有确认**：删除节点/客户端/隧道、轮换令牌均二次确认；令牌只展示一次。

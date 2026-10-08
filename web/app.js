@@ -182,8 +182,12 @@
     return map[proto] || String(proto).toUpperCase();
   }
 
+  // 访问密钥是 16 位十六进制（rsv_ + 16），一共 20 个字符。
+  // 掩码只保留前缀与末 4 位：既让人确认「这是哪一条」，又不至于在
+  // 列表里把密钥露出一半（旁边就有「复制」按钮，不需要靠肉眼读）。
   function maskKey(key) {
-    return key && key.length > 14 ? key.slice(0, 10) + '…' + key.slice(-4) : (key || '');
+    if (!key) return '';
+    return key.length > 12 ? key.slice(0, 4) + '······' + key.slice(-4) : key;
   }
 
   // 控制台常跑在 http://<ip>:7800（非安全上下文），clipboard API 不可用，

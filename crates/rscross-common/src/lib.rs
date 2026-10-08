@@ -117,6 +117,34 @@ pub const ALPN_RSROSS_DATA: &[u8] = b"rscross/data/1";
 /// 混用同一个 ALPN 会让节点无法区分「我是被投递方」还是「我要申请投递」。
 pub const ALPN_RSROSS_ACCESS: &[u8] = b"rscross/access/1";
 
+/// 隧道访问密钥的前缀。
+///
+/// 前缀不只是好看：访问密钥会在浏览器、聊天工具、终端之间来回搬运，
+/// 一个可辨认的形状能让人一眼看出「这是 rscross 的访问密钥」而不是别的口令。
+pub const ACCESS_KEY_PREFIX: &str = "rsv_";
+
+/// 访问密钥中十六进制部分的位数（即 `rsv_` 之后的部分）。
+///
+/// 为什么是 16 位：这个密钥要被人从控制台抄到另一台机器的终端里执行，
+/// 长度直接决定它会不会被抄错。16 位十六进制 = 64 bit 熵，
+/// 配合 [`/api/v1/access/resolve`] 的失败限流，穷举在现实时间内不可行。
+///
+/// 注意：这里只约束**新签发**的密钥。历史密钥（更长的）依然可用 ——
+/// 校验是精确匹配，不做长度过滤，否则升级后旧密钥会突然失效。
+pub const ACCESS_KEY_HEX_LEN: usize = 16;
+
+/// 判断访问密钥的**形状**是否正确（不判断它是否真实存在）。
+///
+/// 之所以要把「形状」与「存在」分开：访问端把用户的输入原样发给节点时，
+/// 节点只会回一句「密钥无效」—— 用户无法区分「我抄错了」和「隧道还没生效」。
+/// 形状检查在客户端本地就能做，可以立刻把问题指向用户自己。
+pub fn access_key_shape_ok(key: &str) -> bool {
+    let Some(rest) = key.strip_prefix(ACCESS_KEY_PREFIX) else {
+        return false;
+    };
+    rest.len() == ACCESS_KEY_HEX_LEN && rest.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// 默认隧道控制面端口（与 FerroTunnel 默认值保持一致，便于排障）。
 pub const DEFAULT_TUNNEL_PORT: u16 = 7835;
 

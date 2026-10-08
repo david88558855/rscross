@@ -126,12 +126,26 @@ pub fn new_enroll_token() -> String {
     format!("rse_{}", new_token())
 }
 
-/// 生成隧道**访问密钥**，形如 `rsv_<32hex>`。
+/// 生成隧道**访问密钥**，形如 `rsv_<16hex>`（共 20 字符）。
 ///
-/// 语义与密码相同：访问端凭它（外加隧道 ID）才能向节点申请一条到目标内网
-/// 服务的通道，因此只用在下发与展示环节，不参与任何哈希校验。
+/// 语义与密码相同：访问端凭它才能向节点申请一条到目标内网服务的通道，
+/// 因此只用在下发与展示环节，不参与任何哈希校验。
+///
+/// 长度刻意比其他令牌短得多：它是要被人抄写的。与之配套的是
+/// `/api/v1/access/resolve` 上的失败限流 —— 缩短密钥**必须**同时收紧
+/// 猜测的代价，否则就是单向降低强度。
 pub fn new_access_key() -> String {
-    format!("rsv_{}", new_token())
+    use rand::RngCore;
+    let mut rng = rand::rngs::OsRng;
+    // 位数必须是偶数才能整字节生成；用常量断言在编译期挡住写错的可能。
+    const BYTES: usize = rscross_common::ACCESS_KEY_HEX_LEN / 2;
+    const _: () = assert!(
+        rscross_common::ACCESS_KEY_HEX_LEN % 2 == 0,
+        "ACCESS_KEY_HEX_LEN 必须是偶数"
+    );
+    let mut buf = [0u8; BYTES];
+    rng.fill_bytes(&mut buf);
+    format!("{}{}", rscross_common::ACCESS_KEY_PREFIX, hex::encode(buf))
 }
 
 /// 会话创建结果。
@@ -199,14 +213,25 @@ pub fn extract_bearer(header_value: Option<&str>) -> Option<String> {
     }
 }
 
-/// 进程级登录限流器。
+/// 进程级失败限流器（按调用方给的 key 计数）。
+///
+/// 目前有两个使用方，共用同一套原语：
+/// - 控制台登录：key = 用户名 + 来源 IP；
+/// - 访问密钥校验：key = 来源 IP（密钥本体是秘密，不能进计数键 ——
+///   否则限流表本身就变成了一张「被尝试过的密钥」清单）。
 ///
 /// 仅用于抵御在线暴力破解；多副本部署时应换成 Redis 之类的共享存储
 /// （见 `docs/ROADMAP.md` 阶段 2 的「后续加固」）。
 #[derive(Debug, Default)]
-pub struct LoginThrottle {
+pub struct Throttle {
     inner: Mutex<HashMap<String, Attempt>>,
 }
+
+/// 登录限流器的历史名字。
+///
+/// 保留别名是因为登录侧代码与测试都在用这个名字，而它现在已经是通用限流器了；
+/// 改名是为了让「访问密钥校验」也能名正言顺地用它。
+pub type LoginThrottle = Throttle;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Attempt {
@@ -214,20 +239,28 @@ struct Attempt {
     locked_until_unix: i64,
 }
 
-impl LoginThrottle {
+impl Throttle {
     /// 创建空的限流器。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 登录前检查。被锁定时返回 `Err`，消息里带上剩余秒数。
+    /// 检查是否被锁定（动作名固定为「登录」，保持既有调用点不变）。
     pub fn check(&self, key: &str) -> Result<()> {
+        self.check_with(key, "登录")
+    }
+
+    /// 检查是否被锁定；被锁定时返回 `Err`，消息里带上动作名与剩余秒数。
+    ///
+    /// `action` 只影响文案，但很重要：「访问密钥校验已锁定」与「登录已锁定」
+    /// 指向完全不同的排查方向。
+    pub fn check_with(&self, key: &str, action: &str) -> Result<()> {
         let now = rscross_common::time::now().timestamp();
         let guard = self.lock();
         if let Some(a) = guard.get(key) {
             if a.locked_until_unix > now {
                 let remain = a.locked_until_unix - now;
-                return Err(Error::auth(format!("登录已锁定，请 {remain} 秒后再试")));
+                return Err(Error::auth(format!("{action}已锁定，请 {remain} 秒后再试")));
             }
         }
         Ok(())
@@ -245,11 +278,13 @@ impl LoginThrottle {
         if entry.failures >= max_attempts {
             entry.locked_until_unix = now + (lock_minutes.max(1) as i64) * 60;
             entry.failures = 0;
-            tracing::warn!(key, "登录失败次数超限，已临时锁定");
+            // 计数键可能是 IP 而不是用户名，不该当作用户名打日志；
+            // 这里只说事实：该键对应的调用方被临时锁定了。
+            tracing::warn!(key, "失败次数超限，已临时锁定");
         }
     }
 
-    /// 登录成功后清零。
+    /// 成功后清零。
     pub fn record_success(&self, key: &str) {
         self.lock().remove(key);
     }
@@ -318,6 +353,33 @@ mod tests {
         assert!(new_agent_token().starts_with("rsa_"));
         assert!(new_node_token().starts_with("rsn_"));
         assert!(new_enroll_token().starts_with("rse_"));
+    }
+
+    #[test]
+    fn access_key_is_short_enough_to_transcribe_and_still_well_shaped() {
+        let key = new_access_key();
+        // 22 字符左右是「一眼能抄对」的上限；这里锁住 20（rsv_ + 16 位）。
+        assert_eq!(
+            key.len(),
+            rscross_common::ACCESS_KEY_PREFIX.len() + rscross_common::ACCESS_KEY_HEX_LEN
+        );
+        assert!(
+            rscross_common::access_key_shape_ok(&key),
+            "生成的密钥必须通过形状校验"
+        );
+
+        // 它必须明显短于其它令牌 —— 那些是给机器读的，这个是给人抄的。
+        assert!(key.len() < new_agent_token().len() / 3);
+    }
+
+    #[test]
+    fn throttle_reports_which_action_was_locked() {
+        // 文案要能区分是「登录」还是「访问密钥校验」被锁，
+        // 否则用户看到「登录已锁定」会去查密码，而问题其实在密钥上。
+        let t = Throttle::new();
+        t.record_failure("ip", 1, 1);
+        let err = t.check_with("ip", "访问密钥校验").expect_err("应当被锁定");
+        assert!(err.to_string().contains("访问密钥校验"), "{err}");
     }
 
     #[test]

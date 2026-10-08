@@ -46,9 +46,47 @@ pub struct AccessArgs {
     pub log_level: Option<String>,
 }
 
+impl AccessArgs {
+    /// 校验访问密钥的**形状**（不判断它是否真实存在）。
+    ///
+    /// 放在本地做，是为了把「抄错了」与「隧道没生效」区分开：直接发给节点的话，
+    /// 两种情况的回复都是同一句「访问密钥无效」，用户无从下手。
+    fn check_key_shape(&self) -> Result<()> {
+        let key = self.key.trim();
+        if rscross_common::access_key_shape_ok(key) {
+            return Ok(());
+        }
+        // 密钥长度是最容易出错的地方（漏抄一位、把 O 当成 0），
+        // 所以提示里给出期望形状与实际长度，而不只是「格式不对」。
+        let expected = format!(
+            "{} 加 {} 位十六进制（共 {} 位）",
+            rscross_common::ACCESS_KEY_PREFIX,
+            rscross_common::ACCESS_KEY_HEX_LEN,
+            rscross_common::ACCESS_KEY_PREFIX.len() + rscross_common::ACCESS_KEY_HEX_LEN
+        );
+        if key.is_empty() {
+            return Err(Error::config(format!("未提供访问密钥（应为 {expected}）")));
+        }
+        // 历史密钥比现在长，仍可能被使用；这一档给的是「形状差一点」的提示。
+        if !key.starts_with(rscross_common::ACCESS_KEY_PREFIX) {
+            return Err(Error::config(format!(
+                "访问密钥应以 {} 开头（收到的长度 {}）。请确认复制的是「访问密钥」而不是别的令牌",
+                rscross_common::ACCESS_KEY_PREFIX,
+                key.len()
+            )));
+        }
+        Err(Error::config(format!(
+            "访问密钥格式不对：应为 {expected}，收到的长度是 {}。\
+             请注意十六进制里没有字母 o/i/l，常见是漏抄或多抄了一位",
+            key.len()
+        )))
+    }
+}
+
 /// 运行访问端（长驻，直到 Ctrl+C 或进程被杀）。
 pub async fn run(args: AccessArgs) -> Result<()> {
     init_tracing(&args);
+    args.check_key_shape()?;
 
     let listen: SocketAddr = args.listen.parse().map_err(|e| {
         Error::config(format!("--listen 非法（应形如 127.0.0.1:8080）: {e}"))
@@ -175,4 +213,68 @@ fn init_tracing(args: &AccessArgs) {
         .with_env_filter(filter)
         .with_target(false)
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_with(key: &str) -> AccessArgs {
+        AccessArgs {
+            console: "http://127.0.0.1:7800".into(),
+            key: key.into(),
+            listen: "127.0.0.1:8080".into(),
+            direct_timeout_secs: 8,
+            log_level: None,
+        }
+    }
+
+    #[test]
+    fn key_shape_is_checked_locally_so_typos_are_not_blamed_on_the_tunnel() {
+        // 这是本轮改动的核心动机：密钥从 32 位缩到 16 位之后，
+        // 「漏抄一位」比「隧道还没生效」更像常见故障，必须在本地就说清楚。
+        let good = format!(
+            "{}{}",
+            rscross_common::ACCESS_KEY_PREFIX,
+            "a".repeat(rscross_common::ACCESS_KEY_HEX_LEN)
+        );
+        args_with(&good).check_key_shape().expect("合法形状应通过");
+
+        // 少一位（漏抄）
+        let short = &good[..good.len() - 1];
+        let err = args_with(short)
+            .check_key_shape()
+            .expect_err("少一位必须被拦下");
+        assert!(err.to_string().contains("格式不对"), "{err}");
+        assert!(err.to_string().contains("16 位"), "提示要给出期望形状: {err}");
+
+        // 多一位（多抄）
+        assert!(args_with(&format!("{good}0")).check_key_shape().is_err());
+
+        // 前缀不对：提示要指向「复制错了东西」，而不是「格式不对」
+        // 下面这串是客户端令牌的形状（rsa_ + 16 位），长度对但不是访问密钥。
+        let err = args_with("rsa_0123456789abcdef")
+            .check_key_shape()
+            .expect_err("前缀不对必须被拦下");
+        assert!(err.to_string().contains("rsv_"), "{err}");
+        assert!(
+            err.to_string().contains("访问密钥"),
+            "提示要指出该复制哪个值: {err}"
+        );
+
+        // 空值
+        let err = args_with("").check_key_shape().expect_err("空值必须被拦下");
+        assert!(err.to_string().contains("未提供"), "{err}");
+    }
+
+    #[test]
+    fn key_with_surrounding_whitespace_is_accepted() {
+        // 从终端复制粘贴常常带一个尾巴空格或换行，这不该是用户的错。
+        let good = format!(
+            "  {}{}  ",
+            rscross_common::ACCESS_KEY_PREFIX,
+            "b".repeat(rscross_common::ACCESS_KEY_HEX_LEN)
+        );
+        args_with(&good).check_key_shape().expect("两侧空白应被忽略");
+    }
 }

@@ -8,13 +8,29 @@
 //! 这个接口只是把「去哪连」告诉它，不额外泄露数据。对无效密钥**统一返回 401**，
 //! 不区分「密钥不存在」与「隧道已停用」，避免接口被用来探测密钥是否存在。
 
-use axum::extract::State;
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, State};
 use axum::Json;
 use rscross_common::TunnelKind;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
+
+/// 同一来源 IP 连续猜错多少次访问密钥就临时锁定。
+///
+/// 访问密钥只有 16 位十六进制（64 bit），比其它令牌短得多 —— 缩短它是
+/// 出于「人能抄对」的考虑，所以**必须**同时收紧猜测的代价，否则就是
+/// 单向降低强度。10 次是「手抄错几位会很自然地重试几次」与
+/// 「猜不动」之间的折中。
+const ACCESS_FAIL_MAX: u32 = 10;
+
+/// 触发锁定后的锁定时长（分钟）。
+///
+/// 刻意比登录短：访问密钥常常是被复制粘贴的，抄错一位就重试是很正常的
+/// 行为，锁太久会让人以为系统坏了。
+const ACCESS_LOCK_MINUTES: u64 = 1;
 
 /// `POST /api/v1/access/resolve` 请求。
 #[derive(Debug, Deserialize)]
@@ -55,8 +71,17 @@ pub struct ResolveResponse {
 /// `POST /api/v1/access/resolve`
 pub async fn resolve(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<ResolveRequest>,
 ) -> Result<Json<ResolveResponse>, ApiError> {
+    // 限流键用**来源 IP**，不用密钥本体：密钥是秘密，把它写进计数表
+    // 等于在内存里留下一份「被尝试过的密钥」清单。
+    let throttle_key = format!("access:{}", peer.ip());
+    if let Err(err) = state.throttle.check_with(&throttle_key, "访问密钥校验") {
+        // 用 429 而不是 401/403：这是「试得太频繁」，不是「你没权限」。
+        return Err(ApiError::too_many_requests(err.to_string()));
+    }
+
     let key = req.access_key.trim();
     if key.is_empty() {
         return Err(ApiError::unauthorized("缺少访问密钥"));
@@ -68,9 +93,18 @@ pub async fn resolve(
         .await
         .map_err(ApiError::from)?
     else {
-        tracing::warn!("访问端使用了无效的访问密钥");
+        state
+            .throttle
+            .record_failure(&throttle_key, ACCESS_FAIL_MAX, ACCESS_LOCK_MINUTES);
+        // 不记录被尝试的密钥原文 —— 日志会进「日志」页与环形缓冲，
+        // 记下来就等于把别人的口令张贴在界面上。只记来源。
+        tracing::warn!(peer = %peer.ip(), "访问端使用了无效的访问密钥");
         return Err(ApiError::unauthorized("访问密钥无效或隧道已下线"));
     };
+
+    // 走到这里说明密钥是对的：清零失败计数。之后的错误（隧道停用、客户端禁用、
+    // 节点未上报坐标……）都不是「有人在猜密钥」，不该继续累计。
+    state.throttle.record_success(&throttle_key);
 
     if let Some(expected) = req
         .tunnel_id

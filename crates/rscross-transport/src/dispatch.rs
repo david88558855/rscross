@@ -615,6 +615,124 @@ impl ProtocolHandler for AccessHandler {
     }
 }
 
+/// 访问端与节点之间的一条会话。
+///
+/// 把「连接节点 → 提交访问密钥 → 解析应答 → 复用同一条连接申请中继流」这套协议
+/// 收敛在传输层内部：调用方（`rscross-client access`）不必接触任何 iroh 类型，
+/// 也就不会因为 Iroh 迭代而被迫改动。
+///
+/// 复用同一条连接申请中继流，是 P2P 隧道能**就地回退**的原因：
+/// 直连失败时不必重新握手，直接再开一条流即可。
+#[derive(Debug, Clone)]
+pub struct AccessSession {
+    connection: Connection,
+    reply: AccessReply,
+    tunnel_key: String,
+}
+
+/// 访问端应答的字节上限（防止对端构造超大应答把内存吃满）。
+const MAX_ACCESS_REPLY_BYTES: usize = 64 * 1024;
+
+impl AccessSession {
+    /// 连接节点、提交访问密钥并解析应答。
+    pub async fn connect(
+        node: &P2pNode,
+        node_addr: &EndpointAddr,
+        access_key: &str,
+    ) -> Result<Self> {
+        let connection = node
+            .endpoint()
+            .connect(node_addr.clone(), ALPN_ACCESS)
+            .await
+            .map_err(|e| Error::transport(format!("连接节点失败: {e}")))?;
+
+        let (mut send, mut recv) = connection
+            .open_bi()
+            .await
+            .map_err(|e| Error::transport(format!("打开握手流失败: {e}")))?;
+        write_stream_key(&mut send, access_key).await?;
+        let _ = send.finish();
+
+        let bytes = recv
+            .read_to_end(MAX_ACCESS_REPLY_BYTES)
+            .await
+            .map_err(|e| Error::transport(format!("读取节点应答失败: {e}")))?;
+        let reply: AccessReply = serde_json::from_slice(&bytes)
+            .map_err(|e| Error::transport(format!("节点应答不是合法 JSON: {e}")))?;
+
+        if !reply.ok {
+            return Err(Error::auth(
+                reply
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "访问密钥被拒绝".to_string()),
+            ));
+        }
+
+        let tunnel_key = reply.tunnel_key.clone().unwrap_or_default();
+        if tunnel_key.is_empty() {
+            return Err(Error::transport("节点未下发隧道路由键，无法投递"));
+        }
+        Ok(Self {
+            connection,
+            reply,
+            tunnel_key,
+        })
+    }
+
+    /// 节点的应答原文。
+    pub fn reply(&self) -> &AccessReply {
+        &self.reply
+    }
+
+    /// 投递给客户端时使用的路由键。
+    pub fn tunnel_key(&self) -> &str {
+        &self.tunnel_key
+    }
+
+    /// 节点建议的路径（`p2p` / `relay`）。
+    pub fn mode(&self) -> &str {
+        self.reply.mode.as_deref().unwrap_or("relay")
+    }
+
+    /// 是否允许直连失败后回退到节点中继。
+    pub fn allow_relay(&self) -> bool {
+        self.reply.allow_relay
+    }
+
+    /// 直连客户端（P2P 隧道的优先路径）。
+    pub async fn dial_client(&self, node: &P2pNode, timeout: Duration) -> Result<P2pStream> {
+        let raw = self
+            .reply
+            .client_endpoint
+            .as_deref()
+            .ok_or_else(|| Error::transport("节点未提供客户端坐标，无法直连"))?;
+        let addr = decode_addr(raw)?;
+        match tokio::time::timeout(timeout, node.open_tunnel(&addr, &self.tunnel_key)).await {
+            Err(_) => Err(Error::transport(format!(
+                "直连客户端超时（{} 秒）",
+                timeout.as_secs()
+            ))),
+            Ok(Err(err)) => Err(err),
+            Ok(Ok(stream)) => Ok(stream),
+        }
+    }
+
+    /// 向节点申请一条中继流（私有隧道，或 P2P 直连失败后的回退）。
+    pub async fn open_relay(&self) -> Result<P2pStream> {
+        let (send, recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|e| Error::transport(format!("申请中继流失败: {e}")))?;
+        Ok(P2pStream {
+            connection: self.connection.clone(),
+            send,
+            recv,
+        })
+    }
+}
+
 /// 访问端侧：把一段本地 TCP 连接桥接到一条 Iroh 双向流上。
 ///
 /// 访问端与节点、访问端与客户端两种走向共用这一个函数，

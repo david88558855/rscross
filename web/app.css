@@ -292,3 +292,5 @@ button.tab.active .tab-count { background: #e8f0ff; color: var(--primary); }
 /* 弹窗里的说明条不该带卡片级的左右外边距 */
 .modal .notice { margin: 8px 0; }
 .modal-desc { margin: 0 16px 4px; }
+/* 弹窗里的独立提示（不在 label 内，所以拿不到 label.field .hint 的样式） */
+.modal .hint { color: var(--muted); font-size: 12px; line-height: 1.7; margin-top: 6px; }

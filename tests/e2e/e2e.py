@@ -479,6 +479,135 @@ secret_key_file = "{(state_dir / 'node.key').as_posix()}"
     )
 
 
+def check_private_tunnel(
+    label: str, dist: Path, work: Path, base: str, token: str, client_id: str
+) -> None:
+    """私有隧道：访问端凭密钥在本机监听 → 节点中继 → 客户端本地服务。
+
+    这条断言覆盖的是与「端口转发」本质不同的形态：**内网侧不暴露任何公网端口**，
+    入口建在访问者自己那边。它同时验证三件事：
+    1. 免鉴权的 `/api/v1/access/resolve` 能用密钥换到节点坐标；
+    2. 访问端二进制真的能起本地入口（`rscross-client access` 子命令）；
+    3. 数据经「本地 TCP → 访问端 → 节点中继 → Iroh → 客户端本地服务」走通。
+    """
+    # 1) 内网侧回显服务
+    echo = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    echo.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    echo.bind(("127.0.0.1", 0))
+    echo.listen(16)
+    echo.settimeout(1.0)
+    echo_port = echo.getsockname()[1]
+    stop = threading.Event()
+
+    def serve() -> None:
+        while not stop.is_set():
+            try:
+                conn, _ = echo.accept()
+            except (socket.timeout, OSError):
+                continue
+            try:
+                data = conn.recv(4096)
+                if data:
+                    conn.sendall(b"private:" + data)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+
+    # 2) 建私有隧道（自动签发访问密钥）
+    status, tunnel = http_json(
+        "POST",
+        f"{base}/api/v1/clients/{client_id}/tunnels",
+        {
+            "kind": "private",
+            "name": "e2e-private-e2e",
+            "proto": "tcp",
+            "local_addr": f"127.0.0.1:{echo_port}",
+        },
+        token=token,
+    )
+    access_key = (tunnel or {}).get("access_key") or ""
+    if not check(
+        f"{label}: 可创建「私有隧道」并拿到访问密钥",
+        status == 200 and access_key.startswith("rsv_"),
+        f"status={status} {str(tunnel)[:140]}",
+    ):
+        stop.set()
+        echo.close()
+        return
+
+    # 3) 免鉴权解析：凭密钥换节点坐标与路由键
+    status, resolved = http_json(
+        "POST", f"{base}/api/v1/access/resolve", {"access_key": access_key}
+    )
+    check(
+        f"{label}: 访问端可凭访问密钥换取节点坐标",
+        status == 200 and bool((resolved or {}).get("node_endpoint"))
+        and bool((resolved or {}).get("tunnel_key")),
+        f"status={status} {str(resolved)[:160]}",
+    )
+    check(
+        f"{label}: 私有隧道建议走节点中继",
+        (resolved or {}).get("mode") == "relay",
+        str((resolved or {}).get("mode")),
+    )
+
+    status, _ = http_json(
+        "POST", f"{base}/api/v1/access/resolve", {"access_key": "rsv_" + "0" * 64}
+    )
+    check_eq(f"{label}: 无效访问密钥被拒", 401, status)
+
+    # 4) 真的起一个访问端进程，通过它的本地入口访问内网服务
+    access_dir = work / "access"
+    access_dir.mkdir(parents=True, exist_ok=True)
+    local_port = free_port()
+    access = Proc(
+        f"{label}/access",
+        dist / "rscross-client",
+        [
+            "access",
+            "--console",
+            base,
+            "--key",
+            access_key,
+            "--listen",
+            f"127.0.0.1:{local_port}",
+        ],
+        access_dir / "access.log",
+    )
+
+    def via_access():
+        try:
+            with socket.create_connection(("127.0.0.1", local_port), timeout=5) as sock:
+                sock.sendall(b"ping")
+                sock.settimeout(5)
+                reply = sock.recv(64)
+        except OSError:
+            return None
+        return reply if reply.startswith(b"private:") else None
+
+    ok, reply = wait_until(
+        f"{label}: 访问端本地入口可用",
+        via_access,
+        timeout=120,
+        interval=1.0,
+    )
+    check(
+        f"{label}: 本地 TCP → 访问端 → 节点中继 → Iroh → 客户端本地服务（端到端数据面）",
+        ok,
+        f"reply={reply!r}",
+    )
+    if not ok:
+        print("      · 访问端日志（末尾 60 行）：", flush=True)
+        print(access.tail(60), flush=True)
+
+    access.stop()
+    stop.set()
+    echo.close()
+
+
 def check_port_forward(label: str, base: str, token: str, client_id: str) -> None:
     """端口转发：节点监听公网端口 → 经 Iroh 投递到客户端本地服务。
 
@@ -932,6 +1061,15 @@ def scenario_embedded(dist: Path, work: Path) -> None:
         check_tunnel_kinds(label, console_base, token, clients_now[0]["id"])
         # 端口转发的完整链路（节点自建 ingress → Iroh → 客户端本地服务）
         check_port_forward(label, console_base, token, clients_now[0]["id"])
+        # 私有隧道 + 访问端的完整链路（本地入口 → 节点中继 → Iroh → 客户端）
+        check_private_tunnel(
+            label,
+            dist,
+            work / "embedded",
+            console_base,
+            token,
+            clients_now[0]["id"],
+        )
 
     # 概览与日志
     status, overview = http_json("GET", console_base + "/api/v1/overview", token=token)

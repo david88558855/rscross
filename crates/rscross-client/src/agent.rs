@@ -42,6 +42,11 @@ const P2P_PROBE_SECS: u64 = 60;
     about = "rscross 客户端：把内网服务通过反向隧道 / P2P 直连暴露出去"
 )]
 pub struct Args {
+    /// 子命令。不带子命令时按「常驻客户端」运行 ——
+    /// 既有的 `rscross-client --console ... --enroll-token ...` 用法完全不变。
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// 配置文件路径（不存在时自动生成默认配置）。
     #[arg(short, long, default_value = "rscross-client.toml", env = "RSROSS_CLIENT_CONFIG")]
     pub config: PathBuf,
@@ -71,6 +76,16 @@ pub struct Args {
     pub no_p2p: bool,
 }
 
+/// 子命令。
+#[derive(Debug, clap::Subcommand)]
+pub enum Command {
+    /// 访问端：凭访问密钥在本机建立到内网服务的入口（私有 / P2P 隧道）。
+    ///
+    /// 与常驻客户端相反 —— 它在「访问者」一侧跑，暴露本机监听地址，
+    /// 内网侧因此不需要对外开放任何端口。
+    Access(crate::access::AccessArgs),
+}
+
 /// 入口（解析命令行）。
 pub async fn run() -> Result<()> {
     let args = Args::parse();
@@ -79,6 +94,12 @@ pub async fn run() -> Result<()> {
 
 /// 用给定参数启动。
 pub async fn run_with_args(args: Args) -> Result<()> {
+    // 子命令优先：访问端与常驻客户端是两种完全不同的运行形态，
+    // 放在同一二进制里是为了不把发布物从三个变成四个。
+    if let Some(Command::Access(access)) = args.command {
+        return crate::access::run(access).await;
+    }
+
     if args.print_default_config {
         let text = toml::to_string_pretty(&ClientFile::default())
             .map_err(|e| Error::config(format!("序列化默认配置失败: {e}")))?;

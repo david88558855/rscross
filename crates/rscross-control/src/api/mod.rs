@@ -1,5 +1,6 @@
 //! 控制面 HTTP API。
 
+pub mod access;
 pub mod agent;
 pub mod auth;
 pub mod client;
@@ -74,6 +75,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/logs", get(misc::logs))
         .route("/api/v1/audit", get(misc::audit_log))
         .route("/api/v1/config", get(misc::get_config).put(misc::put_config))
+        // 访问端（免鉴权：凭访问密钥换取节点坐标；密钥本身就是凭证）
+        .route("/api/v1/access/resolve", post(access::resolve))
         // 服务端节点侧（节点进程调用）
         .route("/api/v1/node/enroll", post(nodes::node_enroll))
         .route("/api/v1/node/heartbeat", post(nodes::node_heartbeat))

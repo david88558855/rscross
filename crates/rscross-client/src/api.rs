@@ -41,6 +41,33 @@ pub struct EnrollResponse {
     pub tunnels: Vec<DesiredTunnel>,
 }
 
+/// 访问端接入信息（`POST /api/v1/access/resolve` 的响应镜像）。
+///
+/// 访问端只拿到一枚访问密钥，它不知道隧道挂在哪台节点上，
+/// 所以要先来这里换到节点坐标与投递路由键。
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccessResolve {
+    /// 隧道 ID。
+    pub tunnel_id: String,
+    /// 隧道名。
+    pub tunnel_name: String,
+    /// 用途分类。
+    pub kind: String,
+    /// 协议。
+    pub proto: String,
+    /// 投递给客户端时使用的路由键。
+    pub tunnel_key: String,
+    /// 归属节点名。
+    pub node_name: String,
+    /// 归属节点的 Iroh 坐标（JSON）。
+    pub node_endpoint: String,
+    /// 节点建议的路径：`p2p` / `relay`。
+    pub mode: String,
+    /// 直连失败时是否允许回退到节点中继。
+    #[serde(default)]
+    pub allow_relay: bool,
+}
+
 /// 心跳请求。
 #[derive(Debug, Clone, Serialize)]
 pub struct HeartbeatRequest {
@@ -146,6 +173,22 @@ impl ApiClient {
             .post(format!("{}/api/v1/agent/heartbeat", self.base))
             .header("x-rscross-agent", agent_token)
             .json(req)
+            .send()
+            .await
+            .map_err(Error::transport)?;
+        decode(response).await
+    }
+
+    /// `POST /api/v1/access/resolve`（免鉴权：凭访问密钥换取节点坐标）
+    pub async fn resolve_access(&self, access_key: &str) -> Result<AccessResolve> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            access_key: &'a str,
+        }
+        let response = self
+            .http
+            .post(format!("{}/api/v1/access/resolve", self.base))
+            .json(&Body { access_key })
             .send()
             .await
             .map_err(Error::transport)?;

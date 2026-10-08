@@ -158,12 +158,12 @@
       desc: '节点监听公网端口，收到连接后经 Iroh 投递给客户端本地服务；适合数据库、SSH 这类非 HTTP 场景。',
     },
     {
-      key: 'private', label: '私有隧道', ico: '⊘', ready: false, protos: ['tcp', 'udp'],
-      desc: '不暴露公网端口：访问端凭访问密钥在自己那边监听，流量经节点转发（访问端工具待交付）。',
+      key: 'private', label: '私有隧道', ico: '⊘', ready: true, protos: ['tcp', 'udp'],
+      desc: '不暴露公网端口：访问端凭访问密钥在自己那边监听，流量经节点转发。',
     },
     {
-      key: 'p2p', label: 'P2P 隧道', ico: '⇉', ready: false, protos: ['tcp'],
-      desc: '同私有隧道，但优先点对点直连；直连成功不占服务端带宽，仅支持 TCP（访问端工具待交付）。',
+      key: 'p2p', label: 'P2P 隧道', ico: '⇉', ready: true, protos: ['tcp'],
+      desc: '同私有隧道，但优先点对点直连；直连成功不占服务端带宽，仅支持 TCP。',
     },
   ];
 
@@ -973,8 +973,8 @@
   // 访问密钥 + 访问端命令展示。密钥只在需要时展示，避免长期挂在列表里被旁观者看到。
   function showAccessKey(tunnel, title) {
     const meta = tunnelKindMeta(tunnel.kind);
-    const command = 'rscross-client access --key ' + tunnel.access_key +
-      ' --tunnel ' + tunnel.id + ' --listen 0.0.0.0:8080';
+    const command = 'rscross-client access --console ' + location.origin +
+      ' --key ' + tunnel.access_key + ' --listen 127.0.0.1:8080';
 
     const html = '' +
       '<div class="modal-mask" id="modal"><div class="modal">' +
@@ -985,10 +985,11 @@
           '<label class="field"><span>访问密钥</span>' +
             '<input id="k-value" value="' + esc(tunnel.access_key || '') + '" readonly />' +
             '<div class="hint">等价于密码：拿到它就能访问这个内网服务。请通过安全渠道分发。</div></label>' +
-          '<label class="field"><span>访问端命令（下一阶段形态）</span>' +
+          '<label class="field"><span>访问端命令</span>' +
             '<input value="' + esc(command) + '" readonly /></label>' +
-          '<div class="notice warn">访问端（<code>rscross-client access</code>）的数据面尚未接入，' +
-            '命令为约定形态；当前请先保存好访问密钥。</div>' +
+          '<div class="hint">把这条命令贴到需要访问内网服务的机器上执行；' +
+            '执行后访问它监听的地址即可（如 <code>http://127.0.0.1:8080</code>）。' +
+            '访问密钥等价于密码，请通过安全渠道分发。</div>' +
         '</div>' +
         '<div class="modal-foot">' +
           '<button id="m-copy">复制密钥</button>' +

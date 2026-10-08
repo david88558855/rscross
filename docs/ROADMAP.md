@@ -189,6 +189,13 @@
 - [x] **E7 单一产物**：`rust-embed` 把控制台打进控制面产物，部署只需拷文件。
 - [x] **E8 无 XSS**：所有插值经 `esc()`；`data-*` 属性里的 id/name 同样转义。
 - [x] **E9 会话过期自愈**：任意请求 401 → 清本地 token → 跳登录页。
+- [x] **E11 端口转发数据面**：节点侧自建 TCP ingress（`PortIngress`）按配置动态增删监听；
+      e2e 直接连公网端口并断言拿到经 Iroh 投递回来的响应。
+- [x] **E12 私有 / P2P 数据面**：访问端（`rscross-client access`）凭访问密钥在本机建入口，
+      经节点中继到达客户端本地服务；`/api/v1/access/resolve` 免鉴权换坐标，
+      无效密钥统一 401；e2e 起真实访问端进程跑通全链路。
+- [x] **E13 状态如实标注**：`data_plane_ready()` 与 `proto_ready()` 区分「分类」与「分类+协议」，
+      端口转发 UDP 未实现这类差异有单测守着（`udp_port_forwarding_is_declared_unavailable`）。
 - [x] **E10 危险操作有确认**：删除节点/客户端/隧道、轮换令牌均二次确认；令牌只展示一次。
 
 ### 下一轮增强

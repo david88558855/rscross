@@ -884,6 +884,25 @@ impl Store {
         .await
     }
 
+    /// 按访问密钥查隧道（私有 / P2P 的访问端握手用）。
+    ///
+    /// 密钥本身就是凭证，所以这里不做任何「是否存在」的额外校验 ——
+    /// 查不到就是无效密钥，由调用方统一按 401 处理，避免出现
+    /// 「密钥对但隧道停用」这类可探测的差异。
+    pub async fn find_tunnel_by_access_key(&self, key: &str) -> Result<Option<TunnelRecord>> {
+        let key = key.to_string();
+        self.blocking(move |c| {
+            c.query_row(
+                &format!("{TUNNEL_SELECT} WHERE access_key = ?1"),
+                params![key],
+                map_tunnel,
+            )
+            .optional()
+            .map_err(Error::store)
+        })
+        .await
+    }
+
     /// 列出全部隧道。
     pub async fn list_tunnels(&self) -> Result<Vec<TunnelRecord>> {
         self.blocking(move |c| {

@@ -256,13 +256,29 @@ impl TunnelKind {
 
     /// 数据面是否已接入。
     ///
-    /// - 域名解析：走 FerroTunnel 自带的 HTTP 入口（按 `Host` 路由）。
-    /// - 端口转发：走节点侧自建 ingress（[`crate::TunnelKind::Port`] 会在节点上
-    ///   监听公网端口并由节点主动向客户端投递）。
-    /// - 私有 / P2P：还需要访问端（`rscross-client access --key ...` 形态），
-    ///   尚未交付。前端据此标注「待接入」，避免让人以为配置完就能通。
+    /// - 域名解析：FerroTunnel 自带的 HTTP 入口，按 `Host` 路由。
+    /// - 端口转发：节点侧自建的 TCP ingress（**UDP 尚未实现**，
+    ///   见 [`Self::proto_ready`]）。
+    /// - 私有隧道：访问端 [`crate::ALPN_RSROSS_ACCESS`] 握手 + 节点中继。
+    /// - P2P 隧道：同上，但优先点对点直连，失败可按配置回退中继。
+    ///
+    /// 前端据此决定是否显示「待接入」角标。全部接入后它恒为 `true`，
+    /// 保留这个函数的价值在于：将来某类数据面被回退时，UI 会自动重新标注，
+    /// 不需要再去改前端。
     pub fn data_plane_ready(self) -> bool {
-        matches!(self, Self::Domain | Self::Port)
+        matches!(self, Self::Domain | Self::Port | Self::Private | Self::P2p)
+    }
+
+    /// 「分类 + 协议」这个组合的数据面是否已接入。
+    ///
+    /// 比 [`Self::data_plane_ready`] 更细一层：端口转发的 UDP 入口还没做，
+    /// 所以「配置能保存」不等于「流量能转发」。前端据此把话说清楚，
+    /// 不让人建完 UDP 隧道才发现不通。
+    pub fn proto_ready(self, proto: TunnelProto) -> bool {
+        match (self, proto) {
+            (Self::Port, TunnelProto::Udp) => false,
+            _ => self.data_plane_ready(),
+        }
     }
 }
 
@@ -750,18 +766,24 @@ mod tests {
     }
 
     #[test]
-    fn data_plane_status_is_explicit_not_optimistic() {
-        // 这是给前端标注状态用的：已接入的是域名解析与端口转发，
-        // 私有 / P2P 还要等访问端工具。不要让 UI 假装它们可用。
-        assert!(
-            TunnelKind::Domain.data_plane_ready(),
-            "域名解析走 FerroTunnel 的 HTTP 入口"
-        );
-        assert!(
-            TunnelKind::Port.data_plane_ready(),
-            "端口转发走节点侧自建的 TCP ingress"
-        );
-        assert!(!TunnelKind::Private.data_plane_ready());
-        assert!(!TunnelKind::P2p.data_plane_ready());
+    fn every_tunnel_kind_has_a_data_plane() {
+        // 四类都已接入：域名解析走 FerroTunnel 的 HTTP 入口、端口转发走节点侧自建
+        // TCP ingress、私有 / P2P 走访问端 + 节点中继（P2P 优先直连）。
+        // 这个断言的用途是：将来某类数据面被回退时，这里会立刻变红。
+        for kind in TunnelKind::all() {
+            assert!(kind.data_plane_ready(), "{kind} 的数据面应为已接入");
+        }
+    }
+
+    #[test]
+    fn udp_port_forwarding_is_declared_unavailable() {
+        // 端口转发的入口是自己写的 TCP listener，UDP 还没做。
+        // 「能保存」与「能转发」必须区分开，否则用户建完 UDP 隧道只会一脸茫然。
+        assert!(!TunnelKind::Port.proto_ready(TunnelProto::Udp));
+        assert!(TunnelKind::Port.proto_ready(TunnelProto::Tcp));
+        // 其余组合跟随分类状态
+        assert!(TunnelKind::Domain.proto_ready(TunnelProto::Http));
+        assert!(TunnelKind::Private.proto_ready(TunnelProto::Tcp));
+        assert!(TunnelKind::P2p.proto_ready(TunnelProto::Tcp));
     }
 }

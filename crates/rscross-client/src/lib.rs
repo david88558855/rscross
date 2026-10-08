@@ -9,10 +9,12 @@
 //! 崩溃恢复：控制面/中继/直连三类外部依赖全部按「本地退避重试 + 不退出进程」处理；
 //! 隧道的增删改由心跳循环里的 `TunnelManager::reconcile` 收敛。
 
+pub mod access;
 pub mod agent;
 pub mod api;
 pub mod identity;
 pub mod logsink;
 
-pub use agent::{run, run_with_args, Args};
+pub use access::AccessArgs;
+pub use agent::{run, run_with_args, Args, Command};
 pub use identity::{Identity, StateDir};

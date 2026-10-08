@@ -112,6 +112,12 @@ pub async fn run_with_args(args: NodeArgs) -> Result<()> {
         // 还是「网络/安全组问题」。
         if cfg.is_embedded() {
             println!("内嵌控制台前端: {}", rscross_control::console::diagnose());
+            // 端口是最容易对不上号的一项：「打不开控制台」有一大半是访问了另一个端口。
+            println!(
+                "内嵌控制台默认端口: {}（独立中央控制台是 {}；如需修改，用 --console-config 或 node.console_config 指定配置文件）",
+                rscross_common::DEFAULT_CONSOLE_PORT,
+                rscross_common::DEFAULT_CENTRAL_CONSOLE_PORT
+            );
         } else {
             println!("控制台形态: managed（前端由远端控制台提供，本机不内嵌页面）");
         }

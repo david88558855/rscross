@@ -52,10 +52,19 @@ pub async fn run_console() -> Result<()> {
     run_console_with(args).await
 }
 
+/// `--print-default-config` 打印的默认配置。
+///
+/// 抽成函数并加单测，是因为这里曾经用 `ConsoleFile::default()`（7800），
+/// 而首次启动生成的是 `central_default()`（7700）—— 打印与实际生成的端口不一致，
+/// 用户照着打印结果改配置就会对不上。由 e2e 断言抓出，现在用单测兜住。
+pub fn console_default_config() -> ConsoleFile {
+    ConsoleFile::central_default()
+}
+
 /// 用给定参数启动独立控制台（便于测试直接调用）。
 pub async fn run_console_with(args: ConsoleArgs) -> Result<()> {
     if args.print_default_config {
-        let text = toml::to_string_pretty(&ConsoleFile::default())
+        let text = toml::to_string_pretty(&console_default_config())
             .map_err(|e| Error::config(format!("序列化默认配置失败: {e}")))?;
         println!("{text}");
         return Ok(());
@@ -237,5 +246,27 @@ pub async fn wait_for_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn printed_default_config_matches_what_startup_generates() {
+        // 独立中央控制台：打印出来的默认端口必须是 7700，
+        // 且与 `load_or_init_central` 首次生成的一致（同一来源）。
+        let printed = console_default_config();
+        assert_eq!(printed.bind_port(), Some(7700));
+        assert_eq!(
+            printed.console.bind,
+            ConsoleFile::central_default().console.bind,
+            "打印的默认配置必须与启动时生成的同源"
+        );
+
+        // 内嵌控制台的默认值不受影响
+        assert_eq!(ConsoleFile::default().bind_port(), Some(7800));
+        assert_ne!(printed.bind_port(), ConsoleFile::default().bind_port());
     }
 }

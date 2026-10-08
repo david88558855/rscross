@@ -27,8 +27,8 @@ pub mod state;
 pub mod node_client;
 
 pub use bootstrap::{
-    build_plane, ensure_initial_admin, init_logging, run_console, run_console_with, wait_for_signal,
-    ConsoleArgs,
+    build_plane, console_default_config, ensure_initial_admin, init_logging, run_console,
+    run_console_with, wait_for_signal, ConsoleArgs,
 };
 pub use error::ApiError;
 pub use logbus::{LogBus, LogEvent};

@@ -1,7 +1,7 @@
 name: release
 
 # 发版流程（不要在分支推送上期望它跑）：
-#   git tag -a v0.1.2 -m "rscross v0.1.2" && git push origin v0.1.2
+#   git tag -a v0.1.3 -m "rscross v0.1.3" && git push origin v0.1.3
 # 产物：① 两个 musl 静态二进制 × 两个架构（tar.gz）
 #       ② Windows x86_64 二进制（zip，本机可直接双击/命令行运行）
 #       ③ 各自的 sha256 校验和
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要构建并发布的 tag（例如 v0.1.2）"
+        description: "要构建并发布的 tag（须与 Cargo.toml 的 version 一致，例如 v0.1.3）"
         required: true
 
 permissions:

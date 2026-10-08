@@ -224,7 +224,7 @@ pre-build = [...]
 触发：push `v*` tag，或手动指定 tag。
 
 ```
-build(matrix ×2)  →  package(.tar.gz + sha256)  →  publish(GitHub Release)
+guard(校验 tag == Cargo.toml 版本)  →  build(matrix ×2)  →  package(.tar.gz + sha256)  →  publish(GitHub Release)
 ```
 
 - 打包内容：`rscross-console`、`rscross-server`、`rscross-client`、`README.md`、`LICENSE`。
@@ -232,10 +232,18 @@ build(matrix ×2)  →  package(.tar.gz + sha256)  →  publish(GitHub Release)
 - **先让 `main` 的 CI 绿了再打 tag**：tag 流水线的第一个 job 也是同样的门禁。
 
 ```bash
-git tag -a v0.1.2 -F tag_msg.txt     # 必须 -a：轻量 tag 没有正文
-git push origin v0.1.2
-git ls-remote origin refs/tags/v0.1.2   # 复核，不看 push 的输出
+# 在仓库根目录执行。版本号直接取自 Cargo.toml，避免「升了版本忘了改文档」。
+# release.yml 的 guard job 会在 tag 与 Cargo.toml 不一致时直接失败。
+VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+git tag -a "v$VER" -F tag_msg.txt        # 必须 -a：轻量 tag 没有正文
+git push origin "v$VER"
+git ls-remote origin "refs/tags/v$VER"   # 复核，不看 push 的输出
 ```
+
+> 从 tag 构建的流水线多了一个前置 job：`guard`。它只做一件事 ——
+> 确认 `tag == v<Cargo.toml 的 version>`。这条纪律过去纯靠手工，
+> 结果出现过 tag 是 `v0.1.1` 而 `--version` 报 `0.1.0` 的情况：
+> 用户下载了包也无法确认自己装的是哪个版本。
 
 ---
 

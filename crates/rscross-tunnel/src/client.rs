@@ -71,7 +71,7 @@ impl AgentService {
     }
 
     /// 触发状态变更回调
-    fn notify_change(&self, event: &str) {
+    pub fn notify_change(&self, event: &str) {
         if let Some(f) = self.on_change.read().as_ref() {
             f(event);
         }

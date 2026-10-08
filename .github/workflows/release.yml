@@ -23,7 +23,29 @@ env:
   BINARIES: rscross-console rscross-server rscross-client
 
 jobs:
+  # 打 tag 前先确认版本号对得上。
+  #
+  # 曾经出现过 crate 版本停在 0.1.0、而 tag 已经是 v0.1.1 的情况：
+  # 用户下载 v0.1.1 的包，`--version` 却报 0.1.0，根本没法确认装的是哪个版本。
+  # 这类漂移必须在**发布前**拦下，而不是等用户发现。
+  guard:
+    name: 校验 tag 与版本号
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag 必须与 Cargo.toml 的 version 一致
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          crate="$(grep -m1 -E '^version = "' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')"
+          echo "tag=$tag  Cargo.toml=$crate"
+          if [ "v$crate" != "$tag" ]; then
+            echo "::error::tag ($tag) 与 Cargo.toml 的版本 (v$crate) 不一致；请先把 Cargo.toml 的 version 改成 $tag 再打 tag"
+            exit 1
+          fi
+
   build:
+    needs: guard
     name: musl ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
@@ -84,6 +106,7 @@ jobs:
           path: dist/*
 
   build-windows:
+    needs: guard
     name: windows ${{ matrix.target }}
     runs-on: windows-latest
     strategy:

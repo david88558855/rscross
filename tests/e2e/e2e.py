@@ -1448,9 +1448,29 @@ def main() -> int:
     print(f"工作目录: {work}", flush=True)
 
     # 二进制自检
+    #
+    # 版本号必须与 Cargo.toml 一致：曾经出现过 crate 版本停在 0.1.0、
+    # 而 tag 已经是 v0.1.1 的情况 —— 用户下载 v0.1.1 的包，`--version`
+    # 却报 0.1.0，根本没法确认自己装的是哪个版本。
+    manifest = Path(__file__).resolve().parents[2] / "Cargo.toml"
+    manifest_version = None
+    try:
+        found = re.search(
+            r'^version = "([^"]+)"', manifest.read_text(encoding="utf-8"), re.M
+        )
+        manifest_version = found.group(1) if found else None
+    except OSError:
+        pass
+
     for name, binary in binaries.items():
         proc = subprocess.run([str(binary), "--version"], capture_output=True, text=True, timeout=30)
-        check(f"{name} 可执行", proc.returncode == 0, (proc.stdout or proc.stderr).strip())
+        out = (proc.stdout or proc.stderr).strip()
+        check(f"{name} 可执行", proc.returncode == 0, out)
+        check(
+            f"{name} 自报版本与 Cargo.toml 一致（{manifest_version}）",
+            manifest_version is not None and manifest_version in out,
+            f"Cargo.toml={manifest_version} --version={out}",
+        )
 
     default_cfg = subprocess.run(
         [str(binaries["rscross-server"]), "--print-default-config"],

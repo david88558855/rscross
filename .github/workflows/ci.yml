@@ -26,7 +26,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - name: 检查格式（本 job 不 gate；失败时打印可照抄的 diff）
+        run: |
+          set +e
+          cargo fmt --all
+          if git diff --quiet; then
+            echo "✅ 格式无差异"
+            exit 0
+          fi
+          echo "::warning::存在未格式化的文件，下面是对应的 rustfmt 结果"
+          git --no-pager diff
+          exit 1
 
   check:
     name: cargo check
@@ -109,7 +119,7 @@ jobs:
         run: |
           cross build --release --target ${{ matrix.target }} \
             --bin rscross-console --bin rscross-server --bin rscross-client
-      - name: 校验产物
+      - name: 收集产物（平台无关检查）
         run: |
           set -euo pipefail
           OUT="target/${{ matrix.target }}/release"
@@ -117,10 +127,7 @@ jobs:
           ls -lh "$OUT/rscross-console" "$OUT/rscross-server" "$OUT/rscross-client"
           mkdir -p dist
           cp "$OUT/rscross-console" "$OUT/rscross-server" "$OUT/rscross-client" dist/
-          # --print-default-config / --version 是纯 CPU 路径，可安全用于冒烟
-          ./dist/rscross-console --print-default-config > /dev/null
-          ./dist/rscross-server  --print-default-config > /dev/null
-          ./dist/rscross-client  --print-default-config > /dev/null
+          echo "注意：交叉产物不能在本机直接执行，冒烟放在下面的目标专属步骤里做。"
       - name: 静态链接断言（x86_64 本机可直接验证）
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
@@ -136,6 +143,7 @@ jobs:
               exit 1
             fi
             "./dist/$bin" --version
+            "./dist/$bin" --print-default-config > /dev/null
           done
       - name: 静态链接断言（aarch64 用 qemu 交叉验证）
         if: matrix.target == 'aarch64-unknown-linux-musl'
@@ -145,8 +153,9 @@ jobs:
           sudo apt-get install -y -qq qemu-user-static
           for bin in rscross-console rscross-server rscross-client; do
             qemu-aarch64-static "dist/$bin" --version
+            qemu-aarch64-static "dist/$bin" --print-default-config > /dev/null
           done
-          echo "✅ aarch64 musl 产物可执行"
+          echo "✅ aarch64 musl 产物在 qemu 下可执行"
       - uses: actions/upload-artifact@v4
         with:
           name: rscross-${{ matrix.target }}

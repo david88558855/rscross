@@ -20,16 +20,16 @@ use crate::AppState;
 pub fn register_handlers(client: &mut RpcClient, state: &AppState) {
     // 方法名 -> 处理器
     let table: Vec<(&'static str, HandlerFn)> = vec![
-        ("server_config", Arc::new(handle_server_config)),
-        ("host_config", Arc::new(handle_host_config)),
-        ("forward_config", Arc::new(handle_forward_config)),
-        ("tunnel_config", Arc::new(handle_tunnel_config)),
-        ("p2p_config", Arc::new(handle_p2p_config)),
-        ("proxy_config", Arc::new(handle_proxy_config)),
-        ("custom_cfg_config", Arc::new(handle_custom_cfg)),
-        ("port_check", Arc::new(handle_port_check)),
-        ("remove_config", Arc::new(handle_remove)),
-        ("stop", Arc::new(handle_stop)),
+        ("server_config", boxed(handle_server_config)),
+        ("host_config", boxed(handle_host_config)),
+        ("forward_config", boxed(handle_forward_config)),
+        ("tunnel_config", boxed(handle_tunnel_config)),
+        ("p2p_config", boxed(handle_p2p_config)),
+        ("proxy_config", boxed(handle_proxy_config)),
+        ("custom_cfg_config", boxed(handle_custom_cfg)),
+        ("port_check", boxed(handle_port_check)),
+        ("remove_config", boxed(handle_remove)),
+        ("stop", boxed(handle_stop)),
     ];
 
     let table = Arc::new(table);
@@ -56,8 +56,21 @@ pub fn register_handlers(client: &mut RpcClient, state: &AppState) {
     }));
 }
 
+/// 处理器的异步返回
+type HandlerFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+
 /// 处理器函数类型
-type HandlerFn = Arc<dyn Fn(AppState, Value) -> Result<(), String> + Send + Sync>;
+type HandlerFn = Arc<dyn Fn(AppState, Value) -> HandlerFuture + Send + Sync>;
+
+/// 把异步处理函数装箱为统一签名
+fn boxed<F, Fut>(f: F) -> HandlerFn
+where
+    F: Fn(AppState, Value) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+{
+    Arc::new(move |state, payload| Box::pin(f(state, payload)))
+}
 
 /// 基础配置字段
 #[derive(Debug, Deserialize, Default)]
@@ -208,7 +221,7 @@ async fn handle_server_config(state: AppState, payload: Value) -> Result<(), Str
         #[serde(default, rename = "UpdateTag")]
         update_tag: String,
     }
-    let req: Req = serde_json::from_value(payload).map_err(|e| e.to_string())?;
+    let req: Req = serde_json::from_value(payload.clone()).map_err(|e| e.to_string())?;
 
     if !state.state.need_update(&req.key, &req.update_tag) {
         return Ok(());
@@ -589,7 +602,7 @@ async fn handle_stop(state: AppState, payload: Value) -> Result<(), String> {
 
     // 触发进程退出
     tokio::spawn(async {
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         std::process::exit(0);
     });
     Ok(())
@@ -600,7 +613,7 @@ fn ensure_service(state: &AppState, key: &str, cfg: ClientConfig) -> Arc<AgentSe
     if let Some(svc) = state.services.get(key) {
         return svc;
     }
-    let svc = Arc::new(AgentService::new(key, cfg));
+    let svc = AgentService::new(key, cfg);
     state.services.set(key, svc.clone());
     let s = svc.clone();
     tokio::spawn(async move {

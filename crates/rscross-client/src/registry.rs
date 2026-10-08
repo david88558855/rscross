@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn test_set_get_del() {
         let reg = ServiceRegistry::new();
-        let svc = Arc::new(AgentService::new("k1", ClientConfig::default()));
+        let svc = AgentService::new("k1", ClientConfig::default());
         reg.set("k1", svc.clone());
 
         assert!(reg.get("k1").is_some());

@@ -722,7 +722,7 @@ pub async fn normal_cfg_config(
         if let Some(svc) = state.engine.agent(&req.client_code) {
             let _ = svc.stop();
         }
-        Ok(json!({ "success": true, "message" => "配置已生效" }))
+        Ok(json!({ "success": true, "message": "配置已生效" }))
     }
     .await;
     Json(result.into()).into_response()
@@ -1139,7 +1139,7 @@ async fn config_tunnel(state: &AppState, user_code: &str, table: &str, code: &st
         }
 
         crate::rpc::dispatch_all_client_config(state, &client_code).await;
-        Ok(json!({ "success": true, "message" => "配置已下发" }))
+        Ok(json!({ "success": true, "message": "配置已下发" }))
     }
     .await;
     Json(result.into()).into_response()

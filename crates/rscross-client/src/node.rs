@@ -48,6 +48,7 @@ impl Node {
     async fn session(&self) -> Result<()> {
         let url = format!("{}/rpc/ws", self.state.ws_url);
         let mut client = RpcClient::connect(&url, &self.state.key)
+            .await
             .map_err(|e| anyhow::anyhow!("连接服务端失败: {e}"))?;
 
         // 注册推送处理器
@@ -109,7 +110,7 @@ impl Node {
                 let _h = ping_client.start_dispatch();
                 loop {
                     tokio::time::sleep(Duration::from_secs(15)).await;
-                    if ping_client.call_async(&ping_key, json!(null)).is_ok() {
+                    if ping_client.call_async(&ping_key, json!(null)).await.is_ok() {
                         // 无需等待响应
                     }
                 }

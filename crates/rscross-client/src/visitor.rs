@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 use rscross_tunnel::ClientConfig;
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::registry::ServiceRegistry;
@@ -99,8 +99,8 @@ pub fn from_args(target: &str, secret_key: &str, bind_addr: &str, server: &str) 
         ..Default::default()
     };
     let services = Arc::new(ServiceRegistry::new());
-    // 访客复用 agent 的连接池
-    let svc = Arc::new(rscross_tunnel::AgentService::new("visitor", cfg));
+    // 访客复用 agent 的连接池（AgentService::new 已返回 Arc）
+    let svc = rscross_tunnel::AgentService::new("visitor", cfg);
     services.set("visitor", svc);
 
     Arc::new(Visitor::new(
@@ -174,11 +174,11 @@ mod tests {
                 Arc::new(ServiceRegistry::new()),
             );
             // 手动执行一次转发，验证 handle 逻辑
+            // 探测端口可用性（绑定后立即释放，仅用于取一个空闲端口）
             let listener = TcpListener::bind(&bind_addr).await.unwrap();
             probe_addr = listener.local_addr().unwrap();
             drop(listener);
 
-            let v = Arc::new(v);
             let inbound = TcpStream::connect(probe_addr).await;
             assert!(inbound.is_err() || inbound.is_ok());
         }

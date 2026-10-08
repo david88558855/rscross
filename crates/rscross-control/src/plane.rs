@@ -203,7 +203,7 @@ impl ControlPlane {
             .find_node(node_id)
             .await
             .map_err(Error::store)?
-            .ok_or_else(|| Error::not_found("节点不存在"))?;
+            .ok_or_else(|| Error::api("节点不存在"))?;
         Ok(node_endpoint(&node))
     }
 

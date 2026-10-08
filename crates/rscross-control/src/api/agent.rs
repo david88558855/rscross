@@ -161,6 +161,7 @@ pub async fn enroll(
             last_error: None,
             created_at: now.clone(),
             updated_at: now,
+            disabled: false,
         })
         .await
         .map_err(ApiError::from)?;
@@ -218,9 +219,9 @@ pub async fn heartbeat(
         .touch_client(
             client.id.clone(),
             ClientRuntimePatch {
-                version: non_empty_opt(&req.runtime.version),
-                os: non_empty_opt(&req.runtime.os),
-                arch: non_empty_opt(&req.runtime.arch),
+                version: non_empty(&req.runtime.version),
+                os: non_empty(&req.runtime.os),
+                arch: non_empty(&req.runtime.arch),
                 endpoint_id: non_empty_opt(&req.runtime.endpoint_id),
                 endpoint_addr: non_empty_opt(&req.runtime.endpoint_addr),
                 public_ip: Some(peer.ip().to_string()),

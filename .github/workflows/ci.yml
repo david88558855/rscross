@@ -173,6 +173,106 @@ jobs:
           path: dist/rscross-*
           retention-days: 14
 
+  # Windows 版：让本地机器上能直接跑起来，把「浏览器打不开控制台」里的网络因素
+  # （云安全组 / 服务器防火墙 / 跨机可达性）一次性排除掉。
+  # 本仓库禁止本地编译，所以这个产物同样只在这里产出。
+  build-windows:
+    name: windows x86_64-msvc
+    needs: check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x86_64-msvc
+      - name: 构建（原生 MSVC；rusqlite 用 bundled，由 runner 自带的 cl.exe 编译）
+        run: >
+          cargo build --release --target x86_64-pc-windows-msvc
+          --bin rscross-console --bin rscross-server --bin rscross-client
+      - name: 冒烟一：--version / --print-default-config / --check（含内嵌前端自检）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "target/x86_64-pc-windows-msvc/release"
+          foreach ($bin in @("rscross-console", "rscross-server", "rscross-client")) {
+            $exe = Join-Path $out "$bin.exe"
+            if (-not (Test-Path $exe)) { throw "缺少产物: $exe" }
+            & $exe --version
+            & $exe --print-default-config | Out-Null
+          }
+          $cfg = Join-Path $env:RUNNER_TEMP "smoke-server.toml"
+          $state = Join-Path $env:RUNNER_TEMP "smoke-state"
+          # `--check` 会打印内嵌前端自检结论，是「页面在不在二进制里」的直接证据
+          & (Join-Path $out "rscross-server.exe") --check --config $cfg --state-dir $state
+      - name: 冒烟二：真实启动控制台并请求首页 / app.js
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "target/x86_64-pc-windows-msvc/release"
+          $cfg = Join-Path $env:RUNNER_TEMP "run-server.toml"
+          $state = Join-Path $env:RUNNER_TEMP "run-state"
+          $log = Join-Path $env:RUNNER_TEMP "server.log"
+          $proc = Start-Process -FilePath (Join-Path $out "rscross-server.exe") `
+            -ArgumentList @("--embedded", "--config", $cfg, "--state-dir", $state, "--name", "smoke") `
+            -PassThru -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+
+          function Get-Status($url) {
+            try {
+              return (Invoke-WebRequest -Uri $url -TimeoutSec 3 -UseBasicParsing).StatusCode
+            } catch {
+              return 0
+            }
+          }
+
+          $ready = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            if ($proc.HasExited) { break }
+            if ((Get-Status "http://127.0.0.1:7800/api/v1/health") -eq 200) { $ready = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $ready) {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+            Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Last 40
+            Get-Content "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40
+            throw "控制台在 60 秒内未就绪"
+          }
+
+          $home = Invoke-WebRequest -Uri "http://127.0.0.1:7800/" -UseBasicParsing
+          Write-Host "首页: $($home.StatusCode) / $($home.Headers['Content-Type']) / $($home.Content.Length) 字节"
+          if ($home.StatusCode -ne 200 -or $home.Content -notmatch 'id="app"') {
+            throw "首页不是预期的 SPA HTML"
+          }
+
+          $js = Invoke-WebRequest -Uri "http://127.0.0.1:7800/app.js" -UseBasicParsing
+          Write-Host "app.js: $($js.StatusCode) / $($js.Headers['Content-Type']) / $($js.Content.Length) 字节"
+          if ($js.StatusCode -ne 200 -or $js.Content.Length -lt 1000) {
+            throw "app.js 不可用"
+          }
+
+          $css = Invoke-WebRequest -Uri "http://127.0.0.1:7800/app.css" -UseBasicParsing
+          Write-Host "app.css: $($css.StatusCode) / $($css.Content.Length) 字节"
+
+          # 缺失的静态资源必须是 404，而不是拿 HTML 冒充 JS
+          $missing = Get-Status "http://127.0.0.1:7800/nope.js"
+          if ($missing -ne 404) { throw "缺失静态资源应返回 404，实际 $missing" }
+
+          Stop-Process -Id $proc.Id -Force
+          Write-Host "Windows 版内嵌控制台可正常提供页面"
+      - name: 收集产物
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/rscross-*.exe" dist/
+          Get-ChildItem dist | Select-Object Name, Length | Format-Table
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rscross-x86_64-pc-windows-msvc
+          path: dist/rscross-*.exe
+          retention-days: 14
+
   e2e:
     name: end to end
     needs: build-musl

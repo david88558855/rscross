@@ -2,7 +2,9 @@ name: release
 
 # 发版流程（不要在分支推送上期望它跑）：
 #   git tag -a v0.1.0 -m "rscross v0.1.0" && git push origin v0.1.0
-# 产物：两个 musl 静态二进制 × 两个架构 + sha256 校验和。
+# 产物：① 两个 musl 静态二进制 × 两个架构（tar.gz）
+#       ② Windows x86_64 二进制（zip，本机可直接双击/命令行运行）
+#       ③ 各自的 sha256 校验和
 
 on:
   push:
@@ -81,9 +83,62 @@ jobs:
           name: release-${{ matrix.target }}
           path: dist/*
 
+  build-windows:
+    name: windows ${{ matrix.target }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: 构建
+        run: >
+          cargo build --release --target ${{ matrix.target }}
+          --bin rscross-console --bin rscross-server --bin rscross-client
+
+      - name: 打包与校验和
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ref = "${{ github.event.inputs.tag || github.ref_name }}"
+          $name = "rscross-$ref-${{ matrix.target }}"
+          $stage = "stage/$name"
+          New-Item -ItemType Directory -Force -Path $stage, dist | Out-Null
+          $out = "target/${{ matrix.target }}/release"
+          Copy-Item "$out/rscross-*.exe" $stage
+          Copy-Item README.md, LICENSE $stage -ErrorAction SilentlyContinue
+          # 顶层目录名即 $name，与 Linux 侧的 tar.gz 结构保持一致
+          Compress-Archive -Path $stage -DestinationPath "dist/$name.zip" -Force
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
+          Get-ChildItem dist | Select-Object Name, Length | Format-Table
+
+      - name: 冒烟（产物来自本次构建，非开发目录）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "target/${{ matrix.target }}/release"
+          foreach ($bin in @("rscross-console", "rscross-server", "rscross-client")) {
+            & (Join-Path $out "$bin.exe") --version
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+
   publish:
     name: 创建 Release
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -108,9 +163,15 @@ jobs:
             echo
             echo "| 文件 | 说明 |"
             echo "|---|---|"
-            for f in artifacts/*.tar.gz; do
+            for f in artifacts/*.tar.gz artifacts/*.zip; do
+              [ -e "$f" ] || continue
               base="$(basename "$f")"
-              echo "| \`$base\` | musl 静态二进制（console + server + client） |"
+              case "$base" in
+                *.tar.gz) desc="Linux musl 静态二进制（console + server + client，无动态依赖）" ;;
+                *.zip)    desc="Windows x86_64 二进制（console + server + client，.exe）" ;;
+                *)        desc="产物" ;;
+              esac
+              echo "| \`$base\` | $desc |"
             done
             echo
             echo "### 校验"
@@ -131,6 +192,10 @@ jobs:
             echo "#      在控制台「服务端节点」页创建节点，复制命令到公网机器执行："
             echo "./rscross-server --managed --console http://<控制台IP>:7800 \\"
             echo "    --name node-1 --enroll-token <节点令牌>"
+            echo
+            echo "# Windows：解压后在 PowerShell 里本机自测"
+            echo ".\rscross-server.exe --embedded"
+            echo "#      浏览器打开 http://127.0.0.1:7800 ，首次密码打印在启动日志里"
             echo '```'
           } >> notes.md
           ls -lh artifacts/

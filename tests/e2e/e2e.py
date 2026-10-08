@@ -133,11 +133,15 @@ class EchoHandler(http.server.BaseHTTPRequestHandler):
 # --------------------------------------------------------------- 进程管理
 
 
+ALL_PROCS: list["Proc"] = []
+
+
 class Proc:
     """带日志文件的子进程包装。"""
 
     def __init__(self, label: str, binary: Path, args: list[str], log_path: Path):
         self.label = label
+        ALL_PROCS.append(self)
         self.log_path = log_path
         self._file = open(log_path, "wb")
         env = dict(os.environ)
@@ -179,6 +183,19 @@ class Proc:
         return code
 
 
+def dump_all() -> None:
+    dump(ALL_PROCS)
+
+
+def stop_all() -> None:
+    """兜底关停：异常路径也要把子进程收干净，否则 runner 上会留孤儿。"""
+    for proc in reversed(ALL_PROCS):
+        try:
+            proc.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def dump(procs: list[Proc]) -> None:
     print("\n" + "=" * 72, flush=True)
     print("诊断信息（失败时自动打印现场）", flush=True)
@@ -200,15 +217,33 @@ def login(base: str, password: str) -> str | None:
     return None
 
 
-def wait_console_ready(base: str, timeout: float = 60.0) -> bool:
-    ok, _ = wait_until(
-        "控制台就绪",
-        lambda: (lambda r: r[0] == 200 and r[1] and r[1].get("ok"))(
-            http_json("GET", base + "/api/v1/health", timeout=2)
-        ),
-        timeout=timeout,
-    )
-    return ok
+def health_ok(base: str) -> bool:
+    try:
+        status, payload = http_json("GET", base + "/api/v1/health", timeout=3)
+        return status == 200 and bool(payload) and bool(payload.get("ok"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def wait_console_ready(base: str, proc: "Proc | None" = None, timeout: float = 60.0) -> bool:
+    """等控制台就绪；顺带监视进程是否已经退出（否则只会看到 ConnectionRefused）。"""
+
+    def probe():
+        if proc is not None and not proc.alive():
+            raise RuntimeError(f"{proc.label} 已退出，退出码={proc.returncode()}")
+        status, payload = http_json("GET", base + "/api/v1/health", timeout=2)
+        return status == 200 and bool(payload) and bool(payload.get("ok"))
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if probe():
+                return True
+        except Exception:  # noqa: BLE001 - 轮询期任何异常都当作「还没好」
+            if proc is not None and not proc.alive():
+                return False
+        time.sleep(0.5)
+    return False
 
 
 def wait_node_online(base: str, token: str, name: str | None = None, timeout: float = 90.0):
@@ -494,15 +529,21 @@ def scenario_embedded(dist: Path, work: Path) -> None:
     procs.append(server)
 
     console_base = f"http://127.0.0.1:{console_port}"
-    if not check(f"{label}: 内嵌控制台可探活", wait_console_ready(console_base), console_base):
-        dump(procs)
+    ready = wait_console_ready(console_base, server)
+    check(f"{label}: 服务端进程仍在运行", server.alive(), f"退出码={server.returncode()}")
+    if not check(f"{label}: 内嵌控制台可探活", ready, console_base):
+        dump_all()
         for proc in procs:
             proc.stop()
         return
 
+    # 探活通过后立刻复测 3 次：区分「服务端根本没起来」与「起来后闪退」
+    flap = sum(1 for _ in range(3) if not health_ok(console_base))
+    check(f"{label}: 控制台探活稳定（复测 3 次）", flap == 0, f"失败 {flap}/3")
+
     token = login(console_base, "e2e-password-123")
     if not check(f"{label}: 可登录内嵌控制台", bool(token), console_base):
-        dump(procs)
+        dump_all()
         for proc in procs:
             proc.stop()
         return
@@ -616,15 +657,20 @@ def scenario_standalone(dist: Path, work: Path) -> None:
     procs.append(console)
 
     console_base = f"http://127.0.0.1:{console_port}"
-    if not check(f"{label}: 独立控制台可探活", wait_console_ready(console_base), console_base):
-        dump(procs)
+    ready = wait_console_ready(console_base, console)
+    check(f"{label}: 控制台进程仍在运行", console.alive(), f"退出码={console.returncode()}")
+    if not check(f"{label}: 独立控制台可探活", ready, console_base):
+        dump_all()
         for proc in procs:
             proc.stop()
         return
 
+    flap = sum(1 for _ in range(3) if not health_ok(console_base))
+    check(f"{label}: 控制台探活稳定（复测 3 次）", flap == 0, f"失败 {flap}/3")
+
     token = login(console_base, "e2e-password-456")
     if not check(f"{label}: 可登录独立控制台", bool(token), console_base):
-        dump(procs)
+        dump_all()
         for proc in procs:
             proc.stop()
         return
@@ -639,7 +685,7 @@ def scenario_standalone(dist: Path, work: Path) -> None:
     )
     if not check(f"{label}: 可在控制台创建节点并签发令牌",
                  status == 200 and created and created.get("node_token"), f"status={status}"):
-        dump(procs)
+        dump_all()
         for proc in procs:
             proc.stop()
         return
@@ -675,7 +721,7 @@ def scenario_standalone(dist: Path, work: Path) -> None:
 
     ok, node = wait_node_online(console_base, token, name="remote-node")
     if not check(f"{label}: 服务端以节点身份接入中央控制台", ok, str(node)):
-        dump(procs)
+        dump_all()
         for proc in reversed(procs):
             proc.stop()
         return
@@ -748,14 +794,22 @@ def main() -> int:
         f"rc={default_cfg.returncode}",
     )
 
-    scenario_embedded(dist, work)
-    scenario_standalone(dist, work)
+    try:
+        scenario_embedded(dist, work)
+        scenario_standalone(dist, work)
+    except Exception as err:  # noqa: BLE001 - e2e 必须给出可诊断的失败，而不是裸 traceback
+        check("e2e 脚本执行未抛异常", False, f"{type(err).__name__}: {err}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        stop_all()
 
     print("\n" + "=" * 72, flush=True)
     if FAILURES:
         print(f"失败 {len(FAILURES)}/{CHECKS} 项：", flush=True)
         for item in FAILURES:
             print("  - " + item, flush=True)
+        dump_all()
         return 1
     print(f"全部通过：{CHECKS}/{CHECKS}", flush=True)
     return 0

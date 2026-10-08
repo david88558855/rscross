@@ -35,6 +35,22 @@ import urllib.request
 from pathlib import Path
 
 CHECKS = 0
+
+# Windows 上产物带 .exe 后缀，其余平台没有。集中成一处，
+# 免得每个调用点各写一遍平台判断（漏一处就是「找不到二进制」）。
+EXE = ".exe" if os.name == "nt" else ""
+
+# Windows 没有 SIGTERM：优雅关停要靠给进程组发 CTRL_BREAK_EVENT。
+# 但它只有在子进程拥有控制台时才发得出去（例如在 mintty 里跑就没有），
+# 所以下面做了退化处理 —— 退化时退出码不会是 0，那是平台差异而非缺陷，
+# 断言必须能区分这两件事，否则本地跑 Windows 会看到一堆假失败。
+CTRL_BREAK = getattr(signal, "CTRL_BREAK_EVENT", None)
+NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
+
+def bin_path(dist: Path, name: str) -> Path:
+    """拼出产物路径（自动带上平台后缀）。"""
+    return dist / f"{name}{EXE}"
 FAILURES: list[str] = []
 
 
@@ -205,6 +221,7 @@ class Proc:
         self.label = label
         ALL_PROCS.append(self)
         self.log_path = log_path
+        self.graceful_supported = True
         self._file = open(log_path, "wb")
         env = dict(os.environ)
         env["RUST_BACKTRACE"] = "1"
@@ -214,6 +231,9 @@ class Proc:
             stderr=subprocess.STDOUT,
             env=env,
             cwd=str(log_path.parent),
+            # Windows 上单独开进程组：这样才能只给这一个子进程发 CTRL_BREAK，
+            # 而不是把 Ctrl+C 事件广播给整个进程组（那会连脚本自己一起带走）。
+            creationflags=NEW_PROCESS_GROUP,
         )
 
     def alive(self) -> bool:
@@ -233,16 +253,31 @@ class Proc:
 
     def stop(self) -> int | None:
         if self.proc.poll() is not None:
+            self._file.close()
             return self.proc.returncode
-        self.proc.send_signal(signal.SIGTERM)
+        self._request_shutdown()
         try:
             code = self.proc.wait(timeout=20)
         except subprocess.TimeoutExpired:
-            print(f"!! {self.label} 未在 20 秒内退出，发送 SIGKILL", flush=True)
+            print(f"!! {self.label} 未在 20 秒内退出，强制结束", flush=True)
             self.proc.kill()
             code = self.proc.wait(timeout=10)
         self._file.close()
         return code
+
+    def _request_shutdown(self) -> None:
+        """请求优雅退出；平台做不到时退化为强制结束，并记下这一点。"""
+        if os.name != "nt":
+            self.proc.send_signal(signal.SIGTERM)
+            return
+        try:
+            self.proc.send_signal(CTRL_BREAK)
+        except (OSError, ValueError) as err:
+            # 没有控制台可发信号（如 mintty 下运行）。
+            # 这时不能指望退出码为 0 —— 进程是被强制结束的。
+            self.graceful_supported = False
+            print(f"· {self.label}: 无法发送 CTRL_BREAK（{err}），改为强制结束", flush=True)
+            self.proc.terminate()
 
 
 def dump_all() -> None:
@@ -564,7 +599,7 @@ def check_private_tunnel(
     local_port = free_port()
     access = Proc(
         f"{label}/access",
-        dist / "rscross-client",
+        bin_path(dist, "rscross-client"),
         [
             "access",
             "--console",
@@ -602,7 +637,26 @@ def check_private_tunnel(
         print("      · 访问端日志（末尾 60 行）：", flush=True)
         print(access.tail(60), flush=True)
 
-    access.stop()
+    # 握手失败必须是**明确的原因**，而不是「连接断开」。
+    #
+    # 本地实测（Windows 真实二进制）发现的缺陷：节点拒绝密钥时写完应答就返回，
+    # 而 `accept()` 返回会关闭连接，尚未送达的应答被丢掉 —— 访问端只报
+    # 「读取节点应答失败: connection lost」。用户抄错密钥时看到的是网络错误，
+    # 完全指错方向。修复后拒绝分支会等对端读完再返回。
+    #
+    # 「首次握手就成功」时日志里本来也没有失败字样，所以这条断言不会因此变脆。
+    check(
+        f"{label}: 访问端握手失败时报的是明确原因而非连接断开",
+        "读取节点应答失败" not in access.log(),
+        access.tail(30),
+    )
+
+    code = access.stop()
+    check(
+        f"{label}: 访问端（access 子命令）收到退出信号后正常退出",
+        code == 0 or not access.graceful_supported,
+        f"退出码={code} 优雅信号可用={access.graceful_supported}",
+    )
     stop.set()
     echo.close()
 
@@ -928,7 +982,7 @@ def run_pipeline(
     )
     client = Proc(
         f"{label}/client",
-        dist / "rscross-client",
+        bin_path(dist, "rscross-client"),
         ["--config", str(client_cfg), "--enroll-token", enroll_token],
         work / "client.log",
     )
@@ -1037,7 +1091,7 @@ def scenario_embedded(dist: Path, work: Path) -> None:
     procs: list[Proc] = []
     server = Proc(
         f"{label}/server",
-        dist / "rscross-server",
+        bin_path(dist, "rscross-server"),
         ["--embedded", "--config", str(node_cfg), "--console-config", str(console_cfg)],
         work / "embedded" / "server.log",
     )
@@ -1156,7 +1210,14 @@ def scenario_embedded(dist: Path, work: Path) -> None:
     # 优雅退出
     for proc in reversed(procs):
         code = proc.stop()
-        check(f"{label}: {proc.label} 收到 SIGTERM 后正常退出", code == 0, f"退出码={code}")
+        # 退出码为 0 说明走的是程序自己的优雅关停路径。
+        # 平台发不出优雅信号时（Windows 无控制台，退化为强制结束）不要求 0 ——
+        # 但这一档要显式写出来，不能让「没优雅退出」静默通过。
+        check(
+            f"{label}: {proc.label} 收到退出信号后正常退出",
+            code == 0 or not proc.graceful_supported,
+            f"退出码={code} 优雅信号可用={proc.graceful_supported}",
+        )
 
 
 def scenario_standalone(dist: Path, work: Path) -> None:
@@ -1194,7 +1255,7 @@ def scenario_standalone(dist: Path, work: Path) -> None:
     procs: list[Proc] = []
     console = Proc(
         f"{label}/console",
-        dist / "rscross-console",
+        bin_path(dist, "rscross-console"),
         ["--config", str(console_cfg)],
         root / "console.log",
     )
@@ -1250,7 +1311,7 @@ def scenario_standalone(dist: Path, work: Path) -> None:
 
     server = Proc(
         f"{label}/server",
-        dist / "rscross-server",
+        bin_path(dist, "rscross-server"),
         [
             "--managed",
             "--config",
@@ -1301,7 +1362,14 @@ def scenario_standalone(dist: Path, work: Path) -> None:
 
     for proc in reversed(procs):
         code = proc.stop()
-        check(f"{label}: {proc.label} 收到 SIGTERM 后正常退出", code == 0, f"退出码={code}")
+        # 退出码为 0 说明走的是程序自己的优雅关停路径。
+        # 平台发不出优雅信号时（Windows 无控制台，退化为强制结束）不要求 0 ——
+        # 但这一档要显式写出来，不能让「没优雅退出」静默通过。
+        check(
+            f"{label}: {proc.label} 收到退出信号后正常退出",
+            code == 0 or not proc.graceful_supported,
+            f"退出码={code} 优雅信号可用={proc.graceful_supported}",
+        )
 
 
 # --------------------------------------------------------------- main
@@ -1324,7 +1392,7 @@ def scenario_default_port(dist: Path, work: Path) -> None:
 
     # ① 配置不存在时由程序按「中央控制台」默认值生成
     proc = subprocess.run(
-        [str(dist / "rscross-console"), "--check", "--config", str(console_cfg)],
+        [str(bin_path(dist, "rscross-console")), "--check", "--config", str(console_cfg)],
         capture_output=True, text=True, timeout=60,
     )
     check(
@@ -1348,7 +1416,7 @@ def scenario_default_port(dist: Path, work: Path) -> None:
 
     console = Proc(
         f"{label}/console",
-        dist / "rscross-console",
+        bin_path(dist, "rscross-console"),
         ["--config", str(console_cfg)],
         root / "console.log",
     )
@@ -1367,9 +1435,9 @@ def main() -> int:
 
     dist = Path(sys.argv[1]).resolve()
     binaries = {
-        "rscross-server": dist / "rscross-server",
-        "rscross-client": dist / "rscross-client",
-        "rscross-console": dist / "rscross-console",
+        "rscross-server": bin_path(dist, "rscross-server"),
+        "rscross-client": bin_path(dist, "rscross-client"),
+        "rscross-console": bin_path(dist, "rscross-console"),
     }
     for name, binary in binaries.items():
         if not binary.exists():

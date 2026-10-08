@@ -18,7 +18,7 @@ default = []
 http-client = ["dep:reqwest"]
 
 [dependencies]
-rscross-common = { workspace = true }
+rscross-common = { workspace = true, features = ["runtime"] }
 rscross-config = { workspace = true }
 rscross-store = { workspace = true }
 rscross-auth = { workspace = true }

@@ -134,12 +134,14 @@ pub async fn run(args: AccessArgs) -> Result<()> {
         "访问端已就绪：访问上面的地址即访问内网服务（Ctrl+C 退出）"
     );
 
-    // ---- 5. 接受本地连接（Ctrl+C 退出）----
+    // ---- 5. 接受本地连接（收到关停信号就退出）----
     let shutdown = CancellationToken::new();
     tokio::spawn({
         let token = shutdown.clone();
         async move {
-            let _ = tokio::signal::ctrl_c().await;
+            // 与常驻客户端共用同一份实现：Windows 上还要接住 Ctrl+Break /
+            // 控制台关闭 / 注销 / 关机，否则关窗口时进程会被强制结束。
+            rscross_common::signal::wait_for_shutdown().await;
             tracing::warn!("收到退出信号，正在关闭访问端");
             token.cancel();
         }

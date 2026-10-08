@@ -227,26 +227,10 @@ pub async fn ensure_initial_admin(store: &Store, cfg: &ConsoleFile) -> Result<()
 
 /// 等待 SIGINT / SIGTERM。
 pub async fn wait_for_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!(error = %err, "无法注册 SIGTERM 处理，仅监听 Ctrl+C");
-                let _ = tokio::signal::ctrl_c().await;
-                return;
-            }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
+    // 具体监听哪些信号由 common 决定：Windows 上除了 Ctrl+C 还要接住
+    // Ctrl+Break / 控制台关闭 / 注销 / 关机 —— 只监听 Ctrl+C 时，
+    // 「停止服务」「结束任务」「注销」都会变成强制结束，SQLite 来不及收尾。
+    rscross_common::signal::wait_for_shutdown().await;
 }
 
 #[cfg(test)]

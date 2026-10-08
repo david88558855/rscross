@@ -7,6 +7,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 跨平台「等待进程该退出了」的关停信号。
+///
+/// 由 `runtime` feature 启用；见模块文档里关于 Windows 为何不能只监听 Ctrl+C 的说明。
+#[cfg(feature = "runtime")]
+pub mod signal;
+
 /// 全工程统一 `Result`。
 pub type Result<T> = std::result::Result<T, Error>;
 

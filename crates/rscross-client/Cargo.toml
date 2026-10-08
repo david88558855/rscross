@@ -16,7 +16,7 @@ name = "rscross-client"
 path = "src/main.rs"
 
 [dependencies]
-rscross-common = { workspace = true }
+rscross-common = { workspace = true, features = ["runtime"] }
 rscross-config = { workspace = true }
 rscross-transport = { workspace = true }
 

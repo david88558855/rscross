@@ -558,7 +558,13 @@ impl AccessHandler {
             }
             None => AccessReply {
                 ok: false,
-                message: Some("访问密钥无效，或对应隧道已停用/删除".to_string()),
+                // 节点只查自己内存里的索引，无法区分「密钥抄错了」与
+                // 「隧道刚创建、控制面还没经心跳同步过来」。文案要把两种可能都说出来，
+                // 否则用户会以为是自己抄错了密钥。
+                message: Some(
+                    "本节点上没有这条隧道：访问密钥无效，或该隧道刚创建、尚未同步到本节点"
+                        .to_string(),
+                ),
                 ..Default::default()
             },
         };
@@ -569,6 +575,22 @@ impl AccessHandler {
         let _ = send.finish();
 
         let Some(entry) = entry else {
+            // 拒绝分支：**不能写完就 return**。
+            //
+            // `ProtocolHandler::accept` 返回意味着这条连接处理完毕，iroh 会把它关掉，
+            // 而刚写进发送缓冲的应答未必已经送达 —— 于是访问端读到的是一场
+            // 「connection lost」，用户抄错密钥时看到的是网络错误，而不是
+            // 「访问密钥无效」。等对端确认收完（或超时）再返回。
+            //
+            // 这条是本地实测（Windows 真实二进制）发现的：CI 的 e2e 之所以没暴露它，
+            // 是因为访问端有退避重试，第二次握手时节点已同步、走的是成功分支，
+            // 失败原因被重试盖住了。
+            if tokio::time::timeout(Duration::from_secs(5), send.stopped())
+                .await
+                .is_err()
+            {
+                tracing::debug!("等待访问端读完拒绝应答超时");
+            }
             tracing::warn!("访问端使用了无效的访问密钥");
             return Ok(());
         };
@@ -702,19 +724,39 @@ impl AccessSession {
                 Err(err) => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
+                        // 「密钥抄错」与「隧道还没同步到节点」在最终失败时仍无法区分
+                        // （节点只查自己那份索引），所以两种可能都列出来，
+                        // 并各给一个可执行的下一步。
+                        let hint = if matches!(&err, Error::Auth(_)) {
+                            "节点一直拒绝该密钥：请核对控制台里的访问密钥\
+                             （注意别把 0 抄成 O），并确认隧道对应的客户端在线"
+                        } else {
+                            "请确认节点可达、且客户端在线（隧道配置由客户端心跳触发下发）"
+                        };
                         return Err(Error::transport(format!(
-                            "与节点握手失败（重试 {attempt} 次、共 {} 秒）：{err}；\
-                             若隧道是刚创建的，请确认客户端在线且节点已收到该隧道",
+                            "与节点握手失败（重试 {attempt} 次、共 {} 秒）：{err}；{hint}",
                             timeout.as_secs()
                         )));
                     }
                     let delay = Duration::from_secs(3).min(remaining);
-                    tracing::warn!(
-                        error = %err,
-                        attempt,
-                        retry_in_secs = delay.as_secs(),
-                        "与节点握手失败，稍后重试"
-                    );
+                    // 节点**明确拒绝**与网络/时序问题要分开说：
+                    // 前者可能是密钥抄错，也可能是隧道刚创建还没同步到节点，
+                    // 而后者纯粹是等一下就好。用同一句话会把用户引向错误的方向。
+                    if matches!(&err, Error::Auth(_)) {
+                        tracing::warn!(
+                            error = %err,
+                            attempt,
+                            retry_in_secs = delay.as_secs(),
+                            "节点拒绝了本轮握手（密钥不正确，或隧道尚未同步到节点），稍后重试"
+                        );
+                    } else {
+                        tracing::warn!(
+                            error = %err,
+                            attempt,
+                            retry_in_secs = delay.as_secs(),
+                            "与节点握手失败，稍后重试"
+                        );
+                    }
                     tokio::time::sleep(delay).await;
                 }
             }

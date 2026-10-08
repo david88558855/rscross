@@ -779,26 +779,10 @@ fn init_tracing(cfg: &rscross_config::LogSection, sink: Arc<LogSink>) {
 }
 
 async fn wait_for_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!(error = %err, "无法注册 SIGTERM 处理，仅监听 Ctrl+C");
-                let _ = tokio::signal::ctrl_c().await;
-                return;
-            }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
+    // 与 control 共用同一份实现：Windows 上除了 Ctrl+C 还要接住
+    // Ctrl+Break / 控制台关闭 / 注销 / 关机。复制两份必然漂移，
+    // 而漂移的后果是「某个平台在某个进程里关不掉」。
+    rscross_common::signal::wait_for_shutdown().await;
 }
 
 #[cfg(test)]

@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -679,6 +679,46 @@ impl AccessSession {
             reply,
             tunnel_key,
         })
+    }
+
+    /// 带重试的握手。
+    ///
+    /// 隧道配置是控制面经心跳「拉」给节点的（默认 15 秒一次），所以
+    /// **「刚在控制台建完隧道就启动访问端」时，节点很可能还没拿到它** ——
+    /// 一次失败就退出会让人误以为密钥是错的（e2e 第一次跑就是这样失败的）。
+    /// 这里在 `timeout` 内退避重试，把「等一下就好」与「真的不对」区分开。
+    pub async fn connect_with_retry(
+        node: &P2pNode,
+        node_addr: &EndpointAddr,
+        access_key: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let deadline = Instant::now() + timeout;
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match Self::connect(node, node_addr, access_key).await {
+                Ok(session) => return Ok(session),
+                Err(err) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(Error::transport(format!(
+                            "与节点握手失败（重试 {attempt} 次、共 {} 秒）：{err}；\
+                             若隧道是刚创建的，请确认客户端在线且节点已收到该隧道",
+                            timeout.as_secs()
+                        )));
+                    }
+                    let delay = Duration::from_secs(3).min(remaining);
+                    tracing::warn!(
+                        error = %err,
+                        attempt,
+                        retry_in_secs = delay.as_secs(),
+                        "与节点握手失败，稍后重试"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
     }
 
     /// 节点的应答原文。

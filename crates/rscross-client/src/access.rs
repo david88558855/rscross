@@ -16,6 +16,13 @@ use std::time::Duration;
 use rscross_common::{Error, Result};
 use rscross_transport::{bridge_tcp_to_stream, decode_addr, AccessSession, P2pNode, P2pOptions};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
+
+/// 与节点握手的重试窗口（秒）。
+///
+/// 隧道配置经心跳下发（默认 15 秒一次），给到 90 秒足以跨过数个周期；
+/// 同时它也是「密钥真的不对」时用户需要等待的上限。
+const CONNECT_TIMEOUT_SECS: u64 = 90;
 
 use crate::api::ApiClient;
 
@@ -72,9 +79,15 @@ pub async fn run(args: AccessArgs) -> Result<()> {
     let node = P2pNode::bind(P2pOptions::from_section(&p2p_section, None)).await?;
     node.wait_online().await;
 
-    // ---- 4. 与节点握手 ----
+    // ---- 4. 与节点握手（带重试）----
     let node_addr = decode_addr(&resolved.node_endpoint)?;
-    let session = AccessSession::connect(&node, &node_addr, &args.key).await?;
+    let session = AccessSession::connect_with_retry(
+        &node,
+        &node_addr,
+        &args.key,
+        Duration::from_secs(CONNECT_TIMEOUT_SECS),
+    )
+    .await?;
 
     tracing::info!(
         listen = %listen,
@@ -83,15 +96,28 @@ pub async fn run(args: AccessArgs) -> Result<()> {
         "访问端已就绪：访问上面的地址即访问内网服务（Ctrl+C 退出）"
     );
 
-    // ---- 5. 接受本地连接 ----
+    // ---- 5. 接受本地连接（Ctrl+C 退出）----
+    let shutdown = CancellationToken::new();
+    tokio::spawn({
+        let token = shutdown.clone();
+        async move {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::warn!("收到退出信号，正在关闭访问端");
+            token.cancel();
+        }
+    });
+
     let direct_timeout = Duration::from_secs(args.direct_timeout_secs.max(1));
     loop {
-        let (tcp, peer) = match listener.accept().await {
-            Ok(pair) => pair,
-            Err(err) => {
-                tracing::warn!(error = %err, "接受本地连接失败");
-                continue;
-            }
+        let (tcp, peer) = tokio::select! {
+            _ = shutdown.cancelled() => break,
+            accepted = listener.accept() => match accepted {
+                Ok(pair) => pair,
+                Err(err) => {
+                    tracing::warn!(error = %err, "接受本地连接失败");
+                    continue;
+                }
+            },
         };
         let node = node.clone();
         let session = session.clone();
@@ -101,6 +127,13 @@ pub async fn run(args: AccessArgs) -> Result<()> {
             }
         });
     }
+
+    // 显式关闭 Iroh 节点：否则会打出
+    // 「Endpoint dropped without calling Endpoint::close. Aborting ungracefully.」
+    // 这条警告，看起来像出了故障，其实只是没优雅退出。
+    node.close().await;
+    tracing::info!("访问端已退出");
+    Ok(())
 }
 
 /// 处理一条本地连接：按会话模式选择直连或中继。

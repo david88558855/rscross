@@ -13,3 +13,7 @@
 *.py  text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+
+# PowerShell 脚本：仓库内保持 LF；文件自带 UTF-8 BOM，
+# 否则 Windows PowerShell 5.1 会按 ANSI 解码中文注释并报出假的语法错误
+*.ps1 text eol=lf

@@ -58,8 +58,17 @@
 
 ### 方式 B：单机自用
 
+先在**本机**跑通（无需公网、无需令牌，用于验证程序本身是否正常）：
+
+```powershell
+# Windows：解压 CI 产物 rscross-x86_64-pc-windows-msvc 后
+.\rscross-server.exe --embedded
+# 浏览器打开 http://127.0.0.1:7800
+# 首次启动的管理员密码打印在启动输出里（stderr）
+```
+
 ```bash
-# 公网机器：一个进程同时提供数据面与控制台
+# Linux：公网机器，一个进程同时提供数据面与控制台
 ./rscross-server --embedded --config rscross-server.toml
 ```
 
@@ -78,6 +87,8 @@
 ```
 
 再到「隧道列表」新建隧道指向内网服务的 `127.0.0.1:xxxx`，≤15 秒自动生效。
+
+> 从本机跑到公网访问打不开时，请对照[「浏览器打不开控制台？」](#浏览器打不开控制台按这个顺序查)排查。
 
 ### 方式 A：多节点汇聚
 
@@ -100,8 +111,8 @@
 
 **本仓库禁止本地编译**。所有验证与产物都在 GitHub Actions 完成：
 
-- 推送任意分支 → `.github/workflows/ci.yml`：`fmt → check → (test×8 | clippy | musl×2) → e2e`
-- 推送 `v*` tag → `.github/workflows/release.yml`：两个架构三个二进制的 `.tar.gz` + sha256 + Release
+- 推送任意分支 → `.github/workflows/ci.yml`：`fmt → check → (test×8 | clippy | musl×2 | windows) → e2e`
+- 推送 `v*` tag → `.github/workflows/release.yml`：Linux musl ×2 架构 + Windows x86_64 的二进制包与 sha256 + Release
 
 `e2e` 会用**真实二进制**把两种部署形态各跑一遍完整链路。
 

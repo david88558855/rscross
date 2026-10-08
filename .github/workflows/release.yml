@@ -130,6 +130,8 @@ jobs:
           foreach ($bin in @("rscross-console", "rscross-server", "rscross-client")) {
             & (Join-Path $out "$bin.exe") --version
           }
+          # 真实启动一次，确认发布包里的页面确实能打开
+          pwsh -NoProfile -File ./tests/e2e/smoke-windows.ps1 -Dist $out -Port 7800
 
       - uses: actions/upload-artifact@v4
         with:

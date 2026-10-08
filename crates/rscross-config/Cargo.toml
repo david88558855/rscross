@@ -12,3 +12,5 @@ rscross-common = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+# 生成随机 token（`random_token_hex`）
+rand = { workspace = true }

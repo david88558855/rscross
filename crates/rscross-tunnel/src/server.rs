@@ -161,9 +161,10 @@ impl HubServer {
     /// 处理一条新连接
     async fn handle_conn(
         self: Arc<Self>,
-        stream: TcpStream,
+        mut stream: TcpStream,
         peer: SocketAddr,
     ) -> Result<(), String> {
+        tracing::debug!(%peer, "新连接");
         // 首包必须是登录请求（登录阶段尚未拆分流，直接用 &mut stream）
         let login = match msg::read_message(&mut stream).await? {
             Some(env) if env.msg_type == msg_type::LOGIN => {
@@ -688,8 +689,8 @@ pub async fn read_exact_n(stream: &mut TcpStream, n: usize) -> std::io::Result<V
 }
 
 /// 立即关闭流
-pub async fn close_stream(stream: &TcpStream) {
-    let _ = tokio::net::TcpStream::shutdown(stream).await;
+pub async fn close_stream(stream: &mut TcpStream) {
+    let _ = stream.shutdown().await;
 }
 
 /// 生成 map 快照

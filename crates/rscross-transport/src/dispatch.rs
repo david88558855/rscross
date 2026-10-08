@@ -31,7 +31,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::p2p::{
-    encode_addr, read_stream_key, write_stream_key, P2pNode, P2pStream, MAX_STREAM_KEY_BYTES,
+    decode_addr, encode_addr, read_stream_key, write_stream_key, P2pNode, P2pStream,
+    MAX_STREAM_KEY_BYTES,
 };
 
 /// 访问端 ALPN。

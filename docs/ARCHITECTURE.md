@@ -34,6 +34,10 @@ rscross 把系统拆成三个角色，**同一个控制面代码服务两种部�
                       … N 个节点，每个节点承载若干客户端
 ```
 
+> 端口约定：**独立中央控制台默认 7700**，**内嵌控制台默认 7800**。
+> 两种形态可能同时存在于一台机器（先内嵌自测、再起中央控制台），端口分开既不抢占，
+> 也让人从地址栏就能判断连的是哪一套。
+
 ### 方式 B：单机内嵌（自用）
 
 ```
@@ -96,11 +100,11 @@ rscross 把系统拆成三个角色，**同一个控制面代码服务两种部�
 
 ```
 ① 控制台签发节点令牌 rsn_xxx  →  在公网机器执行：
-     rscross-server --managed --console http://<ctrl>:7800 --enroll-token rsn_xxx
+     rscross-server --managed --console http://<ctrl>:7700 --enroll-token rsn_xxx
 ② 节点注册：POST /api/v1/node/enroll          → 拿到 tunnel_token（FerroTunnel 握手凭证）
 ③ 节点心跳：POST /api/v1/node/heartbeat       → 上报 EndpointId / 隧道端口 / 出口 IP
 ④ 控制台签发客户端令牌 rse_xxx → 在内网机器执行：
-     rscross-client --console http://<ctrl>:7800 --enroll-token rse_xxx
+     rscross-client --console http://<ctrl>:7700 --enroll-token rse_xxx
 ⑤ 客户端注册：POST /api/v1/agent/enroll       → 拿到 agent_token + 归属节点坐标
                                                 （tunnel_server / tunnel_token / EndpointAddr）
 ⑥ 客户端心跳：POST /api/v1/agent/heartbeat    → 拉取期望隧道，收敛本地 FerroTunnel 客户端

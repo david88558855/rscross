@@ -8,7 +8,7 @@ pub mod nodes;
 
 use axum::routing::{get, patch, post};
 use axum::Router;
-use rscross_common::DesiredTunnel;
+use rscross_common::{DesiredTunnel, TunnelKind};
 use rscross_store::TunnelRecord;
 
 use crate::console;
@@ -66,6 +66,10 @@ pub fn router() -> Router<AppState> {
             "/api/v1/tunnels/{id}",
             patch(client::patch_tunnel).delete(client::delete_tunnel),
         )
+        .route(
+            "/api/v1/tunnels/{id}/access-key",
+            post(client::rotate_access_key),
+        )
         // 审计 / 日志 / 配置
         .route("/api/v1/logs", get(misc::logs))
         .route("/api/v1/audit", get(misc::audit_log))
@@ -96,14 +100,28 @@ pub fn desired_tunnels(records: Vec<TunnelRecord>) -> Vec<DesiredTunnel> {
                 tracing::warn!(tunnel = %t.name, proto = %t.proto, "隧道协议无法识别，跳过下发");
                 return None;
             };
+            let kind = TunnelKind::parse(&t.kind).unwrap_or_default();
+            // 私有 / P2P 隧道没有密钥就无法校验来访者，宁可不下发也不要下发一条
+            // 「看起来在跑、实际谁都连不上」的隧道。
+            if kind.needs_access_key() && t.access_key.as_deref().unwrap_or("").is_empty() {
+                tracing::warn!(
+                    tunnel = %t.name,
+                    kind = %kind,
+                    "隧道缺少访问密钥，跳过下发（可在控制台重新签发）"
+                );
+                return None;
+            }
             Some(DesiredTunnel {
                 id: t.id,
                 name: t.name,
+                kind,
                 proto,
                 local_addr: t.local_addr,
                 remote_port: t.remote_port.and_then(|p| u16::try_from(p).ok()),
                 host: t.host,
                 path_prefix: t.path_prefix,
+                access_key: t.access_key,
+                allow_relay: t.allow_relay,
                 enabled: t.enabled,
                 rate_limit_kbps: u32::try_from(t.rate_limit_kbps.max(0)).unwrap_or(0),
                 conn_limit: u32::try_from(t.conn_limit.max(0)).unwrap_or(0),

@@ -62,6 +62,8 @@ impl Default for ConsoleSection {
     fn default() -> Self {
         Self {
             name: "rscross-console".to_string(),
+            // 内嵌控制台（`rscross-server --embedded`）的默认端口。
+            // 独立中央控制台走 `ConsoleFile::central_default`，默认 7700。
             bind: format!("0.0.0.0:{}", rscross_common::DEFAULT_CONSOLE_PORT),
             public_url: None,
             heartbeat_secs: rscross_common::DEFAULT_HEARTBEAT_SECS,
@@ -261,14 +263,44 @@ impl ConsoleFile {
         load_toml(path)
     }
 
-    /// 加载并校验；文件不存在时用默认值创建。
+    /// 加载并校验；文件不存在时用默认值创建（内嵌控制台，默认端口 7800）。
     pub fn load_or_init(path: impl AsRef<Path>) -> Result<Self> {
         load_or_init_toml(path, "控制台", |cfg: &Self| cfg.validate())
+    }
+
+    /// 中央控制台（独立 `rscross-console` 进程）的默认配置：默认端口 7700。
+    ///
+    /// 为什么与内嵌分两个端口：两种形态可能同时跑在一台机器上（先用内嵌自测，
+    /// 再起一个中央控制台汇聚多节点），共用端口会互相抢占；而且从端口号就能
+    /// 一眼看出浏览器连的是哪一套控制台。
+    pub fn central_default() -> Self {
+        let mut cfg = Self::default();
+        cfg.console.bind = format!(
+            "0.0.0.0:{}",
+            rscross_common::DEFAULT_CENTRAL_CONSOLE_PORT
+        );
+        cfg
+    }
+
+    /// 独立中央控制台：加载并校验；文件不存在时按 [`Self::central_default`] 创建。
+    pub fn load_or_init_central(path: impl AsRef<Path>) -> Result<Self> {
+        load_or_init_toml_with(path, "中央控制台", Self::central_default, |cfg: &Self| {
+            cfg.validate()
+        })
     }
 
     /// 写回文件。
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         write_toml(self, path)
+    }
+
+    /// 本控制台实际对外开放的端口（`0.0.0.0:7700` → 7700）。
+    pub fn bind_port(&self) -> Option<u16> {
+        self.console
+            .bind
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|addr| addr.port())
     }
 }
 
@@ -770,11 +802,29 @@ where
     T: serde::de::DeserializeOwned + Serialize + Default,
     F: FnOnce(&T) -> Result<()>,
 {
+    load_or_init_toml_with(path, label, T::default, validate)
+}
+
+/// 同 [`load_or_init_toml`]，但默认值由调用方给出。
+///
+/// 存在意义：同一个 `ConsoleFile` 结构要服务两种形态，默认端口不同
+/// （内嵌 7800 / 中央控制台 7700），不能都靠 `Default::default()`。
+fn load_or_init_toml_with<T, D, F>(
+    path: impl AsRef<Path>,
+    label: &str,
+    default: D,
+    validate: F,
+) -> Result<T>
+where
+    T: serde::de::DeserializeOwned + Serialize,
+    D: FnOnce() -> T,
+    F: FnOnce(&T) -> Result<()>,
+{
     let path = path.as_ref();
     let cfg = if path.exists() {
         load_toml(path)?
     } else {
-        let cfg = T::default();
+        let cfg = default();
         write_toml(&cfg, path)?;
         tracing::info!(path = %path.display(), label, "已生成默认配置");
         cfg
@@ -908,5 +958,58 @@ bind = "127.0.0.1:7800"
         cfg.tunnels.push(TunnelDecl::tcp("a", "127.0.0.1:1"));
         cfg.tunnels.push(TunnelDecl::tcp("a", "127.0.0.1:2"));
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn console_and_central_console_use_different_default_ports() {
+        // 内嵌控制台（服务端自带）保持 7800
+        let embedded = ConsoleFile::default();
+        assert_eq!(
+            embedded.bind_port(),
+            Some(rscross_common::DEFAULT_CONSOLE_PORT)
+        );
+        assert_eq!(embedded.bind_port(), Some(7800));
+
+        // 独立中央控制台默认 7700
+        let central = ConsoleFile::central_default();
+        assert_eq!(
+            central.bind_port(),
+            Some(rscross_common::DEFAULT_CENTRAL_CONSOLE_PORT)
+        );
+        assert_eq!(central.bind_port(), Some(7700));
+        assert!(central.validate().is_ok());
+
+        // 两者只差端口，其余默认值必须一致，否则会出现「换个形态配置就变」的错觉
+        assert_eq!(central.console.heartbeat_secs, embedded.console.heartbeat_secs);
+        assert_eq!(central.ingress.port_range, embedded.ingress.port_range);
+        assert_eq!(central.limits, embedded.limits);
+    }
+
+    #[test]
+    fn load_or_init_central_writes_7700_and_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!(
+            "rscross-cfg-{}-{}",
+            std::process::id(),
+            rscross_common::time::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        let path = dir.join("rscross-console.toml");
+
+        let created = ConsoleFile::load_or_init_central(&path).expect("首次应生成默认配置");
+        assert_eq!(created.bind_port(), Some(7700));
+        let text = std::fs::read_to_string(&path).expect("读回");
+        assert!(text.contains("7700"), "生成的配置里应写明 7700：{text}");
+        assert!(!text.contains("7800"), "中央控制台配置不应出现内嵌端口 7800");
+
+        // 已存在时按文件读，不再覆盖
+        let again = ConsoleFile::load_or_init_central(&path).expect("二次加载");
+        assert_eq!(again.console.bind, created.console.bind);
+
+        // 内嵌路径仍然是 7800
+        let embedded_path = dir.join("console.toml");
+        let embedded = ConsoleFile::load_or_init(&embedded_path).expect("内嵌默认配置");
+        assert_eq!(embedded.bind_port(), Some(7800));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

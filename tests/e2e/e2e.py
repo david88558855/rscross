@@ -81,6 +81,35 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+def port_is_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def toml_value(text: str, section: str, key: str):
+    """从 --print-default-config 的输出里取 [section] 下某个字符串键。
+
+    只处理本仓库自己生成的那几行，不引入 TOML 依赖。
+    """
+    current = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line.strip("[]")
+            continue
+        if current == section and "=" in line:
+            name, _, value = line.partition("=")
+            if name.strip() == key:
+                return value.strip().strip('"')
+    return None
+
+
 def http_json(method: str, url: str, body=None, token: str | None = None, timeout: float = 10.0):
     """返回 (status, parsed_json_or_text)。"""
     data = json.dumps(body).encode() if body is not None else None
@@ -432,6 +461,145 @@ secret_key_file = "{(state_dir / 'node.key').as_posix()}"
     )
 
 
+def check_tunnel_kinds(label: str, base: str, token: str, client_id: str) -> None:
+    """四类隧道的创建、字段组合、访问密钥与非法组合拦截。
+
+    这一组断言的价值在于：分类不只是界面上的分组，它决定了「入口形态 + 必填字段」，
+    所以 P2P 填 UDP、域名解析填 TCP、私有隧道填公网端口这些组合必须被挡在服务端，
+    否则客户端会拿到一条自相矛盾的配置。
+    """
+
+    def create(body):
+        return http_json("POST", f"{base}/api/v1/clients/{client_id}/tunnels", body, token=token)
+
+    # --- 域名解析：HTTP 家族 + Host，不占公网端口
+    status, domain = create({
+        "kind": "domain",
+        "name": "e2e-domain",
+        "proto": "http",
+        "local_addr": "127.0.0.1:8080",
+        "host": "e2e-domain.local",
+    })
+    check(
+        f"{label}: 可创建「域名解析」隧道",
+        status == 200 and (domain or {}).get("kind") == "domain",
+        f"status={status} {str(domain)[:140]}",
+    )
+    check(
+        f"{label}: 域名解析按 Host 路由且不占公网端口",
+        (domain or {}).get("host") == "e2e-domain.local" and not (domain or {}).get("remote_port"),
+        str(domain)[:160],
+    )
+
+    # --- 端口转发：TCP + 自动分配端口
+    status, port = create({
+        "kind": "port",
+        "name": "e2e-port",
+        "proto": "tcp",
+        "local_addr": "127.0.0.1:5432",
+    })
+    check(
+        f"{label}: 可创建「端口转发」隧道并自动分配公网端口",
+        status == 200 and isinstance((port or {}).get("remote_port"), int)
+        and (port or {}).get("remote_port", 0) > 0,
+        f"status={status} remote_port={(port or {}).get('remote_port')}",
+    )
+
+    # --- 私有隧道：签发访问密钥，不暴露公网端口
+    status, priv = create({
+        "kind": "private",
+        "name": "e2e-private",
+        "proto": "tcp",
+        "local_addr": "127.0.0.1:3306",
+    })
+    key = (priv or {}).get("access_key") or ""
+    check(
+        f"{label}: 私有隧道自动签发访问密钥",
+        status == 200 and key.startswith("rsv_") and len(key) > 20,
+        f"status={status} key={key[:12]}",
+    )
+    check(
+        f"{label}: 私有隧道不暴露公网入口",
+        not (priv or {}).get("remote_port") and not (priv or {}).get("host"),
+        str(priv)[:160],
+    )
+
+    # --- P2P 隧道：仅 TCP + 中继回退开关
+    status, p2p = create({
+        "kind": "p2p",
+        "name": "e2e-p2p",
+        "proto": "tcp",
+        "local_addr": "127.0.0.1:6379",
+        "allow_relay": False,
+    })
+    check(
+        f"{label}: 可创建「P2P 隧道」并关闭中继回退",
+        status == 200
+        and (p2p or {}).get("allow_relay") is False
+        and ((p2p or {}).get("access_key") or "").startswith("rsv_"),
+        f"status={status} {str(p2p)[:140]}",
+    )
+
+    # --- 非法组合必须被服务端拦下
+    status, _ = create({"kind": "p2p", "name": "bad-p2p", "proto": "udp", "local_addr": "127.0.0.1:1"})
+    check_eq(f"{label}: P2P 隧道拒绝 UDP（仅支持 TCP）", 400, status)
+
+    status, _ = create({"kind": "domain", "name": "bad-domain", "proto": "tcp", "local_addr": "127.0.0.1:1"})
+    check_eq(f"{label}: 域名解析拒绝 TCP 协议", 400, status)
+
+    status, _ = create({
+        "kind": "private",
+        "name": "bad-private",
+        "proto": "tcp",
+        "local_addr": "127.0.0.1:1",
+        "remote_port": 25000,
+    })
+    check_eq(f"{label}: 私有隧道拒绝填公网端口（避免误解为暴露端口）", 400, status)
+
+    status, _ = create({"kind": "nope", "name": "bad-kind", "proto": "tcp", "local_addr": "127.0.0.1:1"})
+    check_eq(f"{label}: 未知分类被拒", 400, status)
+
+    # --- 老调用方式（不带 kind）按协议推导，保持向后兼容
+    status, legacy = create({
+        "name": "e2e-legacy",
+        "proto": "http",
+        "local_addr": "127.0.0.1:8080",
+        "host": "e2e-legacy.local",
+    })
+    check(
+        f"{label}: 不带 kind 的老调用按协议推导为域名解析",
+        status == 200 and (legacy or {}).get("kind") == "domain",
+        f"status={status} kind={(legacy or {}).get('kind')}",
+    )
+
+    # --- 访问密钥轮换
+    if (priv or {}).get("id"):
+        status, rotated = http_json(
+            "POST", f"{base}/api/v1/tunnels/{priv['id']}/access-key", None, token=token
+        )
+        new_key = (rotated or {}).get("access_key") or ""
+        check(
+            f"{label}: 可轮换访问密钥且新旧不同",
+            status == 200 and new_key.startswith("rsv_") and new_key != key,
+            f"status={status}",
+        )
+
+    if (domain or {}).get("id"):
+        status, _ = http_json(
+            "POST", f"{base}/api/v1/tunnels/{domain['id']}/access-key", None, token=token
+        )
+        check_eq(f"{label}: 域名解析没有访问密钥，轮换被拒", 400, status)
+
+    # --- 列表里必须带分类字段，前端靠它分 Tab
+    status, all_tunnels = http_json("GET", f"{base}/api/v1/tunnels", token=token)
+    kinds = {t.get("kind") for t in (all_tunnels or [])}
+    check(
+        f"{label}: 隧道列表按分类返回 kind 字段",
+        status == 200 and {"domain", "port", "private", "p2p"} <= kinds,
+        str(sorted(k for k in kinds if k)),
+    )
+
+
 def run_pipeline(
     dist: Path,
     work: Path,
@@ -651,6 +819,15 @@ def scenario_embedded(dist: Path, work: Path) -> None:
         probe_p2p_ok=True,
     )
 
+    # 隧道的四种分类（域名解析 / 端口转发 / 私有隧道 / P2P 隧道）
+    status, clients_now = http_json("GET", console_base + "/api/v1/clients", token=token)
+    if check(
+        f"{label}: 可取到客户端用于隧道分类验证",
+        status == 200 and bool(clients_now),
+        str(clients_now)[:120],
+    ):
+        check_tunnel_kinds(label, console_base, token, clients_now[0]["id"])
+
     # 概览与日志
     status, overview = http_json("GET", console_base + "/api/v1/overview", token=token)
     check(
@@ -836,6 +1013,59 @@ def scenario_standalone(dist: Path, work: Path) -> None:
 # --------------------------------------------------------------- main
 
 
+def scenario_default_port(dist: Path, work: Path) -> None:
+    """两种控制台的默认端口必须分开：独立 7700，内嵌 7800。
+
+    「端口对不上号」是排障里最高频的一类误解，所以这里既检查生成的配置内容，
+    也真的把独立控制台拉起来（不传 --bind）确认它落在 7700。
+    """
+    label = "默认端口"
+    print("\n" + "-" * 72, flush=True)
+    print(f"场景：{label} —— 独立中央控制台不传 --bind 时监听 7700", flush=True)
+    print("-" * 72, flush=True)
+
+    root = work / "default-port"
+    root.mkdir(parents=True, exist_ok=True)
+    console_cfg = root / "rscross-console.toml"
+
+    # ① 配置不存在时由程序按「中央控制台」默认值生成
+    proc = subprocess.run(
+        [str(dist / "rscross-console"), "--check", "--config", str(console_cfg)],
+        capture_output=True, text=True, timeout=60,
+    )
+    check(
+        f"{label}: 独立控制台 --check 通过",
+        proc.returncode == 0,
+        (proc.stdout + proc.stderr).strip()[-200:],
+    )
+    written = console_cfg.read_text(encoding="utf-8") if console_cfg.exists() else ""
+    check(f"{label}: 生成的配置默认端口是 7700", "7700" in written, written[:200])
+    check(f"{label}: 生成的配置里不含 7800（那是内嵌端口）", "7800" not in written, written[:200])
+    check(
+        f"{label}: --check 顺带报告了内嵌前端自检",
+        "前端资源" in proc.stdout,
+        proc.stdout.strip()[-160:],
+    )
+
+    # ② 真的拉起来：不传 --bind，应当监听 7700 且能提供页面
+    if not port_is_free(7700):
+        check(f"{label}: 7700 端口可用", False, "端口被占用，跳过真实监听断言")
+        return
+
+    console = Proc(
+        f"{label}/console",
+        dist / "rscross-console",
+        ["--config", str(console_cfg)],
+        root / "console.log",
+    )
+    base = "http://127.0.0.1:7700"
+    ready = wait_console_ready(base, console)
+    check(f"{label}: 默认端口 7700 上可探活", ready, base)
+    if ready:
+        check_web_console(label, base)
+    console.stop()
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print("用法: python3 tests/e2e/e2e.py <二进制目录>", file=sys.stderr)
@@ -870,9 +1100,29 @@ def main() -> int:
         f"rc={default_cfg.returncode}",
     )
 
+    # 默认端口：独立中央控制台 7700，内嵌控制台仍是 7800（刻意分开，见 README）
+    console_default = subprocess.run(
+        [str(binaries["rscross-console"]), "--print-default-config"],
+        capture_output=True, text=True, timeout=30,
+    )
+    check(
+        "独立控制台可打印默认配置",
+        console_default.returncode == 0 and "[console]" in console_default.stdout,
+        f"rc={console_default.returncode}",
+    )
+    bind = toml_value(console_default.stdout, "console", "bind")
+    check("独立中央控制台默认端口是 7700", bind == "0.0.0.0:7700", f"bind={bind!r}")
+    embedded_url = toml_value(default_cfg.stdout, "node", "console_url")
+    check(
+        "内嵌控制台默认地址仍是 7800",
+        bool(embedded_url) and embedded_url.endswith(":7800"),
+        f"console_url={embedded_url!r}",
+    )
+
     try:
         scenario_embedded(dist, work)
         scenario_standalone(dist, work)
+        scenario_default_port(dist, work)
     except Exception as err:  # noqa: BLE001 - e2e 必须给出可诊断的失败，而不是裸 traceback
         check("e2e 脚本执行未抛异常", False, f"{type(err).__name__}: {err}")
         import traceback

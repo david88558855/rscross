@@ -22,6 +22,8 @@
     logsAuto: true,
     logLevel: '',
     logKeyword: '',
+    // 隧道管理当前选中的分类（域名解析 / 端口转发 / 私有隧道 / P2P 隧道）
+    tunnelTab: 'domain',
   };
 
   // ------------------------------------------------------------ 基础工具
@@ -137,6 +139,79 @@
     return c ? c.name : '(已删除)';
   }
 
+
+  // ------------------------------------------------------------ 隧道分类
+
+  // 与后端 `rscross_common::TunnelKind` 一一对应。
+  //
+  // `ready` 如实标注数据面状态：目前只有「域名解析」的入口是现成的
+  // （FerroTunnel 自带 HTTP 入口，按 Host 路由到客户端）。其余三类需要
+  // 节点侧自建 ingress 或访问端运行模式，尚未接入 —— 界面必须说清楚，
+  // 「建完发现不通」比没有这个入口更让人困惑。
+  const TUNNEL_KINDS = [
+    {
+      key: 'domain', label: '域名解析', ico: '◈', ready: true, protos: ['http', 'https'],
+      desc: '公网域名指向内网服务，按 Host 路由，走节点的 HTTP 入口。',
+    },
+    {
+      key: 'port', label: '端口转发', ico: '⇄', ready: false, protos: ['tcp', 'udp'],
+      desc: '节点的公网端口转发到内网服务，适合数据库、SSH 这类非 HTTP 场景。',
+    },
+    {
+      key: 'private', label: '私有隧道', ico: '⊘', ready: false, protos: ['tcp', 'udp'],
+      desc: '不暴露公网端口：访问端凭访问密钥在自己那边监听，流量经节点转发。',
+    },
+    {
+      key: 'p2p', label: 'P2P 隧道', ico: '⇉', ready: false, protos: ['tcp'],
+      desc: '同私有隧道，但优先点对点直连；直连成功不占服务端带宽，仅支持 TCP。',
+    },
+  ];
+
+  function tunnelKindMeta(kind) {
+    const key = kind || 'port';
+    return TUNNEL_KINDS.find((k) => k.key === key) || TUNNEL_KINDS[1];
+  }
+
+  function protoLabel(proto) {
+    const map = {
+      http: 'HTTP（按 Host 路由）',
+      https: 'HTTPS',
+      tcp: 'TCP',
+      udp: 'UDP',
+    };
+    return map[proto] || String(proto).toUpperCase();
+  }
+
+  function maskKey(key) {
+    return key && key.length > 14 ? key.slice(0, 10) + '…' + key.slice(-4) : (key || '');
+  }
+
+  // 控制台常跑在 http://<ip>:7800（非安全上下文），clipboard API 不可用，
+  // 因此必须保留 execCommand 兜底，否则复制密钥这个动作在真机上直接失效。
+  function copyText(value, okMessage) {
+    const done = () => toast(okMessage || '已复制到剪贴板', 'ok');
+    const fallback = () => {
+      const area = document.createElement('textarea');
+      area.value = value;
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      try {
+        document.execCommand('copy');
+        done();
+      } catch (err) {
+        toast('复制失败，请手动选中后复制', 'err');
+      }
+      area.remove();
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(value).then(done).catch(fallback);
+    } else {
+      fallback();
+    }
+  }
+
   // ------------------------------------------------------------ 页面骨架
 
   const NAV = [
@@ -144,8 +219,9 @@
     { key: 'dashboard', label: '仪表盘', ico: '▤' },
     { group: '资源' },
     { key: 'nodes', label: '服务端节点', ico: '⛁' },
-    { key: 'tunnels', label: '隧道列表', ico: '⇄' },
     { key: 'clients', label: '客户端管理', ico: '▣' },
+    // 隧道管理紧跟客户端管理：隧道的归属就是客户端，动线是「先接客户端，再配隧道」
+    { key: 'tunnels', label: '隧道管理', ico: '⇄' },
     { key: 'logs', label: '日志', ico: '≡' },
     { group: '系统' },
     { key: 'settings', label: '配置', ico: '⚙' },
@@ -339,7 +415,8 @@
             '<li>' + (state.embedded ? '本进程已内嵌控制台' : '在「服务端节点」页创建一个节点') +
               '，拿到节点接入命令并在公网机器上执行。</li>' +
             '<li>在「客户端管理」页签发接入令牌，把生成的命令贴到内网机器上执行。</li>' +
-            '<li>在「隧道列表」新建隧道（HTTP 按 Host，TCP/UDP 按端口），客户端下一次心跳自动生效。</li>' +
+            '<li>在「隧道管理」新建隧道：<b>域名解析</b>把公网域名指向内网服务（当前可用）；' +
+            '端口转发 / 私有隧道 / P2P 隧道的数据面见该页的分类说明。</li>' +
           '</ol>' +
         '</div></div>' +
       '</div>';
@@ -390,7 +467,7 @@
       (state.embedded
         ? '<div class="card"><div class="card-body"><p class="muted mb0">' +
           '当前是<b>内嵌控制台</b>（单机自用）：服务端节点就是本进程，客户端直接把 <code>--console</code> 指向本控制台地址即可，' +
-          '在「客户端管理」与「隧道列表」里创建的配置会通过心跳下发到客户端。</p></div></div>'
+          '在「客户端管理」与「隧道管理」里创建的配置会通过心跳下发到客户端。</p></div></div>'
         : '<div class="card"><div class="card-body"><p class="muted mb0">' +
           '当前是<b>独立控制台</b>（多节点汇聚）：在这里创建的节点会拿到一条接入命令，' +
           '在公网机器上执行后即成为数据面节点；客户端则由令牌绑定到某个节点。</p></div></div>');
@@ -628,7 +705,7 @@
     };
   }
 
-  // ------------------------------------------------------------ 隧道列表
+  // ------------------------------------------------------------ 隧道管理
 
   async function renderTunnels() {
     const [tunnels, clients, nodes] = await Promise.all([
@@ -640,44 +717,47 @@
     state.clients = clients;
     state.nodes = nodes;
 
-    const rows = tunnels.length
-      ? tunnels.map((t) => {
-          const client = clients.find((x) => x.id === t.client_id);
-          return '' +
-            '<tr>' +
-              '<td>' + esc(t.name) + '</td>' +
-              '<td>' + protoTag(t.proto) + '</td>' +
-              '<td class="mono">' + esc(t.local_addr) + '</td>' +
-              '<td class="mono">' + esc(t.remote_port || t.host || '—') + '</td>' +
-              '<td>' + esc(client ? client.name : '(已删除)') + '</td>' +
-              '<td>' + nodeName(client ? client.node_id : null) + '</td>' +
-              '<td>' + (t.enabled
-                ? '<span class="tag ok"><i class="dot"></i>启用</span>'
-                : '<span class="tag bad"><i class="dot"></i>停用</span>') + '</td>' +
-              '<td class="nowrap">' + esc(t.rate_limit_kbps ? t.rate_limit_kbps + ' Kbps' : '不限') + '</td>' +
-              '<td class="right row-actions">' +
-                '<button class="sm" data-toggle="' + esc(t.id) + '" data-enabled="' + (t.enabled ? '1' : '0') + '">' +
-                  (t.enabled ? '停用' : '启用') + '</button>' +
-                '<button class="sm danger" data-del-tunnel="' + esc(t.id) + '" data-name="' + esc(t.name) + '">删除</button>' +
-              '</td>' +
-            '</tr>';
-        }).join('')
-      : '<tr><td colspan="9"><div class="empty">还没有隧道。先在「客户端管理」接入一个客户端，再为它创建隧道。</div></td></tr>';
+    const active = TUNNEL_KINDS.some((k) => k.key === state.tunnelTab) ? state.tunnelTab : 'domain';
+    state.tunnelTab = active;
+    const meta = tunnelKindMeta(active);
+    const mine = tunnels.filter((t) => (t.kind || 'port') === active);
+
+    const tabs = TUNNEL_KINDS.map((k) => {
+      const count = tunnels.filter((t) => (t.kind || 'port') === k.key).length;
+      return '<button class="tab' + (k.key === active ? ' active' : '') +
+        '" data-tab="' + k.key + '">' +
+        '<span class="tab-label">' + k.ico + ' ' + esc(k.label) + '</span>' +
+        '<span class="tab-count">' + count + '</span>' +
+        (k.ready ? '' : '<span class="tab-pending">待接入</span>') +
+        '</button>';
+    }).join('');
+
+    const notice = meta.ready ? '' :
+      '<div class="notice warn">' +
+        '<strong>' + esc(meta.label) + '的数据面尚未接入。</strong>' +
+        '配置会正常保存并下发到客户端，但本版本不会为它建立通道 —— ' +
+        '当前可以直接用的是「域名解析」。' +
+        '<div class="hint">' + esc(meta.desc) + '</div>' +
+      '</div>';
 
     const body = '' +
       '<div class="card"><div class="card-head">' +
-        '<h2>隧道（' + tunnels.length + '）</h2><div class="spacer"></div>' +
-        '<button class="primary sm" id="btn-new-tunnel">新建隧道</button>' +
-      '</div><div class="card-body tight"><table>' +
-        '<thead><tr><th>名称</th><th>协议</th><th>本地地址</th><th>公网入口</th>' +
-        '<th>客户端</th><th>服务端节点</th><th>状态</th><th>限速</th><th></th></tr></thead>' +
-        '<tbody>' + rows + '</tbody>' +
-      '</table></div></div>';
+        '<h2>隧道管理</h2><div class="spacer"></div>' +
+        '<button class="primary sm" id="btn-new-tunnel">新建' + esc(meta.label) + '</button>' +
+      '</div>' +
+      '<div class="tabs">' + tabs + '</div>' +
+      notice +
+      '<div class="card-body tight">' + renderTunnelTable(meta, mine, clients) + '</div>' +
+      '</div>';
 
-    document.body.innerHTML = shell('tunnels', '隧道列表', body);
+    document.body.innerHTML = shell('tunnels', '隧道管理', body);
     bindShell();
 
-    $('btn-new-tunnel').onclick = () => openTunnelModal(clients);
+    document.querySelectorAll('[data-tab]').forEach((el) => {
+      el.onclick = () => { state.tunnelTab = el.getAttribute('data-tab'); render(); };
+    });
+    $('btn-new-tunnel').onclick = () => openTunnelModal(meta, clients);
+
     document.querySelectorAll('[data-del-tunnel]').forEach((el) => {
       el.onclick = async () => {
         const name = el.getAttribute('data-name');
@@ -702,34 +782,139 @@
         } catch (err) { toast(err.message, 'err'); }
       };
     });
+    document.querySelectorAll('[data-rotate]').forEach((el) => {
+      el.onclick = async () => {
+        const name = el.getAttribute('data-name');
+        if (!confirm('轮换「' + name + '」的访问密钥？旧密钥会立即失效，访问端必须换新的。')) return;
+        try {
+          const updated = await api('/api/v1/tunnels/' + el.getAttribute('data-rotate') + '/access-key',
+            { method: 'POST' });
+          showAccessKey(updated, '访问密钥已轮换');
+        } catch (err) { toast(err.message, 'err'); }
+      };
+    });
+    document.querySelectorAll('[data-copy]').forEach((el) => {
+      el.onclick = () => copyText(el.getAttribute('data-copy'), '访问密钥已复制');
+    });
   }
 
-  function openTunnelModal(clients) {
-    if (!clients.length) { toast('请先接入一个客户端', 'err'); return; }
+  function renderTunnelTable(meta, list, clients) {
+    const head = ['名称', '协议', '本地地址'];
+    if (meta.key === 'domain') head.push('公网域名', '路径前缀');
+    if (meta.key === 'port') head.push('公网端口');
+    if (meta.key === 'private' || meta.key === 'p2p') head.push('访问密钥');
+    head.push('客户端', '服务端节点', '状态');
+    if (meta.key === 'port') head.push('限速');
+    if (meta.key === 'p2p') head.push('中继回退');
+    head.push('');
+
+    const rows = list.map((t) => {
+      const client = clients.find((x) => x.id === t.client_id);
+      const cells = [
+        esc(t.name),
+        protoTag(t.proto),
+        '<span class="mono">' + esc(t.local_addr) + '</span>',
+      ];
+      if (meta.key === 'domain') {
+        cells.push('<span class="mono">' + esc(t.host || '—') + '</span>');
+        cells.push(esc(t.path_prefix || '—'));
+      }
+      if (meta.key === 'port') {
+        cells.push('<span class="mono">' + esc(t.remote_port || '—') + '</span>');
+      }
+      if (meta.key === 'private' || meta.key === 'p2p') {
+        cells.push(t.access_key
+          ? '<span class="key-cell"><code class="mono">' + esc(maskKey(t.access_key)) + '</code>' +
+            '<button class="sm" data-copy="' + esc(t.access_key) + '">复制</button></span>'
+          : '<span class="muted">未签发</span>');
+      }
+      cells.push(esc(client ? client.name : '(已删除)'));
+      cells.push(nodeName(client ? client.node_id : null));
+      cells.push(t.enabled
+        ? '<span class="tag ok"><i class="dot"></i>启用</span>'
+        : '<span class="tag bad"><i class="dot"></i>停用</span>');
+      if (meta.key === 'port') {
+        cells.push(esc(t.rate_limit_kbps ? t.rate_limit_kbps + ' Kbps' : '不限'));
+      }
+      if (meta.key === 'p2p') {
+        cells.push(t.allow_relay
+          ? '<span class="tag info">允许</span>'
+          : '<span class="tag warn">禁止</span>');
+      }
+      const rotate = (meta.key === 'private' || meta.key === 'p2p')
+        ? '<button class="sm" data-rotate="' + esc(t.id) + '" data-name="' + esc(t.name) + '">轮换密钥</button>'
+        : '';
+      cells.push('<span class="nowrap row-actions">' + rotate +
+        '<button class="sm" data-toggle="' + esc(t.id) + '" data-enabled="' + (t.enabled ? '1' : '0') + '">' +
+          (t.enabled ? '停用' : '启用') + '</button>' +
+        '<button class="sm danger" data-del-tunnel="' + esc(t.id) + '" data-name="' + esc(t.name) + '">删除</button>' +
+        '</span>');
+      return '<tr>' + cells.map((c) => '<td>' + c + '</td>').join('') + '</tr>';
+    }).join('');
+
+    const empty = meta.key === 'domain'
+      ? '还没有域名解析。先在「客户端管理」接入一个客户端，再把它背后的 Web 服务挂到域名上。'
+      : '还没有' + meta.label + '。' + (meta.ready ? '' : '（该分类的数据面尚未接入，可先保存配置）');
+
+    const body = rows ||
+      '<tr><td colspan="' + head.length + '"><div class="empty">' + esc(empty) + '</div></td></tr>';
+
+    return '<table><thead><tr>' +
+      head.map((h) => '<th>' + h + '</th>').join('') +
+      '</tr></thead><tbody>' + body + '</tbody></table>';
+  }
+
+  function openTunnelModal(meta, clients) {
+    if (!clients.length) {
+      toast('请先在「客户端管理」接入一个客户端', 'err');
+      return;
+    }
 
     const options = clients.map((c) =>
       '<option value="' + esc(c.id) + '">' + esc(c.name) +
       (c.node_id ? '' : '（未分配节点）') + '</option>').join('');
 
+    const protoOptions = meta.protos.map((p) =>
+      '<option value="' + p + '">' + esc(protoLabel(p)) + '</option>').join('');
+
+    let fields = '';
+    fields += '<label class="field"><span>所属客户端</span><select id="t-client">' + options + '</select></label>';
+    fields += '<label class="field"><span>隧道名称</span><input id="t-name" placeholder="web" />' +
+      '<div class="hint">仅字母、数字、-、_、.，同一客户端内唯一。</div></label>';
+    fields += '<label class="field"><span>协议</span><select id="t-proto">' + protoOptions + '</select></label>';
+    fields += '<label class="field"><span>内网目标地址</span><input id="t-local" placeholder="127.0.0.1:8080" />' +
+      '<div class="hint">客户端所在机器上可访问的地址（内网 IP + 端口）。</div></label>';
+
+    if (meta.key === 'domain') {
+      fields += '<label class="field"><span>公网域名</span><input id="t-host" placeholder="app.example.com" />' +
+        '<div class="hint">留空则由控制台的默认域名推导（ingress.default_domain）。</div></label>';
+      fields += '<label class="field"><span>路径前缀（可选）</span><input id="t-path" placeholder="/api" />' +
+        '<div class="hint">只转发该前缀下的请求，便于一个域名挂多个服务。</div></label>';
+    }
+    if (meta.key === 'port') {
+      fields += '<label class="field"><span>公网端口</span><input id="t-port" placeholder="留空则自动分配" /></label>';
+    }
+    if (meta.key === 'p2p') {
+      fields += '<label class="field"><span>直连失败时允许中继回退</span>' +
+        '<select id="t-relay"><option value="1">允许（推荐，宁可慢也别不通）</option>' +
+        '<option value="0">禁止（只走直连，连不上就失败）</option></select></label>';
+    }
+    if (meta.key === 'private' || meta.key === 'p2p') {
+      fields += '<div class="notice">创建后会签发一枚<b>访问密钥</b>。访问端凭它' +
+        '（与隧道 ID 一起）在自己那边建立本地监听，不向公网暴露任何端口。</div>';
+    }
+    fields += '<label class="field"><span>限速（Kbps，0 = 不限）</span><input id="t-rate" value="0" /></label>';
+
+    if (!meta.ready) {
+      fields += '<div class="notice warn">该分类的数据面尚未接入：配置会保存并下发，' +
+        '但本版本不会建立通道。</div>';
+    }
+
     const html = '' +
       '<div class="modal-mask" id="modal"><div class="modal">' +
-        '<h3>新建隧道</h3><div class="modal-body">' +
-          '<label class="field"><span>所属客户端</span><select id="t-client">' + options + '</select></label>' +
-          '<label class="field"><span>隧道名称</span><input id="t-name" placeholder="web" />' +
-            '<div class="hint">仅字母、数字、-、_、.，同一客户端内唯一。</div></label>' +
-          '<label class="field"><span>协议</span><select id="t-proto">' +
-            '<option value="http">HTTP（按 Host 路由）</option>' +
-            '<option value="https">HTTPS</option>' +
-            '<option value="tcp">TCP（端口映射）</option>' +
-            '<option value="udp">UDP（端口映射）</option>' +
-          '</select></label>' +
-          '<label class="field"><span>本地地址</span><input id="t-local" placeholder="127.0.0.1:8080" />' +
-            '<div class="hint">客户端所在机器上可访问的地址。</div></label>' +
-          '<label class="field" id="f-host"><span>Host 域名</span><input id="t-host" placeholder="app.example.com" /></label>' +
-          '<label class="field" id="f-port" style="display:none"><span>公网端口</span>' +
-            '<input id="t-port" placeholder="留空则自动分配" /></label>' +
-          '<label class="field"><span>限速（Kbps，0 = 不限）</span><input id="t-rate" value="0" /></label>' +
-        '</div>' +
+        '<h3>新建' + esc(meta.label) + '</h3>' +
+        '<div class="hint modal-desc">' + esc(meta.desc) + '</div>' +
+        '<div class="modal-body">' + fields + '</div>' +
         '<div class="modal-foot">' +
           '<button id="m-cancel">取消</button>' +
           '<button class="primary" id="m-ok">创建</button>' +
@@ -739,38 +924,84 @@
     document.body.insertAdjacentHTML('beforeend', html);
 
     const close = () => { const m = $('modal'); if (m) m.remove(); };
-    const syncFields = () => {
-      const proto = $('t-proto').value;
-      $('f-port').style.display = proto === 'tcp' || proto === 'udp' ? '' : 'none';
-      $('f-host').style.display = proto === 'http' || proto === 'https' ? '' : 'none';
-    };
-    $('t-proto').onchange = syncFields;
-    syncFields();
     $('m-cancel').onclick = close;
     $('modal').onclick = (e) => { if (e.target.id === 'modal') close(); };
 
     $('m-ok').onclick = async () => {
-      const proto = $('t-proto').value;
-      const portRaw = $('t-port').value.trim();
       const body = {
+        kind: meta.key,
         name: $('t-name').value.trim(),
-        proto,
+        proto: $('t-proto').value,
         local_addr: $('t-local').value.trim(),
         rate_limit_kbps: parseInt($('t-rate').value || '0', 10) || 0,
       };
-      if (proto === 'http' || proto === 'https') body.host = $('t-host').value.trim();
-      if (portRaw) body.remote_port = parseInt(portRaw, 10);
+      if (meta.key === 'domain') {
+        const host = $('t-host').value.trim();
+        const path = $('t-path').value.trim();
+        if (host) body.host = host;
+        if (path) body.path_prefix = path;
+      }
+      if (meta.key === 'port') {
+        const raw = $('t-port').value.trim();
+        if (raw) body.remote_port = parseInt(raw, 10);
+      }
+      if (meta.key === 'p2p') {
+        body.allow_relay = $('t-relay').value === '1';
+      }
 
       try {
-        await api('/api/v1/clients/' + $('t-client').value + '/tunnels', {
+        const created = await api('/api/v1/clients/' + $('t-client').value + '/tunnels', {
           method: 'POST',
           body,
         });
-        toast('隧道已创建，客户端下次心跳（≤15 秒）生效', 'ok');
         close();
-        render();
+        if (created && created.access_key) {
+          showAccessKey(created);
+        } else if (meta.ready) {
+          toast('隧道已创建，客户端下次心跳（≤15 秒）生效', 'ok');
+          render();
+        } else {
+          toast('配置已保存；该分类数据面尚未接入，暂不建立通道', 'ok');
+          render();
+        }
       } catch (err) { toast(err.message, 'err'); }
     };
+  }
+
+  // 访问密钥 + 访问端命令展示。密钥只在需要时展示，避免长期挂在列表里被旁观者看到。
+  function showAccessKey(tunnel, title) {
+    const meta = tunnelKindMeta(tunnel.kind);
+    const command = 'rscross-client access --key ' + tunnel.access_key +
+      ' --tunnel ' + tunnel.id + ' --listen 0.0.0.0:8080';
+
+    const html = '' +
+      '<div class="modal-mask" id="modal"><div class="modal">' +
+        '<h3>' + esc(title || (meta.label + '已创建')) + '</h3>' +
+        '<div class="modal-body">' +
+          '<label class="field"><span>隧道</span>' +
+            '<input value="' + esc(tunnel.name) + '" readonly /></label>' +
+          '<label class="field"><span>访问密钥</span>' +
+            '<input id="k-value" value="' + esc(tunnel.access_key || '') + '" readonly />' +
+            '<div class="hint">等价于密码：拿到它就能访问这个内网服务。请通过安全渠道分发。</div></label>' +
+          '<label class="field"><span>访问端命令（下一阶段形态）</span>' +
+            '<input value="' + esc(command) + '" readonly /></label>' +
+          '<div class="notice warn">访问端（<code>rscross-client access</code>）的数据面尚未接入，' +
+            '命令为约定形态；当前请先保存好访问密钥。</div>' +
+        '</div>' +
+        '<div class="modal-foot">' +
+          '<button id="m-copy">复制密钥</button>' +
+          '<button class="primary" id="m-close">关闭</button>' +
+        '</div>' +
+      '</div></div>';
+
+    const existing = $('modal');
+    if (existing) existing.remove();
+    document.body.insertAdjacentHTML('beforeend', html);
+
+    const close = () => { const m = $('modal'); if (m) m.remove(); render(); };
+    $('m-close').onclick = close;
+    $('m-copy').onclick = () => copyText(tunnel.access_key || '', '访问密钥已复制');
+    $('modal').onclick = (e) => { if (e.target.id === 'modal') close(); };
   }
 
   // ------------------------------------------------------------ 日志

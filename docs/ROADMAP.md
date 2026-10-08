@@ -169,7 +169,7 @@
 - `rscross-control/src/api/`：`auth.rs` / `nodes.rs`（管理 + 节点侧）/ `client.rs`（客户端 + 隧道）
   / `agent.rs` / `misc.rs` / `mod.rs`，统一 `ApiError → {code,message}`，
   `console.rs` 负责静态资源与 SPA/JSON 404 分流。
-- `web/`：仪表盘、服务端节点、隧道列表、客户端管理、日志、配置六个页面。
+- `web/`：仪表盘、服务端节点、客户端管理、隧道管理（域名解析 / 端口转发 / 私有隧道 / P2P 隧道）、日志、配置。
 
 ### 验收标准
 
@@ -177,6 +177,11 @@
 - [x] **E2 未匹配 API 返回 JSON 404**：e2e 断言。
 - [x] **E3 隧道创建校验**：协议白名单、`local_addr` 合法、TCP/UDP 端口在端口池内且不冲突、
       HTTP 类必须有 Host 或默认域名；名称在客户端内唯一；受 `max_tunnels_per_client` 约束。
+- [x] **E3b 隧道四分类校验**：域名解析（http/https + Host）、端口转发（tcp/udp + 端口）、
+      私有隧道（tcp/udp + 自动签发访问密钥、**拒绝**公网端口）、P2P 隧道（**仅 TCP** + 中继回退开关）；
+      `kind` 缺省时按协议推导以兼容老调用；访问密钥可轮换且旧密钥立即失效（e2e 逐条断言）。
+- [x] **E3c 控制台端口分离**：`rscross-console --print-default-config` 为 7700、
+      内嵌仍是 7800：配置层单测 + e2e 的 `--check` 生成文件与真实监听断言。
 - [x] **E4 端口自动分配**：`port_allocation_skips_used`。
 - [x] **E5 命令可执行**：`node_command_mentions_managed_mode`、
       `enroll_command_targets_console_not_node` + e2e 的两条命令断言。

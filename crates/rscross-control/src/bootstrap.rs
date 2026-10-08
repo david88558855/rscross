@@ -61,7 +61,9 @@ pub async fn run_console_with(args: ConsoleArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut cfg = ConsoleFile::load_or_init(&args.config)?;
+    // 独立中央控制台：默认端口 7700，与内嵌控制台（7800）区分。
+    // 两者可能同时跑在一台机器上，且端口号本身就能提示浏览器连的是哪一套。
+    let mut cfg = ConsoleFile::load_or_init_central(&args.config)?;
     if let Some(v) = args.bind.clone() {
         cfg.console.bind = v;
     }

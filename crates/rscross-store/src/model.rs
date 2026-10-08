@@ -171,6 +171,8 @@ pub struct TunnelRecord {
     pub client_id: String,
     /// 隧道名（同一客户端内唯一）。
     pub name: String,
+    /// 用途分类（`domain` / `port` / `private` / `p2p`）。
+    pub kind: String,
     /// 协议。
     pub proto: String,
     /// 本地目标地址。
@@ -181,6 +183,10 @@ pub struct TunnelRecord {
     pub host: Option<String>,
     /// HTTP 路径前缀。
     pub path_prefix: Option<String>,
+    /// 访问密钥（私有 / P2P 隧道）。等价于密码，只在管理端展示。
+    pub access_key: Option<String>,
+    /// P2P 隧道在直连失败时是否允许回退到服务器中继。
+    pub allow_relay: bool,
     /// 是否启用。
     pub enabled: bool,
     /// 限速（Kbps，0 = 不限）。

@@ -82,6 +82,9 @@ impl Store {
         guard
             .execute_batch(SCHEMA)
             .map_err(|e| Error::store(format!("迁移失败: {e}")))?;
+        // 老库是用 CREATE TABLE IF NOT EXISTS 建的，新增列不会被自动补上，
+        // 必须显式 ALTER —— 否则老用户升级后一读隧道就报 no such column。
+        add_missing_columns(&guard)?;
         let version: i64 = guard
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::store)?;
@@ -837,18 +840,22 @@ impl Store {
         self.blocking(move |c| {
             c.execute(
                 "INSERT INTO tunnels
-                 (id, client_id, name, proto, local_addr, remote_port, host, path_prefix,
-                  enabled, rate_limit_kbps, conn_limit, created_at, updated_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                 (id, client_id, name, kind, proto, local_addr, remote_port, host, path_prefix,
+                  access_key, allow_relay, enabled, rate_limit_kbps, conn_limit,
+                  created_at, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                 params![
                     rec.id,
                     rec.client_id,
                     rec.name,
+                    rec.kind,
                     rec.proto,
                     rec.local_addr,
                     rec.remote_port,
                     rec.host,
                     rec.path_prefix,
+                    rec.access_key,
+                    rec.allow_relay as i64,
                     rec.enabled as i64,
                     rec.rate_limit_kbps,
                     rec.conn_limit,
@@ -936,10 +943,11 @@ impl Store {
                 .execute(
                     "UPDATE tunnels SET name = COALESCE(?2, name), proto = COALESCE(?3, proto),
                         local_addr = COALESCE(?4, local_addr), remote_port = ?5,
-                        host = ?6, path_prefix = ?7,
-                        enabled = COALESCE(?8, enabled),
-                        rate_limit_kbps = COALESCE(?9, rate_limit_kbps),
-                        conn_limit = COALESCE(?10, conn_limit), updated_at = ?11
+                        host = ?6, path_prefix = ?7, access_key = ?8,
+                        allow_relay = COALESCE(?9, allow_relay),
+                        enabled = COALESCE(?10, enabled),
+                        rate_limit_kbps = COALESCE(?11, rate_limit_kbps),
+                        conn_limit = COALESCE(?12, conn_limit), updated_at = ?13
                      WHERE id = ?1",
                     params![
                         patch.id,
@@ -949,6 +957,8 @@ impl Store {
                         patch.remote_port,
                         patch.host,
                         patch.path_prefix,
+                        patch.access_key,
+                        patch.allow_relay.map(|b| b as i64),
                         patch.enabled.map(|b| b as i64),
                         patch.rate_limit_kbps,
                         patch.conn_limit,
@@ -1286,6 +1296,10 @@ pub struct TunnelPatch {
     pub host: Option<Option<String>>,
     /// 路径前缀。
     pub path_prefix: Option<Option<String>>,
+    /// 访问密钥（轮换或清空）。
+    pub access_key: Option<Option<String>>,
+    /// P2P 隧道是否允许中继回退。
+    pub allow_relay: Option<bool>,
     /// 启用状态。
     pub enabled: Option<bool>,
     /// 限速。
@@ -1315,8 +1329,9 @@ const CLIENT_SELECT: &str = "SELECT id, node_id, name, status, agent_token_hash,
     endpoint_id, endpoint_addr, public_ip, last_seen_at, last_error, created_at, updated_at, disabled
     FROM clients";
 
-const TUNNEL_SELECT: &str = "SELECT id, client_id, name, proto, local_addr, remote_port, host,
-    path_prefix, enabled, rate_limit_kbps, conn_limit, created_at, updated_at FROM tunnels";
+const TUNNEL_SELECT: &str = "SELECT id, client_id, name, kind, proto, local_addr, remote_port,
+    host, path_prefix, access_key, allow_relay, enabled, rate_limit_kbps, conn_limit,
+    created_at, updated_at FROM tunnels";
 
 fn map_user(row: &Row<'_>) -> rusqlite::Result<UserRecord> {
     Ok(UserRecord {
@@ -1375,26 +1390,77 @@ fn map_client(row: &Row<'_>) -> rusqlite::Result<ClientRecord> {
     })
 }
 
+/// 在既有库上补齐新增列（幂等）。
+///
+/// SQLite 的 `ALTER TABLE ... ADD COLUMN` 没有 `IF NOT EXISTS`，重复执行会报
+/// 「duplicate column name」，所以先读 `pragma table_info` 再决定是否执行。
+fn add_missing_columns(conn: &Connection) -> Result<()> {
+    const ADDITIONS: [(&str, &str, &str); 3] = [
+        (
+            "kind",
+            "tunnels",
+            "ALTER TABLE tunnels ADD COLUMN kind TEXT NOT NULL DEFAULT 'port'",
+        ),
+        (
+            "access_key",
+            "tunnels",
+            "ALTER TABLE tunnels ADD COLUMN access_key TEXT",
+        ),
+        (
+            "allow_relay",
+            "tunnels",
+            "ALTER TABLE tunnels ADD COLUMN allow_relay INTEGER NOT NULL DEFAULT 1",
+        ),
+    ];
+
+    for (column, table, ddl) in ADDITIONS {
+        if !has_column(conn, table, column)? {
+            conn.execute(ddl, [])
+                .map_err(|e| Error::store(format!("为 {table} 补列 {column} 失败: {e}")))?;
+            tracing::info!(table, column, "已为既有数据库补充新增列");
+        }
+    }
+    Ok(())
+}
+
+/// 表里是否已有该列。
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(Error::store)?;
+    let mut rows = stmt.query([]).map_err(Error::store)?;
+    while let Some(row) = rows.next().map_err(Error::store)? {
+        let name: String = row.get(1).map_err(Error::store)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn map_tunnel(row: &Row<'_>) -> rusqlite::Result<TunnelRecord> {
     Ok(TunnelRecord {
         id: row.get(0)?,
         client_id: row.get(1)?,
         name: row.get(2)?,
-        proto: row.get(3)?,
-        local_addr: row.get(4)?,
-        remote_port: row.get(5)?,
-        host: row.get(6)?,
-        path_prefix: row.get(7)?,
-        enabled: row.get::<_, i64>(8)? != 0,
-        rate_limit_kbps: row.get(9)?,
-        conn_limit: row.get(10)?,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        kind: row.get(3)?,
+        proto: row.get(4)?,
+        local_addr: row.get(5)?,
+        remote_port: row.get(6)?,
+        host: row.get(7)?,
+        path_prefix: row.get(8)?,
+        access_key: row.get(9)?,
+        allow_relay: row.get::<_, i64>(10)? != 0,
+        enabled: row.get::<_, i64>(11)? != 0,
+        rate_limit_kbps: row.get(12)?,
+        conn_limit: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
     })
 }
 
 const SCHEMA: &str = r#"
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 
 CREATE TABLE IF NOT EXISTS users (
   id            TEXT PRIMARY KEY,
@@ -1477,11 +1543,14 @@ CREATE TABLE IF NOT EXISTS tunnels (
   id              TEXT PRIMARY KEY,
   client_id       TEXT NOT NULL,
   name            TEXT NOT NULL,
+  kind            TEXT NOT NULL DEFAULT 'port',
   proto           TEXT NOT NULL,
   local_addr      TEXT NOT NULL,
   remote_port     INTEGER,
   host            TEXT,
   path_prefix     TEXT,
+  access_key      TEXT,
+  allow_relay     INTEGER NOT NULL DEFAULT 1,
   enabled         INTEGER NOT NULL DEFAULT 1,
   rate_limit_kbps INTEGER NOT NULL DEFAULT 0,
   conn_limit      INTEGER NOT NULL DEFAULT 0,
@@ -1781,11 +1850,14 @@ mod tests {
                 id: uuid::Uuid::new_v4().to_string(),
                 client_id: client_id.clone(),
                 name: "web".to_string(),
+                kind: "domain".to_string(),
                 proto: "http".to_string(),
                 local_addr: "127.0.0.1:8080".to_string(),
                 remote_port: None,
                 host: Some("a.example.com".to_string()),
                 path_prefix: None,
+                access_key: None,
+                allow_relay: true,
                 enabled: true,
                 rate_limit_kbps: 0,
                 conn_limit: 0,

@@ -115,8 +115,17 @@ pub const DEFAULT_TUNNEL_PORT: u16 = 7835;
 /// 默认公网入口端口。
 pub const DEFAULT_INGRESS_PORT: u16 = 8081;
 
-/// 默认控制台 / 管理 API 端口。
+/// 内嵌控制台 / 服务端节点自带管理 API 的默认端口。
+///
+/// 单机自用时服务端进程内嵌控制台，用这个端口。
 pub const DEFAULT_CONSOLE_PORT: u16 = 7800;
+
+/// 独立中央控制台（`rscross-console`）的默认端口。
+///
+/// 刻意与内嵌端口区分：两种形态同时跑在一台机器上（例如先用内嵌自测，
+/// 再起一个中央控制台汇聚多节点）时不会互相抢占；从端口号也能一眼
+/// 判断浏览器连的是哪一套控制台。
+pub const DEFAULT_CENTRAL_CONSOLE_PORT: u16 = 7700;
 
 /// 默认保活间隔（秒）。
 pub const DEFAULT_HEARTBEAT_SECS: u64 = 15;
@@ -126,6 +135,133 @@ pub type ClientId = uuid::Uuid;
 
 /// 隧道 ID。
 pub type TunnelId = uuid::Uuid;
+
+/// 隧道用途分类。
+///
+/// 分类不只是标签，它决定**访问入口形态**与**数据面通道**：
+///
+/// | 类型 | 访问入口 | 访问密钥 | 首选路径 |
+/// |---|---|---|---|
+/// | `Domain` 域名解析 | 节点 HTTP 入口，按 `Host` 路由 | 无 | FerroTunnel 中继 |
+/// | `Port` 端口转发 | 节点监听公网端口 | 无 | Iroh 直连优先，失败回退中继 |
+/// | `Private` 私有隧道 | 访问端本地监听，不暴露公网端口 | 必需 | 节点转发 |
+/// | `P2p` P2P 隧道 | 访问端本地监听，不暴露公网端口 | 必需 | 点对点直连（可配中继回退） |
+///
+/// 「私有隧道」与「P2P 隧道」的差别只有一处：P2P 优先打洞直连、直连成功后
+/// 不占服务端带宽；私有隧道固定经节点转发。这与 gostc 的语义一致
+/// （P2P 隧道「可以实现和私有隧道一样的效果…但是可以 P2P 直连」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelKind {
+    /// 域名解析：公网域名 → 内网服务。
+    Domain,
+    /// 端口转发：公网端口 → 内网服务（默认值，与历史数据兼容）。
+    #[default]
+    Port,
+    /// 私有隧道：访问端凭密钥自建本地入口，流量经节点转发。
+    Private,
+    /// P2P 隧道：同私有隧道，但优先点对点直连。
+    P2p,
+}
+
+impl TunnelKind {
+    /// 小写标识（同时也是 API / 数据库里的取值）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Domain => "domain",
+            Self::Port => "port",
+            Self::Private => "private",
+            Self::P2p => "p2p",
+        }
+    }
+
+    /// 中文名（日志与前端展示）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Domain => "域名解析",
+            Self::Port => "端口转发",
+            Self::Private => "私有隧道",
+            Self::P2p => "P2P 隧道",
+        }
+    }
+
+    /// 解析标识；接受若干常见别名，便于手写 API 调用。
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "domain" | "dns" | "host" => Some(Self::Domain),
+            "port" | "forward" | "port_forward" => Some(Self::Port),
+            "private" | "secret" => Some(Self::Private),
+            "p2p" | "peer" | "p2p_tunnel" => Some(Self::P2p),
+            _ => None,
+        }
+    }
+
+    /// 全部取值（前端下拉、文档与测试用）。
+    pub fn all() -> [Self; 4] {
+        [Self::Domain, Self::Port, Self::Private, Self::P2p]
+    }
+
+    /// 是否需要访问密钥（私有 / P2P 隧道靠它建立访问端入口）。
+    pub fn needs_access_key(self) -> bool {
+        matches!(self, Self::Private | Self::P2p)
+    }
+
+    /// 是否暴露公网端口（域名解析走 HTTP 入口，不需要端口）。
+    pub fn exposes_public_port(self) -> bool {
+        matches!(self, Self::Port)
+    }
+
+    /// 是否优先走点对点直连。
+    pub fn prefers_direct(self) -> bool {
+        matches!(self, Self::P2p)
+    }
+
+    /// 该类型允许的承载协议。
+    ///
+    /// P2P 只支持 TCP：UDP 在 QUIC 流上没有天然的连接边界，先把一个语义
+    /// 做正确比铺开支持更重要（gostc 的 P2P 隧道同样只支持 TCP）。
+    pub fn allows_proto(self, proto: TunnelProto) -> bool {
+        match self {
+            Self::Domain => proto.is_http_family(),
+            Self::Port | Self::Private => proto.needs_remote_port(),
+            Self::P2p => matches!(proto, TunnelProto::Tcp),
+        }
+    }
+
+    /// 允许的协议文案（写进校验错误里，让人一次就知道该填什么）。
+    pub fn allowed_protos_label(self) -> &'static str {
+        match self {
+            Self::Domain => "http / https",
+            Self::Port | Self::Private => "tcp / udp",
+            Self::P2p => "tcp",
+        }
+    }
+
+    /// 由协议推导分类（老调用方不带 `kind` 时的兜底）。
+    pub fn infer_from_proto(proto: TunnelProto) -> Self {
+        if proto.is_http_family() {
+            Self::Domain
+        } else {
+            Self::Port
+        }
+    }
+
+    /// 数据面是否已接入。
+    ///
+    /// 目前只有域名解析可直接工作：它的入口是 FerroTunnel 自带的 HTTP 入口
+    /// （按 `Host` 路由到客户端）。其余三类都需要节点侧自建 ingress / 访问端
+    /// 运行模式 —— FerroTunnel 的服务端只提供控制面 + HTTP 入口，给不了
+    /// 任意端口监听。前端据此标注状态，避免让人以为配置完就能通。
+    pub fn data_plane_ready(self) -> bool {
+        matches!(self, Self::Domain)
+    }
+}
+
+impl std::fmt::Display for TunnelKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// 隧道承载协议。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,10 +494,14 @@ pub struct NodeEndpoint {
 ///
 /// 刻意不复用数据库实体：客户端**不应**把 `rusqlite` 打进静态二进制。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DesiredTunnel {    /// 隧道 ID。
+pub struct DesiredTunnel {
+    /// 隧道 ID。
     pub id: String,
     /// 隧道名（同一客户端内唯一）。
     pub name: String,
+    /// 用途分类，决定客户端如何承载这条隧道。
+    #[serde(default)]
+    pub kind: TunnelKind,
     /// 承载协议。
     pub proto: TunnelProto,
     /// 本地目标地址。
@@ -375,12 +515,26 @@ pub struct DesiredTunnel {    /// 隧道 ID。
     /// HTTP 路径前缀。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_prefix: Option<String>,
+    /// 访问密钥（私有 / P2P 隧道）。
+    ///
+    /// 访问端凭它向节点申请一条到目标内网服务的通道，因此它等价于密码，
+    /// 只下发给**归属客户端**（客户端需要它来校验来访者），不进入公开列表。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_key: Option<String>,
+    /// P2P 隧道在直连失败时是否允许回退到服务器中继。
+    #[serde(default = "default_true")]
+    pub allow_relay: bool,
     /// 是否启用。
     pub enabled: bool,
     /// 限速（Kbps，0 = 不限）。
     pub rate_limit_kbps: u32,
     /// 并发连接上限（0 = 不限）。
     pub conn_limit: u32,
+}
+
+/// serde 默认值：允许中继回退（宁可通而不快，也不要直接不通）。
+fn default_true() -> bool {
+    true
 }
 
 impl DesiredTunnel {
@@ -475,11 +629,14 @@ mod tests {
         let http = DesiredTunnel {
             id: "1".into(),
             name: "web".into(),
+            kind: TunnelKind::Domain,
             proto: TunnelProto::Http,
             local_addr: "127.0.0.1:8080".into(),
             remote_port: None,
             host: Some("a.example.com".into()),
             path_prefix: None,
+            access_key: None,
+            allow_relay: true,
             enabled: true,
             rate_limit_kbps: 0,
             conn_limit: 0,
@@ -505,11 +662,14 @@ mod tests {
         let t = DesiredTunnel {
             id: "id".into(),
             name: "n".into(),
-            proto: TunnelProto::Udp,
+            kind: TunnelKind::P2p,
+            proto: TunnelProto::Tcp,
             local_addr: "127.0.0.1:53".into(),
-            remote_port: Some(20530),
+            remote_port: None,
             host: None,
-            path_prefix: Some("/api".into()),
+            path_prefix: None,
+            access_key: Some("rsv_abc".into()),
+            allow_relay: false,
             enabled: true,
             rate_limit_kbps: 100,
             conn_limit: 64,
@@ -517,5 +677,76 @@ mod tests {
         let json = serde_json::to_string(&t).expect("ser");
         let back: DesiredTunnel = serde_json::from_str(&json).expect("de");
         assert_eq!(t, back);
+    }
+
+    #[test]
+    fn tunnel_kind_roundtrips_and_parses_aliases() {
+        for k in TunnelKind::all() {
+            let json = serde_json::to_string(&k).expect("ser");
+            assert_eq!(json, format!("\"{}\"", k.as_str()));
+            let back: TunnelKind = serde_json::from_str(&json).expect("de");
+            assert_eq!(back, k);
+            assert_eq!(TunnelKind::parse(k.as_str()), Some(k));
+        }
+        // 便于手写 API 调用的别名
+        assert_eq!(TunnelKind::parse("DNS"), Some(TunnelKind::Domain));
+        assert_eq!(TunnelKind::parse(" port_forward "), Some(TunnelKind::Port));
+        assert_eq!(TunnelKind::parse("peer"), Some(TunnelKind::P2p));
+        assert_eq!(TunnelKind::parse("nope"), None);
+    }
+
+    #[test]
+    fn tunnel_kind_default_is_port_for_backward_compat() {
+        // 历史数据没有 kind 列，必须兜底成「端口转发」而不是解析失败。
+        assert_eq!(TunnelKind::default(), TunnelKind::Port);
+        let json = r#"{"id":"1","name":"web","proto":"http","local_addr":"127.0.0.1:80",
+            "enabled":true,"rate_limit_kbps":0,"conn_limit":0}"#;
+        let t: DesiredTunnel = serde_json::from_str(json).expect("老格式必须能解析");
+        assert_eq!(t.kind, TunnelKind::Port);
+        assert!(t.allow_relay, "缺字段时默认允许中继回退");
+        assert_eq!(t.access_key, None);
+    }
+
+    #[test]
+    fn tunnel_kind_dictates_allowed_protocols() {
+        // 域名解析只能是 HTTP 家族
+        assert!(TunnelKind::Domain.allows_proto(TunnelProto::Http));
+        assert!(TunnelKind::Domain.allows_proto(TunnelProto::Https));
+        assert!(!TunnelKind::Domain.allows_proto(TunnelProto::Tcp));
+        // 端口转发 / 私有隧道按端口，不要 Host
+        assert!(TunnelKind::Port.allows_proto(TunnelProto::Tcp));
+        assert!(TunnelKind::Port.allows_proto(TunnelProto::Udp));
+        assert!(!TunnelKind::Port.allows_proto(TunnelProto::Http));
+        assert!(TunnelKind::Private.allows_proto(TunnelProto::Udp));
+        assert!(!TunnelKind::Private.allows_proto(TunnelProto::Http));
+        // P2P 只支持 TCP：UDP 在 QUIC 流上没有连接边界
+        assert!(TunnelKind::P2p.allows_proto(TunnelProto::Tcp));
+        assert!(!TunnelKind::P2p.allows_proto(TunnelProto::Udp));
+    }
+
+    #[test]
+    fn only_private_and_p2p_need_access_key() {
+        assert!(!TunnelKind::Domain.needs_access_key());
+        assert!(!TunnelKind::Port.needs_access_key());
+        assert!(TunnelKind::Private.needs_access_key());
+        assert!(TunnelKind::P2p.needs_access_key());
+        // 只有端口转发会在节点上开公网端口
+        assert!(TunnelKind::Port.exposes_public_port());
+        assert!(!TunnelKind::Domain.exposes_public_port());
+        assert!(!TunnelKind::Private.exposes_public_port());
+        assert!(!TunnelKind::P2p.exposes_public_port());
+        // 只有 P2P 优先直连
+        assert!(TunnelKind::P2p.prefers_direct());
+        assert!(!TunnelKind::Private.prefers_direct());
+    }
+
+    #[test]
+    fn data_plane_status_is_explicit_not_optimistic() {
+        // 这是给前端标注状态用的：只有域名解析目前真的能通，
+        // 其余三类还没接数据面。不要让 UI 假装它们可用。
+        assert!(TunnelKind::Domain.data_plane_ready());
+        assert!(!TunnelKind::Port.data_plane_ready());
+        assert!(!TunnelKind::Private.data_plane_ready());
+        assert!(!TunnelKind::P2p.data_plane_ready());
     }
 }

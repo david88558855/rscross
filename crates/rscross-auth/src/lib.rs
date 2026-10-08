@@ -126,6 +126,14 @@ pub fn new_enroll_token() -> String {
     format!("rse_{}", new_token())
 }
 
+/// 生成隧道**访问密钥**，形如 `rsv_<32hex>`。
+///
+/// 语义与密码相同：访问端凭它（外加隧道 ID）才能向节点申请一条到目标内网
+/// 服务的通道，因此只用在下发与展示环节，不参与任何哈希校验。
+pub fn new_access_key() -> String {
+    format!("rsv_{}", new_token())
+}
+
 /// 会话创建结果。
 #[derive(Debug, Clone)]
 pub struct IssuedSession {

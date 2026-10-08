@@ -4,7 +4,7 @@
 //! —— 归属节点由控制台在注册/心跳响应里下发。因此把客户端从节点 A 迁到节点 B，
 //! 只需要在控制台改一行归属，客户端在下一个心跳周期自动收敛。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -512,6 +512,10 @@ struct TunnelManager {
     targets: TunnelTargets,
     node: Option<NodeEndpoint>,
     running: HashMap<String, RunningTunnel>,
+    /// 已提示过「该类隧道数据面尚未接入」的隧道 ID。
+    ///
+    /// 心跳每 15 秒一次，没有这个去重就会把日志刷满——而刷屏的告警等于没有告警。
+    reported_unsupported: HashSet<String>,
 }
 
 struct RunningTunnel {
@@ -528,6 +532,7 @@ impl TunnelManager {
             targets,
             node: None,
             running: HashMap::new(),
+            reported_unsupported: HashSet::new(),
         }
     }
 
@@ -562,10 +567,28 @@ impl TunnelManager {
             return;
         }
 
-        let wanted: HashMap<String, DesiredTunnel> = desired
-            .into_iter()
-            .map(|tunnel| (tunnel.id.clone(), tunnel))
-            .collect();
+        // 数据面还没接入的分类：明确跳过并说明原因。
+        //
+        // 这里刻意不「尽力而为」—— 给一条永远投递不到流量的隧道建连接，
+        // 只会让人误以为它已经好了。真实状态是：配置已保存、数据面待接入。
+        let mut wanted: HashMap<String, DesiredTunnel> = HashMap::new();
+        let mut present: HashSet<String> = HashSet::new();
+        for tunnel in desired {
+            present.insert(tunnel.id.clone());
+            if tunnel.kind.data_plane_ready() {
+                wanted.insert(tunnel.id.clone(), tunnel);
+                continue;
+            }
+            if self.reported_unsupported.insert(tunnel.id.clone()) {
+                tracing::warn!(
+                    tunnel = %tunnel.name,
+                    kind = %tunnel.kind,
+                    category = tunnel.kind.label(),
+                    "该分类的数据面尚未接入，本版本不会为它建立连接；配置已保存，待数据面支持后自动生效"
+                );
+            }
+        }
+        self.reported_unsupported.retain(|id| present.contains(id));
 
         // 1) 停止：已被删除，或本地地址/路由键发生变化需要重建
         let mut to_stop: Vec<String> = Vec::new();
@@ -741,7 +764,7 @@ async fn wait_for_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rscross_common::TunnelProto;
+    use rscross_common::{TunnelKind, TunnelProto};
 
     fn node(id: &str, server: &str, token: &str) -> NodeEndpoint {
         NodeEndpoint {
@@ -785,11 +808,14 @@ mod tests {
         let http = DesiredTunnel {
             id: "1".into(),
             name: "web".into(),
+            kind: TunnelKind::Domain,
             proto: TunnelProto::Http,
             local_addr: "127.0.0.1:8080".into(),
             remote_port: None,
             host: Some("a.example.com".into()),
             path_prefix: None,
+            access_key: None,
+            allow_relay: true,
             enabled: true,
             rate_limit_kbps: 0,
             conn_limit: 0,

@@ -5,7 +5,8 @@ use std::net::SocketAddr;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::Json;
-use rscross_auth::{new_enroll_token, token_hash};
+use rscross_auth::{new_access_key, new_enroll_token, token_hash};
+use rscross_common::TunnelKind;
 use rscross_config::{parse_port_range, ConsoleFile};
 use rscross_store::{ClientRecord, EnrollTokenRecord, TunnelPatch, TunnelRecord};
 use serde::{Deserialize, Serialize};
@@ -283,16 +284,23 @@ pub async fn delete_client(
 pub struct CreateTunnelRequest {
     /// 隧道名（同一客户端内唯一）。
     pub name: String,
+    /// 用途分类：`domain` / `port` / `private` / `p2p`。
+    ///
+    /// 留空时按 `proto` 推导（http/https → domain，tcp/udp → port），
+    /// 这样老的调用方式仍然可用。
+    pub kind: Option<String>,
     /// 协议：tcp / http / https / udp。
     pub proto: String,
     /// 本地目标地址。
     pub local_addr: String,
-    /// 公网端口（tcp/udp 可选；留空则从端口池自动分配）。
+    /// 公网端口（仅「端口转发」；留空则从端口池自动分配）。
     pub remote_port: Option<i64>,
-    /// HTTP 路由 Host（http/https 必填或由默认域名推导）。
+    /// HTTP 路由 Host（仅「域名解析」；留空则由 default_domain 推导）。
     pub host: Option<String>,
     /// HTTP 路径前缀。
     pub path_prefix: Option<String>,
+    /// P2P 隧道在直连失败时是否允许回退到服务器中继（默认允许）。
+    pub allow_relay: Option<bool>,
     /// 是否启用。
     pub enabled: Option<bool>,
     /// 限速（Kbps，0 = 不限）。
@@ -314,6 +322,8 @@ pub struct PatchTunnelRequest {
     pub host: Option<String>,
     /// 路径前缀。
     pub path_prefix: Option<String>,
+    /// P2P 隧道是否允许中继回退。
+    pub allow_relay: Option<bool>,
     /// 启用状态。
     pub enabled: Option<bool>,
     /// 限速。
@@ -369,6 +379,24 @@ pub async fn create_tunnel(
     let name = normalize_name(&req.name)?;
     let proto = parse_proto(&req.proto)
         .ok_or_else(|| ApiError::bad_request("proto 只能是 tcp / http / https / udp"))?;
+
+    // 分类决定「入口形态 + 必填字段 + 数据面通道」。先定分类再校验协议组合，
+    // 否则会出现「填了 Host 但协议是 tcp」这类自相矛盾的配置。
+    let kind = match req.kind.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => TunnelKind::parse(raw)
+            .ok_or_else(|| ApiError::bad_request("kind 只能是 domain / port / private / p2p"))?,
+        // 不带 kind 的调用方（老前端 / 脚本）按协议推导，行为与之前一致
+        None => TunnelKind::infer_from_proto(proto),
+    };
+    if !kind.allows_proto(proto) {
+        return Err(ApiError::bad_request(format!(
+            "{} 不支持 {} 协议（可用：{}）",
+            kind.label(),
+            proto,
+            kind.allowed_protos_label()
+        )));
+    }
+
     let local_addr = req.local_addr.trim().to_string();
     local_addr.parse::<SocketAddr>().map_err(|e| {
         ApiError::bad_request(format!("local_addr 非法（应形如 127.0.0.1:8080）: {e}"))
@@ -389,46 +417,83 @@ pub async fn create_tunnel(
         return Err(ApiError::conflict(format!("隧道名已存在: {name}")));
     }
 
-    let (remote_port, host) = if proto.needs_remote_port() {
-        let port = match req.remote_port {
-            Some(p) => p,
-            None => allocate_port(&cfg, &existing)?,
-        };
-        let (lo, hi) = parse_port_range(&cfg.ingress.port_range).map_err(ApiError::from)?;
-        if port < i64::from(lo) || port > i64::from(hi) {
-            return Err(ApiError::bad_request(format!(
-                "remote_port 必须落在 {lo}-{hi} 区间内"
-            )));
+    // 各分类的「入口参数」完全不同：
+    // - 域名解析：要 Host（必要时由 default_domain 推导），不要端口
+    // - 端口转发：要公网端口（可自动分配），不要 Host
+    // - 私有 / P2P：不暴露公网入口，改为签发访问密钥
+    let (remote_port, host, access_key) = match kind {
+        TunnelKind::Domain => {
+            let host = match req.host.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(h) => h.to_string(),
+                None => match cfg.ingress.default_domain.as_deref() {
+                    Some(domain) => format!("{}.{}", name, domain.trim_start_matches('.')),
+                    None => {
+                        return Err(ApiError::bad_request(
+                            "域名解析需要 host，或先在配置里设置 ingress.default_domain",
+                        ))
+                    }
+                },
+            };
+            (None, Some(host), None)
         }
-        if existing.iter().any(|t| t.remote_port == Some(port)) {
-            return Err(ApiError::conflict(format!("公网端口已被占用: {port}")));
+        TunnelKind::Port => {
+            let port = match req.remote_port {
+                Some(p) => p,
+                None => allocate_port(&cfg, &existing)?,
+            };
+            let (lo, hi) = parse_port_range(&cfg.ingress.port_range).map_err(ApiError::from)?;
+            if port < i64::from(lo) || port > i64::from(hi) {
+                return Err(ApiError::bad_request(format!(
+                    "remote_port 必须落在 {lo}-{hi} 区间内"
+                )));
+            }
+            if existing.iter().any(|t| t.remote_port == Some(port)) {
+                return Err(ApiError::conflict(format!("公网端口已被占用: {port}")));
+            }
+            (Some(port), None, None)
         }
-        (Some(port), None)
-    } else {
-        let host = match req.host.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(h) => Some(h.to_string()),
-            None => match cfg.ingress.default_domain.as_deref() {
-                Some(domain) => Some(format!("{}.{}", name, domain.trim_start_matches('.'))),
-                None => {
-                    return Err(ApiError::bad_request(
-                        "http/https 隧道需要 host，或先在配置里设置 ingress.default_domain",
-                    ))
-                }
-            },
-        };
-        (None, host)
+        TunnelKind::Private | TunnelKind::P2p => {
+            // 这两类不暴露公网入口（访问端凭密钥在自己那边监听），因此顺手填的
+            // remote_port / host 一定是误解，直接拒绝比静默忽略更不容易踩坑。
+            if req.remote_port.is_some() {
+                return Err(ApiError::bad_request(format!(
+                    "{} 不分配公网端口，请去掉 remote_port",
+                    kind.label()
+                )));
+            }
+            if req
+                .host
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty())
+            {
+                return Err(ApiError::bad_request(format!(
+                    "{} 不走 Host 路由，请去掉 host",
+                    kind.label()
+                )));
+            }
+            (None, None, Some(rscross_auth::new_access_key()))
+        }
     };
+    let allow_relay = req.allow_relay.unwrap_or(true);
 
     let now = rscross_common::time::now_rfc3339();
     let record = TunnelRecord {
         id: uuid::Uuid::new_v4().to_string(),
         client_id: client_id.clone(),
         name: name.clone(),
+        kind: kind.as_str().to_string(),
         proto: proto.as_str().to_string(),
         local_addr: local_addr.clone(),
         remote_port,
         host: host.clone(),
-        path_prefix: req.path_prefix.clone().filter(|s| !s.trim().is_empty()),
+        // 路径前缀只对域名解析有意义，其余分类一律留空，免得配置里躺着看不懂的字段
+        path_prefix: match kind {
+            TunnelKind::Domain => req.path_prefix.clone().filter(|s| !s.trim().is_empty()),
+            _ => None,
+        },
+        access_key,
+        allow_relay,
         enabled: req.enabled.unwrap_or(true),
         rate_limit_kbps: req
             .rate_limit_kbps
@@ -452,12 +517,23 @@ pub async fn create_tunnel(
             Some(&user.id),
             "create_tunnel",
             Some(format!("{}:{}", record.client_id, record.name)),
-            Some(format!("{proto} ← {local_addr}")),
+            Some(format!(
+                "kind={} proto={} ← {}{}",
+                kind,
+                proto,
+                local_addr,
+                if record.access_key.is_some() {
+                    "（已签发访问密钥）"
+                } else {
+                    ""
+                }
+            )),
             &headers,
         )
         .await;
     tracing::info!(
         tunnel = %record.name,
+        kind = %kind,
         proto = %record.proto,
         local = %record.local_addr,
         "隧道已创建，等待客户端心跳生效"
@@ -499,6 +575,10 @@ pub async fn patch_tunnel(
         remote_port: req.remote_port.map(Some),
         host: req.host.clone().map(Some),
         path_prefix: req.path_prefix.clone().map(Some),
+        // 访问密钥不走 PATCH：轮换是独立动作（见 `rotate_access_key`），
+        // 混在通用补丁里容易在「只想改个名字」时顺手把密钥清掉。
+        access_key: None,
+        allow_relay: req.allow_relay,
         enabled: req.enabled,
         rate_limit_kbps: req.rate_limit_kbps.map(|v| v.max(0)),
         conn_limit: req.conn_limit.map(|v| v.max(0)),
@@ -558,6 +638,62 @@ pub async fn delete_tunnel(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// `POST /api/v1/tunnels/{id}/access-key` —— 轮换访问密钥。
+///
+/// 只对私有 / P2P 隧道有意义。密钥外泄时的处置动作：轮换后旧密钥立即失效，
+/// 访问端必须换用新密钥重新建立本地入口。
+pub async fn rotate_access_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<TunnelRecord>, ApiError> {
+    let user = state.require_admin(&headers).await?;
+    let existing = state
+        .store
+        .find_tunnel(&id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::not_found("隧道不存在"))?;
+
+    let kind = TunnelKind::parse(&existing.kind).unwrap_or_default();
+    if !kind.needs_access_key() {
+        return Err(ApiError::bad_request(format!(
+            "{} 不使用访问密钥，无需轮换",
+            kind.label()
+        )));
+    }
+
+    let key = new_access_key();
+    state
+        .store
+        .update_tunnel(TunnelPatch {
+            id: id.clone(),
+            access_key: Some(Some(key)),
+            ..Default::default()
+        })
+        .await
+        .map_err(ApiError::from)?;
+
+    state
+        .audit(
+            Some(&user.id),
+            "rotate_tunnel_access_key",
+            Some(format!("{}:{}", existing.client_id, existing.name)),
+            Some(format!("kind={kind}")),
+            &headers,
+        )
+        .await;
+    tracing::warn!(tunnel = %existing.name, "已轮换隧道访问密钥，旧密钥立即失效");
+
+    let updated = state
+        .store
+        .find_tunnel(&id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::not_found("隧道不存在"))?;
+    Ok(Json(updated))
+}
+
 fn allocate_port(cfg: &ConsoleFile, existing: &[TunnelRecord]) -> Result<i64, ApiError> {
     let (lo, hi) = parse_port_range(&cfg.ingress.port_range).map_err(ApiError::from)?;
     let used: std::collections::HashSet<i64> =
@@ -595,11 +731,14 @@ mod tests {
             id: "t".into(),
             client_id: "c".into(),
             name: "a".into(),
+            kind: "port".into(),
             proto: "tcp".into(),
             local_addr: "127.0.0.1:1".into(),
             remote_port: Some(20000),
             host: None,
             path_prefix: None,
+            access_key: None,
+            allow_relay: true,
             enabled: true,
             rate_limit_kbps: 0,
             conn_limit: 0,

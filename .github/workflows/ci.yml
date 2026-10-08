@@ -26,17 +26,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: 检查格式（本 job 不 gate；失败时打印可照抄的 diff）
+      - name: 检查格式（不 gate；差异打成 patch 工件便于直接应用）
         run: |
           set +e
           cargo fmt --all
           if git diff --quiet; then
             echo "✅ 格式无差异"
+            git diff > rustfmt.patch
             exit 0
           fi
-          echo "::warning::存在未格式化的文件，下面是对应的 rustfmt 结果"
-          git --no-pager diff
+          echo "::warning::存在未格式化的文件；已生成 rustfmt.patch 工件"
+          git --no-pager diff --stat
+          # 用 LF 生成补丁，避免 Windows 上 checkout 成 CRLF 后无法 git apply
+          git -c core.autocrlf=false diff > rustfmt.patch
           exit 1
+      - name: 上传 rustfmt 补丁
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustfmt.patch
+          path: rustfmt.patch
+          if-no-files-found: ignore
+          retention-days: 7
 
   check:
     name: cargo check

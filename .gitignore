@@ -16,6 +16,9 @@ rscross-server.toml
 rscross-client.toml
 *.local.toml
 
+# 工作区临时文件（CI 助手脚本等）
+.workbuddy/
+
 # IDE / OS
 .idea/
 .vscode/

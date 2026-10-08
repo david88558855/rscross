@@ -152,9 +152,9 @@ impl ProxyRegistry {
             return self.get(name.as_str());
         }
         // 通配匹配：*.example.com
-        for (pattern, name) in self.domain_index.iter() {
-            if rscross_common::util::domain_match(pattern.as_str(), &d) {
-                return self.get(name.as_str());
+        for entry in self.domain_index.iter() {
+            if rscross_common::util::domain_match(entry.key(), &d) {
+                return self.get(entry.value());
             }
         }
         None

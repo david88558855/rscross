@@ -15,8 +15,8 @@ const CHUNK_SIZE: usize = 32 * 1024;
 /// - `limit`：每秒字节上限，`None` 表示不限速
 /// - `on_bytes`：每次传输的字节数回调，用于统计流量
 pub async fn relay_bidirectional<A, B>(
-    mut a: A,
-    mut b: B,
+    a: A,
+    b: B,
     limit: Option<u64>,
     on_bytes: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 ) -> io::Result<(u64, u64)>
@@ -352,7 +352,12 @@ mod tests {
 
         let counter = Arc::new(TrafficCounter::new());
         let c2 = counter.clone();
-        let (up, down) = relay_bidirectional(a1, b1, None, Some(c2)).await.unwrap();
+        let on_bytes: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |n: u64| {
+            c2.add_output(n);
+        });
+        let (up, down) = relay_bidirectional(a1, b1, None, Some(on_bytes))
+            .await
+            .unwrap();
 
         assert_eq!(up, payload.len() as u64);
         assert_eq!(down, 0);

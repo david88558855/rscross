@@ -167,7 +167,7 @@ impl AgentService {
 
     /// 单次连接会话
     async fn connect_once(self: Arc<Self>, addr: &str) -> Result<(), String> {
-        let mut stream = TcpStream::connect(addr)
+        let stream = TcpStream::connect(addr)
             .await
             .map_err(|e| format!("连接 {addr} 失败: {e}"))?;
         let _ = stream.set_nodelay(true);
@@ -194,11 +194,12 @@ impl AgentService {
             metadatas: self.config.metadatas.clone(),
             hostname: hostname(),
         };
-        msg::write_message(
-            &mut writer,
-            &Envelope::new(msg_type::LOGIN, serde_json::to_value(login).unwrap()),
-        )
-        .await?;
+        // 登录：交给写循环按序发出（writer 已移入写任务）
+        tx.send(Envelope::new(
+            msg_type::LOGIN,
+            serde_json::to_value(login).unwrap(),
+        ))
+        .map_err(|_| "控制通道已关闭".to_string())?;
 
         // 等待登录响应
         let env = msg::read_message(&mut reader)
@@ -321,7 +322,7 @@ impl AgentService {
 
         // 连接本地服务
         let local = format!("{}:{}", cfg.local_ip, cfg.local_port);
-        let mut local_stream = match TcpStream::connect(&local).await {
+        let local_stream = match TcpStream::connect(&local).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(local, error = %e, "连接本地服务失败");

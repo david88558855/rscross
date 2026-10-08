@@ -223,8 +223,7 @@ impl HubServer {
             })
             .unwrap(),
         );
-        let mut w = &stream;
-        msg::write_message(&mut w, &resp)
+        msg::write_message(&mut stream, &resp)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -459,7 +458,7 @@ impl HubServer {
     /// 处理入站流量：向客户端请求工作连接并转发
     async fn handle_inbound(
         self: Arc<Self>,
-        mut inbound: TcpStream,
+        inbound: TcpStream,
         peer: SocketAddr,
         proxy_name: String,
     ) {
@@ -497,7 +496,7 @@ impl HubServer {
 
         // 等待客户端回连（超时 10 秒）
         let work = tokio::time::timeout(Duration::from_secs(10), work_rx.recv()).await;
-        let Ok(Some(mut work_stream)) = work else {
+        let Ok(Some(work_stream)) = work else {
             session.work_conn_waiters.remove(&conn_id);
             tracing::debug!(proxy = %proxy_name, "等待工作连接超时");
             return;
@@ -690,7 +689,7 @@ pub async fn read_exact_n(stream: &mut TcpStream, n: usize) -> std::io::Result<V
 
 /// 立即关闭流
 pub async fn close_stream(stream: &TcpStream) {
-    let _ = stream.shutdown().await;
+    let _ = tokio::net::TcpStream::shutdown(stream).await;
 }
 
 /// 生成 map 快照

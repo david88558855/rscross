@@ -1,0 +1,21 @@
+[package]
+name = "rscross-auth"
+description = "rscross 认证与鉴权原语（密码哈希、令牌、会话、登录限流）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rscross-common = { workspace = true }
+rscross-store = { workspace = true }
+argon2 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

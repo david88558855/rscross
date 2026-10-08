@@ -1,0 +1,21 @@
+# cross-rs 配置（musl 静态交叉编译）
+# 说明：本机禁止编译，所有产物均由 GitHub Actions 上的 cross 容器产出。
+# 依赖裁剪：见 docs/BUILD.md「依赖裁剪方案」。
+
+[build]
+# 只构建两个产物，避免 workspace 里其它 target 拖慢 CI
+default-target = "x86_64-unknown-linux-musl"
+
+[target.x86_64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH || true",
+    "apt-get update && apt-get install --assume-yes --no-install-recommends pkg-config",
+]
+
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH || true",
+    "apt-get update && apt-get install --assume-yes --no-install-recommends pkg-config",
+]

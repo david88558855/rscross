@@ -1,0 +1,23 @@
+[package]
+name = "rscross-transport"
+description = "rscross 传输层：Iroh（打洞/中继/密钥交换/节点发现）与 FerroTunnel（反向隧道中继）适配"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rscross-common = { workspace = true }
+rscross-config = { workspace = true }
+
+# 要求 1：二者均需实际集成
+iroh = { workspace = true }
+ferrotunnel = { workspace = true }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }

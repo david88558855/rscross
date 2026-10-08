@@ -1,0 +1,6 @@
+[toolchain]
+# FerroTunnel 1.5 要求 Rust >= 1.91；Iroh 1.3 使用 edition 2024。
+# CI 一律使用 stable，由 actions-rust-cross / dtolnay action 提供。
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

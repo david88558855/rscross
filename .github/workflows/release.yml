@@ -1,0 +1,136 @@
+name: release
+
+# 发版流程（不要在分支推送上期望它跑）：
+#   git tag -a v0.1.0 -m "rscross v0.1.0" && git push origin v0.1.0
+# 产物：两个 musl 静态二进制 × 两个架构 + sha256 校验和。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要构建并发布的 tag（例如 v0.1.0）"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARIES: rscross-server rscross-client
+
+jobs:
+  build:
+    name: musl ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - uses: taiki-e/install-action@cross
+
+      - name: 交叉编译
+        run: |
+          cross build --release --target ${{ matrix.target }} \
+            --bin rscross-server --bin rscross-client
+
+      - name: 打包与校验和
+        run: |
+          set -euo pipefail
+          REF="${{ github.event.inputs.tag || github.ref_name }}"
+          NAME="rscross-${REF}-${{ matrix.target }}"
+          mkdir -p "stage/$NAME"
+          OUT="target/${{ matrix.target }}/release"
+          cp "$OUT/rscross-server" "$OUT/rscross-client" "stage/$NAME/"
+          cp README.md LICENSE "stage/$NAME/" 2>/dev/null || true
+          mkdir -p dist
+          tar -C stage -czf "dist/$NAME.tar.gz" "$NAME"
+          ( cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
+          ls -lh dist/
+
+      - name: 静态链接断言
+        run: |
+          set -euo pipefail
+          OUT="target/${{ matrix.target }}/release"
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            ldd "$OUT/rscross-server" 2>&1 | grep -Eq "not a dynamic executable|statically linked"
+            "$OUT/rscross-server" --version
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static
+            qemu-aarch64-static "$OUT/rscross-server" --version
+          fi
+          echo "✅ ${{ matrix.target }} 静态产物可用"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    name: 创建 Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 生成发布说明（tag 注解正文 + 产物清单）
+        run: |
+          set -euo pipefail
+          REF="${{ github.event.inputs.tag || github.ref_name }}"
+          git tag -l --format='%(contents:body)' "$REF" > notes.md 2>/dev/null || true
+          if [ ! -s notes.md ]; then
+            echo "rscross $REF" > notes.md
+          fi
+          {
+            echo
+            echo "## 产物"
+            echo
+            echo "| 文件 | 说明 |"
+            echo "|---|---|"
+            for f in artifacts/*.tar.gz; do
+              base="$(basename "$f")"
+              echo "| \`$base\` | musl 静态二进制（server + client） |"
+            done
+            echo
+            echo "### 校验"
+            echo '```'
+            cat artifacts/*.sha256
+            echo '```'
+            echo
+            echo "### 快速开始"
+            echo '```bash'
+            echo "# 服务端"
+            echo "./rscross-server --config rscross-server.toml"
+            echo "# 客户端（令牌在控制台「客户端管理」里签发）"
+            echo "./rscross-client --server http://<服务端IP>:7800 \\"
+            echo "    --tunnel-server <服务端IP>:7835 --name node-1 --enroll-token <令牌>"
+            echo '```'
+          } >> notes.md
+          ls -lh artifacts/
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          body_path: notes.md
+          files: artifacts/*
+          draft: false
+          prerelease: false

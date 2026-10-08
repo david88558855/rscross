@@ -1,0 +1,37 @@
+[package]
+name = "rscross-server"
+description = "rscross 服务端：反向隧道中继 + Iroh 节点 + 控制台 API + 内嵌 Web 控制台"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "rscross_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rscross-server"
+path = "src/main.rs"
+
+[dependencies]
+rscross-common = { workspace = true }
+rscross-config = { workspace = true }
+rscross-store = { workspace = true }
+rscross-auth = { workspace = true }
+rscross-transport = { workspace = true }
+
+axum = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

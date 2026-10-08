@@ -1,0 +1,14 @@
+[package]
+name = "rscross-config"
+description = "rscross 配置模型、加载/保存与校验"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rscross-common = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }

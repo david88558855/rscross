@@ -123,10 +123,9 @@ pub async fn provision_node_with(
         node_token_hash: token_hash(&token),
         tunnel_token,
         public_host,
-        public_addr: extras
-            .public_addr
-            .filter(|v| !v.trim().is_empty()),
-        description: extras.description.filter(|v| !v.trim().is_empty()),
+        // 再校验一次：CLI 引导等调用方不经过 HTTP 层，不能绕过格式检查。
+        public_addr: normalize_public_addr(extras.public_addr.as_deref())?,
+        description: normalize_description(extras.description.as_deref())?,
         transport: extras.transport.unwrap_or_else(|| DEFAULT_TRANSPORT.to_string()),
         // 默认开启：直连失败还能走中继，比「连不上」好。
         allow_relay: extras.allow_relay.unwrap_or(true),
@@ -317,8 +316,8 @@ pub async fn create_node(
         req.tunnel_token,
         Some(user.username.clone()),
         NodeExtras {
-            description: req.description,
-            public_addr: req.public_addr,
+            description: normalize_description(req.description.as_deref())?,
+            public_addr: normalize_public_addr(req.public_addr.as_deref())?,
             transport: normalize_transport(req.transport.as_deref())?,
             allow_relay: req.allow_relay,
         },
@@ -401,6 +400,89 @@ fn normalize_transport(raw: Option<&str>) -> Result<Option<String>, ApiError> {
     }
 }
 
+/// 介绍的最大长度。
+///
+/// 200 字足够写清「哪台机器、什么线路、带宽多少」，再长就没人看了 ——
+/// 而没人看的字段会诱使人往里塞密码、密钥这类必须另找地方存的东西。
+pub const MAX_DESCRIPTION: usize = 200;
+
+/// 校验并规范化介绍。空串按「清空」处理（返回 `None`）。
+pub fn normalize_description(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(text) = raw.map(str::trim) else {
+        return Ok(None);
+    };
+    if text.is_empty() {
+        return Ok(None);
+    }
+    // 按字符数而不是字节数：中文一个字占 3 字节，按字节算会让 70 个汉字就超限。
+    let chars = text.chars().count();
+    if chars > MAX_DESCRIPTION {
+        return Err(ApiError::bad_request(format!(
+            "介绍不能超过 {MAX_DESCRIPTION} 个字（当前 {chars} 个）"
+        )));
+    }
+    Ok(Some(text.to_string()))
+}
+
+/// 校验并规范化「服务端地址」。
+///
+/// 客户端要拿这个地址去连反向隧道，所以格式必须在这里挡住：
+/// 写错一个字符的表现是「客户端连不上」，而客户端根本不知道自己连的是哪台
+/// 机器，日志里只看得到一个连不上的 IP。可接受形态：
+///
+/// - `1.2.3.4:7835` / `node1.example.com:17835` —— 主机 + 端口
+/// - `node1.example.com` —— 仅主机（端口用节点上报值补齐）
+/// - `[2001:db8::1]:7835` —— IPv6 要用方括号
+///
+/// 刻意**不**允许写 scheme：这不是浏览器地址，客户端会自己按 `host:port` 连，
+/// 填 `http://` 会被原样拼进 host 导致连不上。
+pub fn normalize_public_addr(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(text) = raw.map(str::trim) else {
+        return Ok(None);
+    };
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if text.contains("://") {
+        return Err(ApiError::bad_request(
+            "服务端地址只填 host 或 host:port，不要带 http:// 这样的协议前缀",
+        ));
+    }
+    if text.contains('/') || text.contains('?') || text.contains('#') {
+        return Err(ApiError::bad_request(
+            "服务端地址只填 host 或 host:port，不要带路径、查询串或片段",
+        ));
+    }
+    if text.chars().any(char::is_whitespace) {
+        return Err(ApiError::bad_request("服务端地址不能包含空格"));
+    }
+
+    let (host, port) = match text.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (text, None),
+    };
+    if host.is_empty() {
+        return Err(ApiError::bad_request("服务端地址缺少主机部分"));
+    }
+    if host.contains(':') && !host.starts_with('[') {
+        return Err(ApiError::bad_request(format!(
+            "IPv6 地址要用方括号包起来，如 [2001:db8::1]:7835（当前 {host}）"
+        )));
+    }
+    if let Some(p) = port {
+        if p.is_empty() {
+            return Err(ApiError::bad_request("服务端地址的端口不能为空"));
+        }
+        let parsed: u16 = p.parse().map_err(|_| {
+            ApiError::bad_request(format!("端口必须是 1-65535 的整数（当前 {p}）"))
+        })?;
+        if parsed == 0 {
+            return Err(ApiError::bad_request("端口不能是 0"));
+        }
+    }
+    Ok(Some(text.to_string()))
+}
+
 /// 修改节点请求。
 #[derive(Debug, Deserialize)]
 pub struct PatchNodeRequest {
@@ -438,14 +520,19 @@ pub async fn patch_node(
         .as_deref()
         .map(|v| Some(v.trim().to_string()).filter(|s| !s.is_empty()));
 
-    let public_addr = req
-        .public_addr
-        .as_deref()
-        .map(|v| Some(v.trim().to_string()).filter(|s| !s.is_empty()));
-    let description = req
-        .description
-        .as_deref()
-        .map(|v| Some(v.trim().to_string()).filter(|s| !s.is_empty()));
+    // 传空串 = 清空（回落到自动推导）；不传 = 不改；传非法值 = 400。
+    //
+    // 这里刻意让校验错误冒出来而不是 `unwrap_or(None)` —— 后者会把
+    // 「地址写错了」悄悄变成「清空地址」，用户以为自己改了配置，
+    // 实际是把它删了。
+    let public_addr = match req.public_addr.as_deref() {
+        Some(v) => Some(normalize_public_addr(Some(v))?),
+        None => None,
+    };
+    let description = match req.description.as_deref() {
+        Some(v) => Some(normalize_description(Some(v))?),
+        None => None,
+    };
     let transport = normalize_transport(req.transport.as_deref())?;
 
     if name.is_some() || public_host.is_some() || public_addr.is_some() || description.is_some() || transport.is_some() || req.allow_relay.is_some() {
@@ -863,6 +950,72 @@ mod tests {
         assert!(cmd.contains("--managed"));
         assert!(cmd.contains("--name node-1"));
         assert!(cmd.contains("--enroll-token rsn_abc"));
+    }
+
+    #[test]
+    fn public_addr_accepts_the_three_documented_shapes() {
+        for good in [
+            "10.0.0.5",
+            "10.0.0.5:7835",
+            "node1.example.com:17835",
+            "[2001:db8::1]:7835",
+        ] {
+            let got = normalize_public_addr(Some(good)).expect(good);
+            assert_eq!(got.as_deref(), Some(good));
+        }
+        // 空串 / 未填 = 清空
+        assert_eq!(normalize_public_addr(Some("  ")).expect("空串"), None);
+        assert_eq!(normalize_public_addr(None).expect("未填"), None);
+    }
+
+    #[test]
+    fn public_addr_rejects_what_would_fail_at_connect_time() {
+        // 每一条都是「客户端连不上但看不出原因」的形态：填 http:// 会被原样
+        // 拼进 host，端口非法解析不了，路径根本用不上。
+        for bad in [
+            "http://node1.example.com",
+            "https://1.2.3.4:7835",
+            "node1.example.com/path",
+            "node1.example.com?x=1",
+            "node1.example.com:",
+            "node1.example.com:0",
+            "node1.example.com:70000",
+            "node1.example.com:abc",
+            ":7835",
+            "2001:db8::1:7835",
+            "has space:7835",
+        ] {
+            let err = normalize_public_addr(Some(bad)).expect_err(bad);
+            assert_eq!(
+                err.status,
+                axum::http::StatusCode::BAD_REQUEST,
+                "{bad:?} 应返回 400"
+            );
+        }
+    }
+
+    #[test]
+    fn description_limit_counts_characters_not_bytes() {
+        // 70 个汉字 = 210 字节但只有 70 个字，按字节算会误判超限。
+        let ok = "港".repeat(MAX_DESCRIPTION);
+        assert!(normalize_description(Some(&ok)).is_ok());
+        let too_long = "港".repeat(MAX_DESCRIPTION + 1);
+        let err = normalize_description(Some(&too_long)).expect_err("超限应报错");
+        assert!(err.message.contains(&MAX_DESCRIPTION.to_string()), "{}", err.message);
+        assert_eq!(normalize_description(Some("   ")).expect("空白"), None);
+        assert_eq!(normalize_description(None).expect("未填"), None);
+    }
+
+    #[test]
+    fn transport_whitelist_rejects_typos() {
+        assert_eq!(
+            normalize_transport(Some("WSS")).expect("大小写不敏感").as_deref(),
+            Some("wss")
+        );
+        assert!(normalize_transport(Some("")).expect("空串=未设置").is_none());
+        // sctp / typo 必须被拒 —— 它拼错后的表现是「节点上线了但隧道全不通」
+        assert!(normalize_transport(Some("sctp")).is_err());
+        assert!(normalize_transport(Some("tcp ")).is_ok(), "两端空白应被容忍");
     }
 
     #[test]

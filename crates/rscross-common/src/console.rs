@@ -77,9 +77,16 @@ impl ConsoleScheme {
             ("ws://", ConsoleScheme::Ws),
             ("txt://", ConsoleScheme::Txt),
         ];
+        // 只对「scheme 那几个字符」做大小写无关比较，`://` 之后的 host
+        // 原样保留 —— 主机名大小写本来不敏感，但路径可能大小写敏感，
+        // 顺手改掉会真的连错地址。
+        //
+        // 用户从文档里复制 `WSS://…` 是很常见的，值得多这一步。
+        let prefix_len = spec.find("://").map(|i| i + 3).unwrap_or(0);
+        let (head, tail) = spec.split_at(prefix_len);
         for (prefix, scheme) in candidates {
-            if let Some(rest) = spec.strip_prefix(prefix) {
-                return Ok((scheme, rest));
+            if head.eq_ignore_ascii_case(prefix) {
+                return Ok((scheme, tail));
             }
         }
         Err(Error::config(format!(

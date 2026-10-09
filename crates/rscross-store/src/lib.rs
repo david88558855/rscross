@@ -1353,9 +1353,13 @@ pub struct TrafficBucket {
     pub conns: i64,
 }
 
+// 列顺序必须与 `map_node` 的下标一一对应。
+// 两者靠位置绑定，加列时只改一边就会让查询整体报「列数不匹配」——
+// 表现为所有节点查询都失败，而不是某一列读错值。
 const NODE_SELECT: &str = "SELECT id, name, status, node_token_hash, tunnel_token, public_host,
     tunnel_port, ingress_port, version, os, arch, endpoint_id, endpoint_addr, public_ip,
-    last_seen_at, last_error, created_at, updated_at, disabled FROM nodes";
+    last_seen_at, last_error, created_at, updated_at, disabled,
+    public_addr, description, transport, allow_relay FROM nodes";
 
 const CLIENT_SELECT: &str = "SELECT id, node_id, name, status, agent_token_hash, version, os, arch,
     endpoint_id, endpoint_addr, public_ip, last_seen_at, last_error, created_at, updated_at, disabled

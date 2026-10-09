@@ -453,6 +453,7 @@
               esc(n.endpoint_id ? String(n.endpoint_id).slice(0, 10) + '…' : '—') + '</td>' +
             '<td class="nowrap">' + esc(relTime(n.last_seen_at)) + '</td>' +
             '<td class="right row-actions">' +
+              '<button class="sm" data-node-edit="' + esc(n.id) + '">编辑</button>' +
               '<button class="sm" data-node-rotate="' + esc(n.id) + '" data-name="' + esc(n.name) + '">轮换令牌</button>' +
               '<button class="sm" data-node-disable="' + esc(n.id) + '" data-disabled="' + (n.disabled ? '1' : '0') + '">' +
                 (n.disabled ? '启用' : '禁用') + '</button>' +
@@ -515,6 +516,17 @@
       };
     });
 
+    // 编辑：复用新建的同一个表单（openNodeModal 传节点即编辑态）。
+    // 这样校验、字段说明、默认值规则只有一份，不会两处慢慢漂移。
+    document.querySelectorAll('[data-node-edit]').forEach((el) => {
+      el.onclick = () => {
+        const id = el.getAttribute('data-node-edit');
+        const node = (state.nodes || []).find((n) => n.id === id);
+        if (!node) { toast('节点信息已变化，请刷新后重试', 'err'); return; }
+        openNodeModal(node);
+      };
+    });
+
     document.querySelectorAll('[data-node-rotate]').forEach((el) => {
       el.onclick = async () => {
         const name = el.getAttribute('data-name');
@@ -547,32 +559,73 @@
 
   // 与后端 rscross_control::api::nodes::TRANSPORTS 保持一致。
   const TRANSPORTS = ['tcp', 'udp', 'quic', 'kcp', 'ws', 'wss'];
+  // 与后端 MAX_DESCRIPTION 保持一致。
+  const MAX_DESC = 200;
 
-  function openNodeModal() {
+  // 前端校验与服务端同源。这里做一遍是为了即时反馈 ——
+  // 但它**不能**替代服务端校验：前端可以被绕过，且脚本可能未加载。
+  function checkName(v) {
+    if (!v) return '节点名不能为空';
+    if (v.length > 64) return '节点名不能超过 64 个字符';
+    if (!/^[A-Za-z0-9._-]+$/.test(v)) return "节点名只能包含字母、数字、'-'、'_'、'.'";
+    return '';
+  }
+
+  function checkAddr(v) {
+    if (!v) return '';   // 留空 = 自动推导，允许
+    if (v.indexOf('://') >= 0) return '只填 host 或 host:port，不要带 http:// 这样的协议前缀';
+    if (/[/?#]/.test(v)) return '只填 host 或 host:port，不要带路径或查询串';
+    if (/\s/.test(v)) return '不能包含空格';
+    // 端口：拆最后一个冒号（IPv6 的冒号在方括号内）
+    const m = /^(.*):([^:]*)$/.exec(v);
+    if (m) {
+      if (!m[1]) return '缺少主机部分';
+      if (!/^\d+$/.test(m[2])) return '端口必须是数字';
+      const p = Number(m[2]);
+      if (p < 1 || p > 65535) return '端口必须在 1-65535 之间';
+    }
+    return '';
+  }
+
+  // node 为空表示「新建」；否则为「编辑」。
+  function openNodeModal(node) {
+    const editing = !!(node && node.id);
+    const v = node || {};
+    const vName = v.name || '';
+    const vDesc = v.description || '';
+    const vHost = v.public_host || '';
+    const vAddr = v.public_addr || '';
+    const vProto = (v.transport || 'tcp');
+    const vRelay = v.allow_relay !== false;
+
     const html = '' +
       '<div class="modal-mask" id="modal"><div class="modal">' +
-        '<h3>添加自建节点</h3><div class="modal-body">' +
-          '<label class="field"><span>节点名</span><input id="n-name" placeholder="node-hk-1" />' +
-            '<div class="hint">仅字母、数字、-、_、.。</div></label>' +
+        '<h3>' + (editing ? '编辑节点「' + esc(vName) + '」' : '添加自建节点') + '</h3><div class="modal-body">' +
+          '<label class="field"><span>节点名</span>' +
+            '<input id="n-name" placeholder="node-hk-1" value="' + esc(vName) + '"' +
+              (editing ? ' disabled' : '') + ' />' +
+            '<div class="hint">' + (editing ? '节点名创建后不可修改。'
+              : '仅字母、数字、-、_、.。最多 64 个字符。') + '</div></label>' +
           '<label class="field"><span>介绍</span>' +
-            '<input id="n-desc" placeholder="香港出口 · 带宽 20Mbps" />' +
-            '<div class="hint">仅展示，方便区分多台节点；不影响连接。</div></label>' +
+            '<input id="n-desc" maxlength="' + MAX_DESC + '" placeholder="香港出口 · 带宽 20Mbps" value="' + esc(vDesc) + '" />' +
+            '<div class="hint"><span id="n-desc-count">' + vDesc.length + '</span>/' + MAX_DESC +
+              '。仅展示，方便区分多台节点；不影响连接。</div></label>' +
           '<label class="field"><span>对外主机 / IP</span>' +
-            '<input id="n-host" placeholder="203.0.113.9 或 node1.example.com" />' +
+            '<input id="n-host" placeholder="203.0.113.9 或 node1.example.com" value="' + esc(vHost) + '" />' +
             '<div class="hint">对外怎么访问（DNS 解析用）。留空则用控制台观测到的出口 IP。</div></label>' +
           '<label class="field"><span>服务端地址</span>' +
-            '<input id="n-addr" placeholder="10.0.0.5:17835 或 node1.example.com:17835" />' +
-            '<div class="hint"><strong>客户端据此地址连接该服务端</strong>。' +
+            '<input id="n-addr" placeholder="10.0.0.5:17835 或 node1.example.com" value="' + esc(vAddr) + '" />' +
+            '<div class="hint"><strong>客户端据此地址连接该服务端</strong>，只填 host 或 host:port。' +
               '与上面的「对外主机」不同：内嵌形态下节点拿不到自己的公网出口 IP，' +
               '自动推导会回落到 127.0.0.1，客户端照着连就连到本机去了。' +
-              '本机部署可留空。</div></label>' +
+              '留空则自动推导。</div></label>' +
           '<label class="field"><span>传输协议</span>' +
             '<select id="n-transport">' +
-              TRANSPORTS.map((t) => '<option value="' + t + '"' + (t === 'tcp' ? ' selected' : '') + '>' + t + '</option>').join('') +
+              TRANSPORTS.map((t) => '<option value="' + t + '"' + (t === vProto ? ' selected' : '') + '>' + t + '</option>').join('') +
             '</select>' +
             '<div class="hint">该节点承载流量时使用的传输协议。</div></label>' +
           '<label class="field"><span>P2P 中继</span>' +
-            '<label class="switch"><input type="checkbox" id="n-relay" checked />' +
+            '<label class="switch"><input type="checkbox" id="n-relay"' + (vRelay ? ' checked' : '') + ' />' +
               '<span>直连失败时回退到该节点中继</span></label>' +
             '<div class="hint">关闭后 P2P 隧道在中继不可用时会直接连不上。' +
               '保持开启：直连快，失败还能通。</div></label>' +
@@ -580,7 +633,8 @@
         '</div>' +
         '<div class="modal-foot">' +
           '<button id="m-cancel">关闭</button>' +
-          '<button class="primary" id="m-ok">创建并签发令牌</button>' +
+          '<button class="primary" id="m-ok">' +
+            (editing ? '保存' : '创建并签发令牌') + '</button>' +
         '</div>' +
       '</div></div>';
 
@@ -589,27 +643,54 @@
     $('m-cancel').onclick = close;
     $('modal').onclick = (e) => { if (e.target.id === 'modal') close(); };
 
+    // 介绍字数实时提示：超限时直接标红，别等提交被拒。
+    $('n-desc').oninput = (e) => {
+      const n = e.target.value.length;
+      const cnt = $('n-desc-count');
+      cnt.textContent = String(n);
+      cnt.style.color = n > MAX_DESC ? 'var(--danger)' : '';
+    };
+
     $('m-ok').onclick = async () => {
-      const name = $('n-name').value.trim();
-      if (!name) { toast('请填写节点名', 'err'); return; }
+      const name = editing ? vName : $('n-name').value.trim();
+      const nameErr = editing ? '' : checkName(name);
+      if (nameErr) { toast(nameErr, 'err'); return; }
+
+      const desc = $('n-desc').value.trim();
+      if (desc.length > MAX_DESC) {
+        toast('介绍不能超过 ' + MAX_DESC + ' 个字（当前 ' + desc.length + ' 个）', 'err');
+        return;
+      }
+      const addr = $('n-addr').value.trim();
+      const addrErr = checkAddr(addr);
+      if (addrErr) { toast(addrErr, 'err'); return; }
+
+      const body = {
+        description: desc || null,
+        public_host: $('n-host').value.trim() || null,
+        public_addr: addr || null,
+        transport: $('n-transport').value,
+        allow_relay: $('n-relay').checked,
+      };
+      if (!editing) body.name = name;
+
       try {
-        const res = await api('/api/v1/nodes', {
-          method: 'POST',
-          body: {
-            name,
-            description: $('n-desc').value.trim() || null,
-            public_host: $('n-host').value.trim() || null,
-            public_addr: $('n-addr').value.trim() || null,
-            transport: $('n-transport').value,
-            allow_relay: $('n-relay').checked,
-          },
-        });
-        $('n-result').innerHTML =
-          '<label class="field"><span>在公网机器上执行</span></label>' +
-          '<pre class="code" id="n-cmd">' + esc(res.command) + '</pre>' +
-          '<p class="muted" style="font-size:12px">节点令牌只显示这一次。</p>' +
-          '<div style="margin-top:8px">' + copyButton('n-cmd', '复制命令') + '</div>';
-        bindCopyButtons();
+        if (editing) {
+          await api('/api/v1/nodes/' + encodeURIComponent(node.id), { method: 'PATCH', body });
+          toast('节点已保存', 'ok');
+          close();
+        } else {
+          const res = await api('/api/v1/nodes', { method: 'POST', body });
+          // 令牌只显示这一次，所以编辑入口不放在这里 ——
+          // 需要重新拿命令用「轮换令牌」。
+          $('n-result').innerHTML =
+            '<label class="field"><span>在公网机器上执行</span></label>' +
+            '<pre class="code" id="n-cmd">' + esc(res.command) + '</pre>' +
+            '<p class="muted" style="font-size:12px">节点令牌只显示这一次。</p>' +
+            '<div style="margin-top:8px">' + copyButton('n-cmd', '复制命令') + '</div>';
+          bindCopyButtons();
+          $('m-ok').disabled = true;
+        }
         state.nodes = null;
         render.bind(null);
       } catch (err) { toast(err.message, 'err'); }

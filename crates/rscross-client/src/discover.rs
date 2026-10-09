@@ -244,7 +244,31 @@ mod tests {
     async fn bad_spec_reports_supported_forms() {
         let err = discover("1.2.3.4:7700").await.expect_err("缺 scheme 应报错");
         let text = err.to_string();
-        assert!(text.contains("ws://"), "提示里应列出支持的写法：{text}");
+        // 提示里必须列出全部五种写法 —— 只说「格式错误」的话，
+        // 用户得自己猜这五种里哪一种才对。
+        for scheme in ["ws", "wss", "http", "https", "txt"] {
+            assert!(text.contains(scheme), "提示里应列出 {scheme} 支持：{text}");
+        }
+        // 也要带上他实际写的那串，方便他核对是哪里写错了
+        assert!(text.contains("1.2.3.4:7700"), "提示应回显原始输入：{text}");
+    }
+
+    #[tokio::test]
+    async fn scheme_is_matched_case_insensitively() {
+        // 用户从文档里复制 WSS:// 是很常见的；大小写不该影响解析。
+        let addr = discover("WSS://c.example.com/ws").await.expect("大小写不敏感");
+        assert_eq!(addr.scheme, rscross_common::console::ConsoleScheme::Wss);
+        // 关键是 host / path 原样保留 —— 路径可能大小写敏感，
+        // 顺手改小写会真的连错地址。
+        assert_eq!(addr.ws_url, "WSS://c.example.com/ws");
+    }
+
+    #[tokio::test]
+    async fn unknown_scheme_lists_the_known_ones() {
+        let err = discover("ftp://x.example.com").await.expect_err("未知 scheme 应报错");
+        let text = err.to_string();
+        assert!(text.contains("ftp://x.example.com"), "应回显原始输入：{text}");
+        assert!(text.contains("wss"), "应列出可用写法：{text}");
     }
 
     #[tokio::test]

@@ -431,6 +431,36 @@ def check_web_console(label: str, base: str) -> None:
     # 切到别的页面就会抛 TypeError 变成白屏。节点集合要么是数组，要么就别动它。
     web("节点缓存不会被置空（避免顶栏角标取 length 崩溃）",
         "state.nodes = null" not in js, "app.js 仍会把 state.nodes 置空")
+    # 「创建了客户端但列表里没有」：签发令牌的弹窗过去只关窗、从不刷新列表，
+    # 于是关掉弹窗看到的还是打开之前那份数据。节点表单早有 dirty 重绘机制，
+    # 客户端这边一直缺，这条守着它别再丢。
+    web("客户端签发后也会触发列表重绘（与节点同款 dirty 机制）",
+        js.count("if (dirty) render();") >= 2,
+        f"app.js 中 if (dirty) render() 只出现 {js.count('if (dirty) render();')} 次，节点与客户端各需一次")
+    # 「待接入」= 已签发令牌、客户端还没注册。没有这一段，用户签发完关掉弹窗
+    # 就什么都看不到，只能怀疑自己操作失败。
+    web("客户端列表会拉取「待接入」令牌", "/api/v1/enroll-tokens" in js,
+        "app.js 未调用待接入令牌接口")
+    web("待接入条目提供「复制命令」入口", "data-token-cmd" in js,
+        "app.js 缺少待接入条目的复制命令按钮")
+    web("待接入条目提供「撤销」入口", "data-token-revoke" in js,
+        "app.js 缺少待接入条目的撤销按钮")
+    # 接入命令不再"只显示一次"：节点列表要能随时取回命令原文。
+    web("节点列表提供「接入命令」入口", "data-node-cmd" in js,
+        "app.js 缺少节点接入命令按钮")
+    # 创建节点时可填端口转发端口池。
+    web("节点表单支持填写端口池", "n-range" in js and "checkPortRange" in js,
+        "app.js 缺少端口池字段或校验函数")
+    # 密码下限必须前后端一致：曾经前端拦 8 位、后端放 6 位，
+    # 结果「界面说太短、接口说没问题」，用户完全不知道该信哪个。
+    web("密码下限文案与后端一致（6 位）",
+        "至少 6 位" in js and "至少 8 位" not in js,
+        "app.js 的密码长度文案与后端 PASSWORD_MIN_LEN 不一致")
+    # 客户端列表的空态占位必须**真的**渲染出去：它曾经被算出来却赋给了一个
+    # 没人用的变量，结果「一条都没有」时表格是纯空白，看不出该怎么继续。
+    web("客户端列表的空态占位真正接入表格",
+        "'<tbody>' + tbody" in js,
+        "app.js 计算了空态占位却没渲染它")
 
     status, headers, css = http_raw(base + "/app.css")
     ct = headers.get("content-type", "")
@@ -1833,6 +1863,26 @@ ring_capacity = 500
         issued["command"],
     )
 
+    # 「签发完、关掉弹窗，列表里什么都没有」的回归守卫：
+    # 待接入列表必须把这条刚签发、还没被用掉的令牌显示出来，并带回可复制的命令。
+    status, pending = http_json("GET", base + "/api/v1/enroll-tokens", token=token)
+    check_eq(f"{label}: 待接入列表可读", 200, status)
+    hit = [t for t in (pending or []) if t.get("client_name") == "orphan"]
+    if not check(
+        f"{label}: 刚签发的令牌出现在待接入列表",
+        len(hit) == 1,
+        str(pending)[:240],
+    ):
+        console.stop()
+        return
+    check_eq(f"{label}: 待接入条目未标记过期", False, hit[0].get("expired"))
+    check_eq(f"{label}: 待接入条目未指定归属节点", None, hit[0].get("node_id"))
+    check(
+        f"{label}: 待接入条目带回可直接复制的命令",
+        hit[0].get("command") == issued["command"],
+        f"pending={hit[0].get('command')!r} issued={issued['command']!r}",
+    )
+
     client_cfg = root / "client.toml"
     write_client_config(
         client_cfg, name="orphan", console_port=port, state_dir=root / "client-state"
@@ -1851,6 +1901,47 @@ ring_capacity = 500
         console.stop()
         return
     check_eq(f"{label}: 客户端注册后保持「未归属」状态", None, found.get("node_id"))
+
+    # 令牌一旦被用掉就该从「待接入」里消失：它已经变成上面那条客户端记录了，
+    # 两边各留一份只会让人以为有两个东西。
+    status, pending = http_json("GET", base + "/api/v1/enroll-tokens", token=token)
+    check(
+        f"{label}: 已使用的令牌从待接入列表消失",
+        not any(t.get("client_name") == "orphan" for t in (pending or [])),
+        str(pending)[:240],
+    )
+
+    # 撤销：命令必须**真的**失效，而不只是从列表里消失。
+    # 只删列表、后端仍认这个 token 的话，用户以为拦住了，
+    # 而一份早已泄露出去的旧命令照样能把客户端接进来。
+    status, throwaway = http_json(
+        "POST", base + "/api/v1/clients", {"name": "throwaway", "ttl_minutes": 10}, token=token
+    )
+    status, pending = http_json("GET", base + "/api/v1/enroll-tokens", token=token)
+    tid = next(
+        (t["id"] for t in (pending or []) if t.get("client_name") == "throwaway"), None
+    )
+    if not check(f"{label}: 可签发一条待撤销的令牌", bool(tid), str(pending)[:240]):
+        console.stop()
+        return
+    status, _ = http_json("DELETE", base + f"/api/v1/enroll-tokens/{tid}", token=token)
+    check_eq(f"{label}: 可撤销待接入令牌", 200, status)
+    status, pending = http_json("GET", base + "/api/v1/enroll-tokens", token=token)
+    check(
+        f"{label}: 撤销后不再出现在待接入列表",
+        not any(t.get("id") == tid for t in (pending or [])),
+        str(pending)[:240],
+    )
+    status, err = http_json(
+        "POST",
+        base + "/api/v1/agent/enroll",
+        {"token": throwaway["enroll_token"], "name": "throwaway"},
+    )
+    check(
+        f"{label}: 被撤销令牌的命令立即失效",
+        status in (401, 403),
+        f"status={status} body={err}",
+    )
 
     # ---------------------------------------------------------- ② 自助注册开关
     status, err = http_json(
@@ -1936,6 +2027,21 @@ ring_capacity = 500
         str(nodes)[:200],
     )
 
+    # 接入命令不再"只显示一次"：要能随时取回，且与创建响应**逐字一致**——
+    # 不一致的话，用户拿它去重装节点只会得到一句「令牌无效」，毫无头绪。
+    status, cmd = http_json("GET", base + f"/api/v1/nodes/{node_id}/command", token=token)
+    check_eq(f"{label}: 可随时取回节点接入命令", 200, status)
+    check(
+        f"{label}: 取回的命令与创建时一致",
+        (cmd or {}).get("command") == (created or {}).get("command"),
+        f"got={(cmd or {}).get('command')!r} want={(created or {}).get('command')!r}",
+    )
+    # 命令原文含长期 node token，只读角色不该拿到；待接入列表同理。
+    status, _ = http_json("GET", base + f"/api/v1/nodes/{node_id}/command", token=bob_token)
+    check_eq(f"{label}: 只读角色拿不到节点接入命令", 403, status)
+    status, _ = http_json("GET", base + "/api/v1/enroll-tokens", token=bob_token)
+    check_eq(f"{label}: 只读角色读不到待接入令牌", 403, status)
+
     # ---------------------------------------------------- 归属解析的三条规则
     # ① 恰好一台启用节点 + 未指定归属 → 自动选中（单机部署不必每次选节点）
     status, single = http_json(
@@ -1987,6 +2093,66 @@ ring_capacity = 500
     status, clients = http_json("GET", base + "/api/v1/clients", token=token)
     mine = next((c for c in (clients or []) if c.get("id") == found["id"]), {})
     check_eq(f"{label}: 改派后归属节点已更新", node_id, mine.get("node_id"))
+
+    # 节点自己的端口池必须真的参与分配，否则「按节点配端口池」只是界面上好看：
+    # 自动分配仍从全局池里挑，用户拿到一个自己安全组没放行的端口，
+    # 而症状（外面连不进来）只出现在访问端，控制台上完全看不出来。
+    status, ranged = http_json(
+        "POST", base + "/api/v1/nodes",
+        {"name": "acct-node-range", "port_range": "45000-45005"}, token=token,
+    )
+    range_node = (ranged or {}).get("node") or {}
+    check_eq(f"{label}: 节点可单独配置端口池", "45000-45005", range_node.get("port_range"))
+
+    # 写法上的空白要被吃成紧凑形态，否则库里会存进 " 46000 - 46005 "。
+    status, spaced = http_json(
+        "POST", base + "/api/v1/nodes",
+        {"name": "acct-node-spaced", "port_range": " 46000 - 46005 "}, token=token,
+    )
+    check_eq(
+        f"{label}: 端口池写法被规范化",
+        "46000-46005",
+        ((spaced or {}).get("node") or {}).get("port_range"),
+    )
+
+    # 上界小于下界必须当场拒掉，而不是落库后让端口分配永远失败。
+    status, err = http_json(
+        "POST", base + "/api/v1/nodes",
+        {"name": "acct-node-badrange", "port_range": "50000-40000"}, token=token,
+    )
+    check(f"{label}: 非法端口池被拒", status == 400, f"status={status} body={err}")
+
+    if not range_node.get("id"):
+        check(f"{label}: 端口池节点可用于分配验证", False, str(ranged)[:200])
+    else:
+        # 把那个本来无归属的客户端挂到带端口池的节点上，再建一条端口转发隧道：
+        # 自动分配的端口必须落在该节点自己的池里（45000 是池内第一个空闲端口）。
+        http_json(
+            "PATCH", base + f"/api/v1/clients/{found['id']}",
+            {"node_id": range_node["id"]}, token=token,
+        )
+        status, tun = http_json(
+            "POST", base + f"/api/v1/clients/{found['id']}/tunnels",
+            {"name": "pooled", "kind": "port", "proto": "tcp",
+             "local_addr": "127.0.0.1:8080"}, token=token,
+        )
+        got_port = (tun or {}).get("remote_port")
+        check(
+            f"{label}: 端口自动分配落在该节点自己的端口池内",
+            status == 200 and isinstance(got_port, int) and 45000 <= got_port <= 45005,
+            f"status={status} remote_port={got_port!r} body={tun}",
+        )
+        # 显式指定池外的端口也要被拒（否则用户可以绕过节点端口池）。
+        status, err = http_json(
+            "POST", base + f"/api/v1/clients/{found['id']}/tunnels",
+            {"name": "pooled-out", "kind": "port", "proto": "tcp",
+             "local_addr": "127.0.0.1:8080", "remote_port": 25000}, token=token,
+        )
+        check(
+            f"{label}: 池外的显式端口被拒",
+            status == 400,
+            f"status={status} body={err}",
+        )
 
     # ---------------------------------------------------------- ④ 改密
     status, _ = http_json(

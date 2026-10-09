@@ -365,7 +365,7 @@
     document.body.innerHTML = authShell(
       '<label class="field"><span>用户名</span>' +
         '<input id="reg-user" autocomplete="username" placeholder="仅字母、数字、-、_、." /></label>' +
-      '<label class="field"><span>密码（至少 8 位）</span>' +
+      '<label class="field"><span>密码（至少 6 位）</span>' +
         '<input id="reg-pass" type="password" autocomplete="new-password" /></label>' +
       '<label class="field"><span>确认密码</span>' +
         '<input id="reg-pass2" type="password" autocomplete="new-password" /></label>' +
@@ -385,7 +385,7 @@
       const password = $('reg-pass').value;
       const again = $('reg-pass2').value;
       if (!username || !password) { toast('请填写用户名与密码', 'err'); return; }
-      if (password.length < 8) { toast('密码至少 8 位', 'err'); return; }
+      if (password.length < 6) { toast('密码至少 6 位', 'err'); return; }
       if (password !== again) { toast('两次输入的密码不一致', 'err'); return; }
       const btn = $('reg-go');
       btn.disabled = true;
@@ -518,6 +518,7 @@
             '<td><strong>' + esc(n.name) + '</strong>' +
               (n.description ? '<div class="muted" style="font-size:12px">' + esc(n.description) + '</div>' : '') +
               (n.allow_relay === false ? '<div class="muted" style="font-size:12px">P2P 中继已关</div>' : '') +
+              (n.port_range ? '<div class="muted" style="font-size:12px">端口池 ' + esc(n.port_range) + '</div>' : '') +
               '</td>' +
             '<td>' + statusTag(n.status) + '</td>' +
             '<td class="mono" title="' + esc(n.public_addr || '') + '">' +
@@ -532,6 +533,10 @@
               esc(n.endpoint_id ? String(n.endpoint_id).slice(0, 10) + '…' : '—') + '</td>' +
             '<td class="nowrap">' + esc(relTime(n.last_seen_at)) + '</td>' +
             '<td class="right row-actions">' +
+              // 内嵌形态下这个节点就是本进程，没有「在别的机器上把它跑起来」这回事，
+              // 命令里的 --console 还指向本机 —— 复制出去只会连出一个重复节点。
+              (state.embedded ? '' :
+                '<button class="sm" data-node-cmd="' + esc(n.id) + '" data-name="' + esc(n.name) + '">接入命令</button>') +
               '<button class="sm" data-node-edit="' + esc(n.id) + '">编辑</button>' +
               '<button class="sm" data-node-rotate="' + esc(n.id) + '" data-name="' + esc(n.name) + '">轮换令牌</button>' +
               '<button class="sm" data-node-disable="' + esc(n.id) + '" data-disabled="' + (n.disabled ? '1' : '0') + '">' +
@@ -615,6 +620,19 @@
             { method: 'POST' });
           showCommandModal('节点令牌已轮换', res.command,
             '旧令牌已失效。请在节点机器上用下面这条命令重启服务端。');
+        } catch (err) { toast(err.message, 'err'); }
+      };
+    });
+
+    // 「接入命令」：命令原文留在库里，随时可取回。
+    // 与「轮换令牌」的区别是它**没有任何副作用** —— 不动现有令牌，
+    // 所以不会把已经跑起来的节点踢下线。重装节点、把命令塞进部署脚本时应该用它。
+    document.querySelectorAll('[data-node-cmd]').forEach((el) => {
+      el.onclick = async () => {
+        try {
+          const res = await api('/api/v1/nodes/' + el.getAttribute('data-node-cmd') + '/command');
+          showCommandModal('节点接入命令', res.command,
+            '在目标机器上执行即可把该节点接入控制台。该命令不影响已运行的节点。');
         } catch (err) { toast(err.message, 'err'); }
       };
     });
@@ -706,6 +724,23 @@
     return '';
   }
 
+  // 节点端口池的即时校验，规则与后端 normalize_port_range / parse_port_range 同源。
+  // 留空是**合法值**（表示沿用全局 ingress.port_range），不是错误 ——
+  // 否则用户一旦给节点填过端口池，就再也改不回全局了。
+  function checkPortRange(v) {
+    if (!v) return '';
+    const m = /^(\d{1,5})\s*-\s*(\d{1,5})$/.exec(v);
+    if (!m) return '端口池应形如 20000-30000';
+    const lo = Number(m[1]);
+    const hi = Number(m[2]);
+    // 与 config::parse_port_range 对齐：下界不能是 0，上界不能小于下界，
+    // 两端都得落在合法端口区间内。
+    if (lo < 1 || lo > 65535) return '端口池下界必须在 1-65535 之间';
+    if (hi < 1 || hi > 65535) return '端口池上界必须在 1-65535 之间';
+    if (hi < lo) return '端口池上界不能小于下界';
+    return '';
+  }
+
   // node 为空表示「新建」；否则为「编辑」。
   function openNodeModal(node) {
     const editing = !!(node && node.id);
@@ -718,6 +753,7 @@
     // 用户一保存就把配置改成了别的协议。
     const vProto = TRANSPORTS.indexOf(v.transport) >= 0 ? v.transport : 'tcp';
     const vRelay = v.allow_relay !== false;
+    const vRange = v.port_range || '';
 
     const html = '' +
       '<div class="modal-mask" id="modal"><div class="modal">' +
@@ -742,6 +778,11 @@
               TRANSPORTS.map((t) => '<option value="' + t + '"' + (t === vProto ? ' selected' : '') + '>' + t + '</option>').join('') +
             '</select>' +
             '<div class="hint">该节点承载流量时使用的传输协议。</div></label>' +
+          '<label class="field"><span>端口转发端口池</span>' +
+            '<input id="n-range" placeholder="20000-30000" value="' + esc(vRange) + '" />' +
+            '<div class="hint">该节点上<b>端口转发</b>隧道可用的公网端口区间，形如 <code>20000-30000</code>。' +
+              '留空则沿用全局配置。节点分布在不同的云厂商时，各自安全组放行的端口段往往不同 —— ' +
+              '按节点单独填写，可以避免「隧道建好了、外面却连不进来」这种只在访问端才看得出的故障。</div></label>' +
           '<label class="field"><span>P2P 中继</span>' +
             '<label class="switch"><input type="checkbox" id="n-relay"' + (vRelay ? ' checked' : '') + ' />' +
               '<span>直连失败时回退到该节点中继</span></label>' +
@@ -791,9 +832,18 @@
       const addrErr = checkAddr(addr);
       if (addrErr) { toast(addrErr, 'err'); return; }
 
+      const range = $('n-range').value.trim();
+      const rangeErr = checkPortRange(range);
+      if (rangeErr) { toast(rangeErr, 'err'); return; }
+
+      // 这几个字段都传**字符串本身**（空串 = 清空），而不是 `|| null`：
+      // 后端把 `null` 理解成「不改这个字段」、把空串才理解成「清空」。
+      // 传 null 的话，用户把输入框删空再保存，改动会被后端静默忽略 ——
+      // 界面还提示「已保存」，值却原封不动留在那里。
       const body = {
-        description: desc || null,
-        public_addr: addr || null,
+        description: desc,
+        public_addr: addr,
+        port_range: range,
         transport: $('n-transport').value,
         allow_relay: $('n-relay').checked,
       };
@@ -807,12 +857,13 @@
           close();
         } else {
           const res = await api('/api/v1/nodes', { method: 'POST', body });
-          // 令牌只显示这一次，所以编辑入口不放在这里 ——
-          // 需要重新拿命令用「轮换令牌」。
+          // 这次创建返回的命令是**顺带**给的便利，不是唯一一次机会：
+          // 命令原文已随节点入库，之后可在列表里点「接入命令」再取回。
           $('n-result').innerHTML =
             '<label class="field"><span>在公网机器上执行</span></label>' +
             '<pre class="code" id="n-cmd">' + esc(res.command) + '</pre>' +
-            '<p class="muted" style="font-size:12px">节点令牌只显示这一次。</p>' +
+            '<p class="muted" style="font-size:12px">' +
+              '之后可随时在节点列表点「接入命令」重新复制。</p>' +
             '<div style="margin-top:8px">' + copyButton('n-cmd', '复制命令') + '</div>';
           bindCopyButtons();
           $('m-ok').disabled = true;
@@ -831,14 +882,50 @@
       api('/api/v1/nodes'),
       api('/api/v1/tunnels'),
     ]);
+    // 「待接入」令牌单独取，且失败时降级成空数组：
+    // 客户端列表才是这一页的主体，令牌列表只是补充信息，
+    // 没有必要因为它取不到就把整页变成「出错了」。
+    let pending = [];
+    try {
+      pending = await api('/api/v1/enroll-tokens');
+    } catch (err) {
+      pending = [];
+    }
     state.clients = clients;
     state.nodes = nodes;
     state.tunnels = tunnels;
 
     const countOf = (id) => tunnels.filter((t) => t.client_id === id).length;
 
-    const rows = clients.length
-      ? clients.map((c) => '' +
+    // 已签发、尚未接入的令牌与正式客户端**合并在同一张表**里。
+    // 分成两个区块会让人对着「客户端（0）」发懵：明明刚建过。
+    const pendingRows = pending.map((t) => '' +
+        '<tr>' +
+          '<td><strong>' + esc(t.client_name || '(待命名)') + '</strong>' +
+            '<div class="muted" style="font-size:12px">签发人 ' + esc(t.created_by || '—') + '</div></td>' +
+          '<td>' + (t.expired
+              ? '<span class="tag bad"><i class="dot"></i>已过期</span>'
+              : statusTag('pending')) + '</td>' +
+          '<td>' + (t.node_name ? esc(t.node_name)
+              : (t.node_id ? '<span class="muted">(已删除)</span>'
+                           : '<span class="muted">未指定</span>')) + '</td>' +
+          '<td class="mono">—</td>' +
+          '<td class="mono">—</td>' +
+          '<td class="mono">—</td>' +
+          '<td class="nowrap">' + (t.expired
+              ? '<span class="muted">' + esc(fmtTime(t.expires_at)) + ' 过期</span>'
+              : '有效期至 ' + esc(fmtTime(t.expires_at))) + '</td>' +
+          '<td>0</td>' +
+          '<td class="right row-actions">' +
+            (t.command
+              ? '<button class="sm" data-token-cmd="' + esc(t.id) + '">复制命令</button>'
+              : '') +
+            '<button class="sm danger" data-token-revoke="' + esc(t.id) + '" data-name="' +
+              esc(t.client_name || '(待命名)') + '">撤销</button>' +
+          '</td>' +
+        '</tr>').join('');
+
+    const clientRows = clients.map((c) => '' +
           '<tr>' +
             '<td><strong>' + esc(c.name) + '</strong></td>' +
             '<td>' + statusTag(c.status) + '</td>' +
@@ -854,21 +941,55 @@
                 (c.disabled ? '启用' : '禁用') + '</button>' +
               '<button class="sm danger" data-client-del="' + esc(c.id) + '" data-name="' + esc(c.name) + '">删除</button>' +
             '</td>' +
-          '</tr>').join('')
-      : '<tr><td colspan="9"><div class="empty">还没有客户端。点击「签发接入令牌」，把命令贴到内网机器上执行。</div></td></tr>';
+          '</tr>').join('');
+
+    const rows = pendingRows + clientRows;
+    const tbody = rows ||
+      '<tr><td colspan="9"><div class="empty">还没有客户端。点击「签发接入令牌」，把命令贴到内网机器上执行。</div></td></tr>';
 
     const body = '' +
       '<div class="card"><div class="card-head">' +
-        '<h2>客户端（' + clients.length + '）</h2><div class="spacer"></div>' +
+        '<h2>客户端（' + clients.length + '）' +
+          (pending.length ? ' <span class="muted">· 待接入 ' + pending.length + '</span>' : '') +
+        '</h2><div class="spacer"></div>' +
         '<button class="primary sm" id="btn-new-client">签发接入令牌</button>' +
       '</div><div class="card-body tight"><table>' +
         '<thead><tr><th>名称</th><th>状态</th><th>归属节点</th><th>出口 IP</th><th>平台</th>' +
         '<th>版本</th><th>最近心跳</th><th>隧道</th><th></th></tr></thead>' +
-        '<tbody>' + rows + '</tbody></table></div></div>';
+        '<tbody>' + tbody + '</tbody></table></div></div>';
 
     document.body.innerHTML = shell('clients', '客户端管理', body);
     bindShell();
     $('btn-new-client').onclick = () => openClientModal(nodes);
+
+    // 「复制命令」直接从列表取出原文，**不产生任何副作用**：
+    // 不动令牌、不影响任何已接入的客户端。关掉创建弹窗之后想再拿一次命令
+    // （贴进脚本、发给同事、重装机器）走这里就行。
+    document.querySelectorAll('[data-token-cmd]').forEach((el) => {
+      el.onclick = () => {
+        const id = el.getAttribute('data-token-cmd');
+        const t = pending.find((x) => x.id === id);
+        if (!t || !t.command) {
+          toast('该令牌的命令原文未留存，请撤销后重新签发', 'err');
+          return;
+        }
+        showCommandModal('客户端接入命令', t.command,
+          '在目标机器上执行即可把客户端接入控制台。');
+      };
+    });
+
+    document.querySelectorAll('[data-token-revoke]').forEach((el) => {
+      el.onclick = async () => {
+        const name = el.getAttribute('data-name');
+        if (!confirm('撤销「' + name + '」的接入令牌？对应命令会立即失效。')) return;
+        try {
+          await api('/api/v1/enroll-tokens/' + el.getAttribute('data-token-revoke'),
+            { method: 'DELETE' });
+          toast('令牌已撤销', 'ok');
+          render();
+        } catch (err) { toast(err.message, 'err'); }
+      };
+    });
 
     document.querySelectorAll('[data-client-reassign]').forEach((el) => {
       el.onclick = () => {
@@ -948,7 +1069,18 @@
       '</div></div>';
 
     document.body.insertAdjacentHTML('beforeend', html);
-    const close = () => { const m = $('modal'); if (m) m.remove(); };
+
+    // 签发成功后客户端集合会变，列表需要重绘；但弹窗上还挂着刚生成的接入命令，
+    // 立刻重绘整页会把它连弹窗一起抹掉。所以这里只打标记，等关闭弹窗时再刷新。
+    //
+    // 这正是「创建客户端后列表里没有它」的根因：节点表单早就有这套 dirty 机制，
+    // 客户端这边一直**只关了弹窗、从不刷新**，于是用户关掉弹窗看到的还是
+    // 打开弹窗之前那份列表 —— 新的那条（哪怕是「待接入」）根本不会出现。
+    let dirty = false;
+    const close = () => {
+      const m = $('modal'); if (m) m.remove();
+      if (dirty) render();
+    };
     $('m-cancel').onclick = close;
     $('modal').onclick = (e) => { if (e.target.id === 'modal') close(); };
 
@@ -967,10 +1099,13 @@
         $('c-result').innerHTML =
           '<label class="field"><span>在目标机器上执行</span></label>' +
           '<pre class="code" id="c-cmd">' + esc(res.command) + '</pre>' +
-          '<p class="muted" style="font-size:12px">令牌仅显示这一次，有效期至 ' +
-            esc(fmtTime(res.expires_at)) + '。</p>' +
+          '<p class="muted" style="font-size:12px">有效期至 ' + esc(fmtTime(res.expires_at)) +
+            '。之后可在列表里对这条「待接入」记录点「复制命令」重新取回。</p>' +
           '<div style="margin-top:8px">' + copyButton('c-cmd', '复制命令') + '</div>';
         bindCopyButtons();
+        $('m-ok').disabled = true;
+        // 命令还在弹窗里，先别重绘；关掉弹窗时 close() 会补上刷新。
+        dirty = true;
       } catch (err) { toast(err.message, 'err'); }
     };
   }
@@ -1453,7 +1588,7 @@
         '<div class="grid cols-3">' +
           '<label class="field"><span>当前密码</span>' +
             '<input id="pw-cur" type="password" autocomplete="current-password" /></label>' +
-          '<label class="field"><span>新密码（至少 8 位）</span>' +
+          '<label class="field"><span>新密码（至少 6 位）</span>' +
             '<input id="pw-new" type="password" autocomplete="new-password" /></label>' +
           '<label class="field"><span>确认新密码</span>' +
             '<input id="pw-new2" type="password" autocomplete="new-password" /></label>' +
@@ -1532,7 +1667,7 @@
       const next = $('pw-new').value;
       const again = $('pw-new2').value;
       if (!current || !next) { toast('请填写当前密码与新密码', 'err'); return; }
-      if (next.length < 8) { toast('新密码至少 8 位', 'err'); return; }
+      if (next.length < 6) { toast('新密码至少 6 位', 'err'); return; }
       if (next !== again) { toast('两次输入的新密码不一致', 'err'); return; }
       try {
         await api('/api/v1/auth/password', {
@@ -1600,7 +1735,7 @@
           '<label class="field"><span>用户名</span>' +
             '<input id="u-name" placeholder="alice" />' +
             '<div class="hint">仅字母、数字、-、_、.。最多 64 个字符。</div></label>' +
-          '<label class="field"><span>初始密码（至少 8 位）</span>' +
+          '<label class="field"><span>初始密码（至少 6 位）</span>' +
             '<input id="u-pass" type="password" autocomplete="new-password" /></label>' +
           '<label class="field"><span>角色</span>' +
             '<select id="u-role">' +
@@ -1624,7 +1759,7 @@
       const username = $('u-name').value.trim();
       const password = $('u-pass').value;
       if (!username || !password) { toast('请填写用户名与密码', 'err'); return; }
-      if (password.length < 8) { toast('密码至少 8 位', 'err'); return; }
+      if (password.length < 6) { toast('密码至少 6 位', 'err'); return; }
       try {
         await api('/api/v1/users', {
           method: 'POST',
@@ -1643,7 +1778,7 @@
     const html = '' +
       '<div class="modal-mask" id="modal"><div class="modal">' +
         '<h3>重置「' + esc(name) + '」的密码</h3><div class="modal-body">' +
-          '<label class="field"><span>新密码（至少 8 位）</span>' +
+          '<label class="field"><span>新密码（至少 6 位）</span>' +
             '<input id="rp-pass" type="password" autocomplete="new-password" /></label>' +
           '<p class="muted" style="font-size:12px">该用户的所有登录会话会立即失效，需用新密码重新登录。</p>' +
         '</div>' +
@@ -1660,7 +1795,7 @@
 
     $('m-ok').onclick = async () => {
       const password = $('rp-pass').value;
-      if (password.length < 8) { toast('密码至少 8 位', 'err'); return; }
+      if (password.length < 6) { toast('密码至少 6 位', 'err'); return; }
       try {
         await api('/api/v1/users/' + encodeURIComponent(id), {
           method: 'PATCH', body: { password },

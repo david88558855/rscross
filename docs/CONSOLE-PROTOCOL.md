@@ -176,7 +176,9 @@ TCP 侧的行为对 UDP 业务已经足够。
 数据库迁移
 
 
-`user_version` 从 2 升到 3，`ADDITIONS` 幂等追加，老库直接升级不丢数据：
+`user_version` 逐版本递进，`add_missing_columns()` 幂等追加，老库直接升级不丢数据。
+
+**v2 → v3**（服务端节点的地址与传输配置）：
 
 ```sql
 ALTER TABLE nodes ADD COLUMN description TEXT;
@@ -184,6 +186,27 @@ ALTER TABLE nodes ADD COLUMN public_addr TEXT;
 ALTER TABLE nodes ADD COLUMN transport TEXT NOT NULL DEFAULT 'tcp';
 ALTER TABLE nodes ADD COLUMN allow_relay INTEGER NOT NULL DEFAULT 1;
 ```
+
+**v3 → v4**（接入命令可复制 + 节点级端口池）：
+
+```sql
+ALTER TABLE nodes ADD COLUMN port_range TEXT;
+ALTER TABLE nodes ADD COLUMN node_token_plain TEXT;
+ALTER TABLE enroll_tokens ADD COLUMN id TEXT;
+ALTER TABLE enroll_tokens ADD COLUMN token_plain TEXT;
+```
+
+v4 的两列明文（`nodes.node_token_plain`、`enroll_tokens.token_plain`）是为了让
+「复制接入命令 / 复制接入令牌」在**创建之后**仍然可用 —— 这两个 token 一个是节点每次
+心跳用的长期凭据、一个是一次性接入凭据，只留摘要就等于把「复制命令」做成了「重建凭据」，
+而重建会让在线节点立刻掉线。明文仅管理员可读，且只经**专用接口按需返回**
+（`GET /api/v1/nodes/{id}/command`、列表里的 `command` 字段），不出现在任何常规列表响应中
+（`#[serde(skip_serializing)]`）。
+
+`enroll_tokens.id` 与 `token_hash` 分离：摘要只用于比对，业务标识另有其字段，
+否则「撤销某条令牌」就得拿摘要当主键，语义上说不通。v4 迁移末尾会为老库里
+`id` 为空的行**回填一个随机 id**，而不是让前端去处理 `id` 为 `NULL` 的条目 ——
+后者意味着老令牌在界面上永远是灰的、点不动，用户只能删库重来。
 
 ---
 
@@ -209,7 +232,7 @@ ALTER TABLE nodes ADD COLUMN allow_relay INTEGER NOT NULL DEFAULT 1;
 | `control/src/api/nodes.rs` | 同上；新增 `TRANSPORTS` 白名单与 `NodeExtras`；`node_endpoint` 补新字段 |
 | `control/src/error.rs` | `ApiError::into_control_response` |
 | `store/src/model.rs` | `NodeRecord` 加 4 列；`tunnel_server()` 优先用 `public_addr` |
-| `store/src/lib.rs` | schema v3 + 迁移 |
+| `store/src/lib.rs` | schema 迁移（v3 补节点地址列；v4 补接入命令明文与 `enroll_tokens.id`） |
 | `client/src/agent.rs` | 启动时先解析地址，按 scheme 选传输 |
 | `client/src/api.rs` | `ApiClient::from_console` |
 | `web/app.js` | 「添加自建节点」表单补全五项；列表展示服务端地址与协议 |

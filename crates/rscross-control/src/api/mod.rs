@@ -9,7 +9,7 @@ pub mod nodes;
 pub mod users;
 pub mod ws;
 
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use rscross_common::{DesiredTunnel, TunnelKind};
 use rscross_store::TunnelRecord;
@@ -50,7 +50,11 @@ pub fn normalize_role(raw: Option<&str>) -> Result<String, ApiError> {
 }
 
 /// 密码最短长度。
-pub const PASSWORD_MIN_LEN: usize = 8;
+///
+/// 自建内网工具，用户往往就是本人在几台机器之间同步口令；定成 8 位会把
+/// 「顺手把默认密码改掉」这件事变得麻烦，反而助长「干脆不改」。
+/// 6 位作为下限，配合下面的长度上限一起挡住粘贴整段文本这类误操作。
+pub const PASSWORD_MIN_LEN: usize = 6;
 /// 密码最长长度（挡住把整段文件当密码贴进来的情况）。
 pub const PASSWORD_MAX_LEN: usize = 128;
 
@@ -115,6 +119,8 @@ pub fn router() -> Router<AppState> {
                 .delete(nodes::delete_node),
         )
         .route("/api/v1/nodes/{id}/token", post(nodes::rotate_node_token))
+        // 取回接入命令（命令原文不再"只显示一次"）
+        .route("/api/v1/nodes/{id}/command", get(nodes::get_node_command))
         // 客户端与隧道
         .route(
             "/api/v1/clients",
@@ -125,6 +131,12 @@ pub fn router() -> Router<AppState> {
             get(client::get_client)
                 .patch(client::patch_client)
                 .delete(client::delete_client),
+        )
+        // 「待接入」的客户端令牌：列表（含可复制的命令）与撤销
+        .route("/api/v1/enroll-tokens", get(client::list_enroll_tokens))
+        .route(
+            "/api/v1/enroll-tokens/{id}",
+            delete(client::revoke_enroll_token),
         )
         .route("/api/v1/tunnels", get(client::list_tunnels))
         .route(
@@ -279,11 +291,14 @@ mod tests {
 
     #[test]
     fn password_policy_is_shared_by_register_and_change() {
-        assert!(validate_password("1234567").is_err(), "短于 8 位应被拒");
-        assert!(validate_password("12345678").is_ok());
-        // 按字符数而不是字节数：中文密码不该因为「字节够长」而通过、
-        // 也不该因为「一个汉字 3 字节」被误判为超长。
+        // 下限是 6 位（自建工具场景下刻意压低，换取「愿意把默认密码改掉」）。
+        assert_eq!(PASSWORD_MIN_LEN, 6);
+        assert!(validate_password("12345").is_err(), "短于 6 位应被拒");
+        assert!(validate_password("123456").is_ok(), "6 位应通过");
+        // 按字符数而不是字节数：一个汉字 3 字节，按字节判会让 4 个汉字
+        // （12 字节）「达标」，也会让 44 个汉字被误判超长。
         assert!(validate_password("密码密码").is_err(), "4 个汉字应被拒");
+        assert!(validate_password("密码密码密码").is_ok(), "6 个汉字应通过");
         assert!(validate_password(&"x".repeat(PASSWORD_MAX_LEN)).is_ok());
         assert!(validate_password(&"x".repeat(PASSWORD_MAX_LEN + 1)).is_err());
     }

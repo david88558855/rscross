@@ -66,7 +66,7 @@ pub struct LoginResponse {
 pub struct ChangePasswordRequest {
     /// 当前密码。
     pub current_password: String,
-    /// 新密码（至少 8 位）。
+    /// 新密码（至少 6 位）。
     pub new_password: String,
 }
 

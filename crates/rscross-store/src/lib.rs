@@ -396,8 +396,8 @@ impl Store {
                  (id, name, status, node_token_hash, tunnel_token, public_host, tunnel_port,
                   ingress_port, version, os, arch, endpoint_id, endpoint_addr, public_ip,
                   last_seen_at, last_error, created_at, updated_at, disabled,
-                  public_addr, description, transport, allow_relay)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+                  public_addr, description, transport, allow_relay, node_token_plain, port_range)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
                 params![
                     rec.id,
                     rec.name,
@@ -422,6 +422,8 @@ impl Store {
                     rec.description,
                     rec.transport,
                     rec.allow_relay as i64,
+                    rec.node_token_plain,
+                    rec.port_range,
                 ],
             )
             .map_err(Error::store)?;
@@ -589,7 +591,8 @@ impl Store {
                         description = CASE WHEN ?7 THEN ?8 ELSE description END,
                         transport = COALESCE(?9, transport),
                         allow_relay = COALESCE(?10, allow_relay),
-                        updated_at = ?11
+                        port_range = CASE WHEN ?11 THEN ?12 ELSE port_range END,
+                        updated_at = ?13
                      WHERE id = ?1",
                     params![
                         patch.id,
@@ -602,6 +605,8 @@ impl Store {
                         patch.description.flatten(),
                         patch.transport,
                         patch.allow_relay.map(i64::from),
+                        patch.port_range.is_some(),
+                        patch.port_range.flatten(),
                         now,
                     ],
                 )
@@ -615,17 +620,29 @@ impl Store {
     }
 
     /// 替换节点的 token 摘要（轮换凭证用）。
-    pub async fn set_node_token_hash(&self, id: &str, token_hash: &str) -> Result<()> {
-        let (id, token_hash, now) = (
+    /// 覆盖节点的 node token（摘要 + 明文）。
+    ///
+    /// 明文必须一起写：轮换之后若只更新摘要，「复制接入命令」拿到的仍是旧
+    /// token —— 用户会复制出一条**注定连不上**的命令，而报错只会说「令牌无效」，
+    /// 很难联想到是控制台自己没同步。
+    pub async fn set_node_token(
+        &self,
+        id: &str,
+        token_hash: &str,
+        token_plain: &str,
+    ) -> Result<()> {
+        let (id, token_hash, token_plain, now) = (
             id.to_string(),
             token_hash.to_string(),
+            token_plain.to_string(),
             rscross_common::time::now_rfc3339(),
         );
         self.blocking(move |c| {
             let n = c
                 .execute(
-                    "UPDATE nodes SET node_token_hash = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![id, token_hash, now],
+                    "UPDATE nodes SET node_token_hash = ?2, node_token_plain = ?3,
+                     updated_at = ?4 WHERE id = ?1",
+                    params![id, token_hash, token_plain, now],
                 )
                 .map_err(Error::store)?;
             if n == 0 {
@@ -894,18 +911,84 @@ impl Store {
         self.blocking(move |c| {
             c.execute(
                 "INSERT INTO enroll_tokens
-                 (token_hash, node_id, client_name, created_by, created_at, expires_at)
-                 VALUES (?1,?2,?3,?4,?5,?6)",
+                 (token_hash, node_id, client_name, created_by, created_at, expires_at,
+                  id, token_plain)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     rec.token_hash,
                     rec.node_id,
                     rec.client_name,
                     rec.created_by,
                     rec.created_at,
-                    rec.expires_at
+                    rec.expires_at,
+                    rec.id,
+                    rec.token_plain,
                 ],
             )
             .map_err(Error::store)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 查出所有**尚未使用**的接入令牌（含已过期）。
+    ///
+    /// 只列未使用的：控制台的「待接入」区就是在回答「哪些客户端还没来」，
+    /// 已使用的令牌必然已经有一条客户端记录，再列一遍只会让人对不上号。
+    /// 已过期的**保留**并交给界面标注 —— 直接消失的话，用户看到的是
+    /// 「我刚签发的令牌不见了」，而实际情况是「到期了，该重新签发」。
+    pub async fn list_enroll_tokens(&self) -> Result<Vec<EnrollTokenRecord>> {
+        self.blocking(move |c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT id, token_hash, token_plain, node_id, client_name, created_by,
+                            created_at, expires_at, used_at, used_client_id
+                     FROM enroll_tokens WHERE used_at IS NULL
+                     ORDER BY created_at DESC",
+                )
+                .map_err(Error::store)?;
+            let rows = stmt
+                .query_map([], map_enroll_token)
+                .map_err(Error::store)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 按条目 ID 查询接入令牌（撤销与「复制命令」都靠它定位）。
+    pub async fn find_enroll_token_by_id(&self, id: &str) -> Result<Option<EnrollTokenRecord>> {
+        let id = id.to_string();
+        self.blocking(move |c| {
+            c.query_row(
+                "SELECT id, token_hash, token_plain, node_id, client_name, created_by,
+                        created_at, expires_at, used_at, used_client_id
+                 FROM enroll_tokens WHERE id = ?1",
+                params![id],
+                map_enroll_token,
+            )
+            .optional()
+            .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 撤销（删除）一条**尚未使用**的接入令牌。
+    ///
+    /// 已使用的令牌一律拒绝删除：它对应着一条真实客户端记录，
+    /// 抹掉它只会让「这个客户端当初凭什么进来的」变成一笔糊涂账。
+    pub async fn revoke_enroll_token(&self, id: &str) -> Result<()> {
+        let id = id.to_string();
+        self.blocking(move |c| {
+            let n = c
+                .execute(
+                    "DELETE FROM enroll_tokens WHERE id = ?1 AND used_at IS NULL",
+                    params![id],
+                )
+                .map_err(Error::store)?;
+            if n == 0 {
+                return Err(Error::store("接入令牌不存在，或已被使用无法撤销"));
+            }
             Ok(())
         })
         .await
@@ -916,22 +999,11 @@ impl Store {
         let hash = hash.to_string();
         self.blocking(move |c| {
             c.query_row(
-                "SELECT token_hash, node_id, client_name, created_by, created_at, expires_at,
-                        used_at, used_client_id
+                "SELECT id, token_hash, token_plain, node_id, client_name, created_by,
+                        created_at, expires_at, used_at, used_client_id
                  FROM enroll_tokens WHERE token_hash = ?1",
                 params![hash],
-                |row| {
-                    Ok(EnrollTokenRecord {
-                        token_hash: row.get(0)?,
-                        node_id: row.get(1)?,
-                        client_name: row.get(2)?,
-                        created_by: row.get(3)?,
-                        created_at: row.get(4)?,
-                        expires_at: row.get(5)?,
-                        used_at: row.get(6)?,
-                        used_client_id: row.get(7)?,
-                    })
-                },
+                map_enroll_token,
             )
             .optional()
             .map_err(Error::store)
@@ -1416,6 +1488,8 @@ pub struct NodePatch {
     pub transport: Option<String>,
     /// 是否允许 P2P 直连失败后回退到中继。
     pub allow_relay: Option<bool>,
+    /// 该节点的公网端口池（`lo-hi`；`Some(None)` 表示清空、回退到全局配置）。
+    pub port_range: Option<Option<String>>,
 }
 
 /// 客户端心跳时更新的运行时字段（None 表示不覆盖）。
@@ -1483,7 +1557,7 @@ pub struct TrafficBucket {
 const NODE_SELECT: &str = "SELECT id, name, status, node_token_hash, tunnel_token, public_host,
     tunnel_port, ingress_port, version, os, arch, endpoint_id, endpoint_addr, public_ip,
     last_seen_at, last_error, created_at, updated_at, disabled,
-    public_addr, description, transport, allow_relay FROM nodes";
+    public_addr, description, transport, allow_relay, node_token_plain, port_range FROM nodes";
 
 const CLIENT_SELECT: &str = "SELECT id, node_id, name, status, agent_token_hash, version, os, arch,
     endpoint_id, endpoint_addr, public_ip, last_seen_at, last_error, created_at, updated_at, disabled
@@ -1530,6 +1604,24 @@ fn map_node(row: &Row<'_>) -> rusqlite::Result<NodeRecord> {
         description: row.get(20)?,
         transport: row.get(21)?,
         allow_relay: row.get::<_, i64>(22)? != 0,
+        node_token_plain: row.get(23)?,
+        port_range: row.get(24)?,
+    })
+}
+
+/// 列顺序必须与所有 enroll_tokens 查询的 SELECT 一致。
+fn map_enroll_token(row: &Row<'_>) -> rusqlite::Result<EnrollTokenRecord> {
+    Ok(EnrollTokenRecord {
+        id: row.get(0)?,
+        token_hash: row.get(1)?,
+        token_plain: row.get(2)?,
+        node_id: row.get(3)?,
+        client_name: row.get(4)?,
+        created_by: row.get(5)?,
+        created_at: row.get(6)?,
+        expires_at: row.get(7)?,
+        used_at: row.get(8)?,
+        used_client_id: row.get(9)?,
     })
 }
 
@@ -1559,7 +1651,7 @@ fn map_client(row: &Row<'_>) -> rusqlite::Result<ClientRecord> {
 /// SQLite 的 `ALTER TABLE ... ADD COLUMN` 没有 `IF NOT EXISTS`，重复执行会报
 /// 「duplicate column name」，所以先读 `pragma table_info` 再决定是否执行。
 fn add_missing_columns(conn: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 7] = [
+    const ADDITIONS: [(&str, &str, &str); 11] = [
         (
             "kind",
             "tunnels",
@@ -1596,6 +1688,27 @@ fn add_missing_columns(conn: &Connection) -> Result<()> {
             "nodes",
             "ALTER TABLE nodes ADD COLUMN allow_relay INTEGER NOT NULL DEFAULT 1",
         ),
+        // schema v4：节点公网端口池 + node token 明文（供「复制接入命令」）
+        (
+            "port_range",
+            "nodes",
+            "ALTER TABLE nodes ADD COLUMN port_range TEXT",
+        ),
+        (
+            "node_token_plain",
+            "nodes",
+            "ALTER TABLE nodes ADD COLUMN node_token_plain TEXT",
+        ),
+        (
+            "id",
+            "enroll_tokens",
+            "ALTER TABLE enroll_tokens ADD COLUMN id TEXT",
+        ),
+        (
+            "token_plain",
+            "enroll_tokens",
+            "ALTER TABLE enroll_tokens ADD COLUMN token_plain TEXT",
+        ),
     ];
 
     for (column, table, ddl) in ADDITIONS {
@@ -1605,6 +1718,18 @@ fn add_missing_columns(conn: &Connection) -> Result<()> {
             tracing::info!(table, column, "已为既有数据库补充新增列");
         }
     }
+
+    // 老库里的 enroll_tokens 没有 id（v4 才引入），而「撤销 / 复制命令」都要靠它定位。
+    // 这里回填一个随机 id，而不是让前端去处理「id 为 NULL 的条目」——
+    // 后者意味着老令牌在界面上永远是灰的、点不动的，用户只能删库重来。
+    // 语句对空表无副作用，可以每次迁移都跑。
+    conn.execute(
+        "UPDATE enroll_tokens SET id = lower(hex(randomblob(16)))
+         WHERE id IS NULL OR id = ''",
+        [],
+    )
+    .map_err(|e| Error::store(format!("为老接入令牌回填 id 失败: {e}")))?;
+
     Ok(())
 }
 
@@ -1645,7 +1770,7 @@ fn map_tunnel(row: &Row<'_>) -> rusqlite::Result<TunnelRecord> {
 }
 
 const SCHEMA: &str = r#"
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
 
 CREATE TABLE IF NOT EXISTS users (
   id            TEXT PRIMARY KEY,
@@ -1691,7 +1816,10 @@ CREATE TABLE IF NOT EXISTS nodes (
   public_addr      TEXT,
   description      TEXT,
   transport        TEXT NOT NULL DEFAULT 'tcp',
-  allow_relay      INTEGER NOT NULL DEFAULT 1
+  allow_relay      INTEGER NOT NULL DEFAULT 1,
+  -- schema v4：节点自己的公网端口池 + node token 明文（供复制接入命令）
+  port_range       TEXT,
+  node_token_plain TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_token ON nodes(node_token_hash);
@@ -1728,7 +1856,10 @@ CREATE TABLE IF NOT EXISTS enroll_tokens (
   created_at     TEXT NOT NULL,
   expires_at     TEXT NOT NULL,
   used_at        TEXT,
-  used_client_id TEXT
+  used_client_id TEXT,
+  -- schema v4：条目 ID 与令牌明文（明文仅供管理员「复制接入命令」）
+  id             TEXT,
+  token_plain    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS tunnels (
@@ -1799,12 +1930,14 @@ mod tests {
             name: name.to_string(),
             status: "pending".to_string(),
             node_token_hash: format!("nhash-{name}"),
+            node_token_plain: Some(format!("nplain-{name}")),
             tunnel_token: format!("ttok-{name}"),
             public_host: None,
             public_addr: None,
             description: None,
             transport: "tcp".to_string(),
             allow_relay: true,
+            port_range: None,
             tunnel_port: None,
             ingress_port: None,
             version: None,
@@ -1889,6 +2022,7 @@ mod tests {
                 description: None,
                 transport: None,
                 allow_relay: None,
+                port_range: None,
             })
             .await
             .expect("update");
@@ -1918,6 +2052,7 @@ mod tests {
                 description: Some(Some("香港出口".to_string())),
                 transport: Some("wss".to_string()),
                 allow_relay: Some(false),
+                port_range: None,
             })
             .await
             .expect("update");
@@ -1946,6 +2081,7 @@ mod tests {
                 description: None,
                 transport: None,
                 allow_relay: None,
+                port_range: None,
             })
             .await
             .expect("update");
@@ -1962,6 +2098,7 @@ mod tests {
                 description: None,
                 transport: Some("kcp".to_string()),
                 allow_relay: None,
+                port_range: None,
             })
             .await
             .expect("update");
@@ -2102,7 +2239,9 @@ mod tests {
         let now = rscross_common::time::now();
         store
             .insert_enroll_token(EnrollTokenRecord {
+                id: "tok-1".to_string(),
                 token_hash: "h1".to_string(),
+                token_plain: Some("rse_plain_1".to_string()),
                 node_id: Some("node-1".to_string()),
                 client_name: Some("n".to_string()),
                 created_by: None,
@@ -2137,7 +2276,9 @@ mod tests {
         let now = rscross_common::time::now();
         store
             .insert_enroll_token(EnrollTokenRecord {
+                id: "tok-orphan".to_string(),
                 token_hash: "orphan".to_string(),
+                token_plain: Some("rse_plain_orphan".to_string()),
                 node_id: None,
                 client_name: None,
                 created_by: None,
@@ -2155,6 +2296,116 @@ mod tests {
             .expect("find")
             .expect("some");
         assert!(found.node_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn enroll_token_listing_skips_used_and_revoke_is_one_way() {
+        // 「待接入」列表的语义：只列**还没被用掉**的令牌。
+        // 已使用的那条必然对应一条客户端记录，再列一遍只会让人对不上号。
+        let store = Store::open_in_memory().expect("open");
+        let now = rscross_common::time::now();
+        let mk = |id: &str, hash: &str| EnrollTokenRecord {
+            id: id.to_string(),
+            token_hash: hash.to_string(),
+            token_plain: Some(format!("rse_plain_{hash}")),
+            node_id: None,
+            client_name: Some(format!("c-{id}")),
+            created_by: Some("admin".to_string()),
+            created_at: rscross_common::time::to_rfc3339(now),
+            expires_at: rscross_common::time::to_rfc3339(now + chrono::Duration::minutes(30)),
+            used_at: None,
+            used_client_id: None,
+        };
+        store.insert_enroll_token(mk("t1", "h1")).await.expect("i1");
+        store.insert_enroll_token(mk("t2", "h2")).await.expect("i2");
+
+        let all = store.list_enroll_tokens().await.expect("list");
+        assert_eq!(all.len(), 2, "两条都还没用掉");
+        // 明文必须能读回来，否则「复制接入命令」就没有数据源。
+        assert!(all.iter().all(|t| t.token_plain.is_some()));
+
+        store
+            .consume_enroll_token("h1", "client-1")
+            .await
+            .expect("consume");
+        let after = store.list_enroll_tokens().await.expect("list");
+        assert_eq!(after.len(), 1, "用掉的那条不再出现在待接入列表里");
+        assert_eq!(after[0].id, "t2");
+
+        // 按 id 能定位到（撤销 / 复制命令都依赖它）。
+        let t2 = store
+            .find_enroll_token_by_id("t2")
+            .await
+            .expect("find")
+            .expect("some");
+        assert_eq!(t2.token_hash, "h2");
+        assert_eq!(t2.token_plain.as_deref(), Some("rse_plain_h2"));
+
+        // 撤销后从列表消失，且再撤一次会报错（不是静默成功）。
+        store.revoke_enroll_token("t2").await.expect("revoke");
+        assert!(store.list_enroll_tokens().await.expect("list").is_empty());
+        assert!(
+            store.revoke_enroll_token("t2").await.is_err(),
+            "重复撤销应报错，而不是静默通过"
+        );
+
+        // 已使用的令牌不允许撤销：它对应一条真实客户端记录，删掉就说不清来历了。
+        assert!(
+            store.revoke_enroll_token("t1").await.is_err(),
+            "已使用的令牌不该被撤销"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_port_range_round_trips_and_can_be_cleared() {
+        // 节点自己的端口池：空 = 用全局配置；设了 = 覆盖。
+        // 三态必须都能表达，否则用户没法「改回全局」。
+        let store = Store::open_in_memory().expect("open");
+        let mut rec = node_rec("edge-1");
+        let id = rec.id.clone();
+        rec.port_range = Some("30000-30100".to_string());
+        store.insert_node(rec).await.expect("insert");
+
+        let got = store.find_node(&id).await.expect("find").expect("some");
+        assert_eq!(got.port_range.as_deref(), Some("30000-30100"));
+
+        // 明文 token 也要能读回（复制接入命令的数据源）。
+        assert_eq!(got.node_token_plain.as_deref(), Some("nplain-edge-1"));
+
+        // 清空 → 回退到全局。
+        store
+            .update_node(NodePatch {
+                id: id.clone(),
+                name: None,
+                public_host: None,
+                public_addr: None,
+                description: None,
+                transport: None,
+                allow_relay: None,
+                port_range: Some(None),
+            })
+            .await
+            .expect("update");
+        let got = store.find_node(&id).await.expect("find").expect("some");
+        assert!(got.port_range.is_none(), "传 Some(None) 应清空端口池");
+
+        // 只改别的字段时，端口池不该被动。
+        store
+            .update_node(NodePatch {
+                id: id.clone(),
+                name: Some("edge-1-renamed".to_string()),
+                public_host: None,
+                public_addr: None,
+                description: None,
+                transport: None,
+                allow_relay: None,
+                port_range: None,
+            })
+            .await
+            .expect("update");
+        let got = store.find_node(&id).await.expect("find").expect("some");
+        assert_eq!(got.name, "edge-1-renamed");
+        assert!(got.port_range.is_none(), "未传的字段不该被改动");
     }
 
     #[tokio::test]

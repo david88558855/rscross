@@ -56,7 +56,8 @@ pub fn node_command(cfg: &ConsoleFile, name: &str, token: &str) -> String {
 
 /// 创建一个节点并签发 node token。返回 `(记录, token 明文)`。
 ///
-/// 明文只在此刻存在；库里只留 SHA-256 摘要。
+/// 明文会随摘要一起入库（见 [`NodeRecord::node_token_plain`]），
+/// 以便之后用 `GET /api/v1/nodes/{id}/command` 取回接入命令。
 #[allow(clippy::too_many_arguments)]
 pub async fn provision_node(
     state: &AppState,
@@ -78,6 +79,24 @@ pub struct NodeExtras {
     pub transport: Option<String>,
     /// P2P 中继回退开关。
     pub allow_relay: Option<bool>,
+    /// 该节点上端口转发隧道的公网端口池（`lo-hi`）；留空则沿用全局
+    /// `ingress.port_range`。
+    pub port_range: Option<String>,
+}
+
+/// 校验并规范化节点的公网端口池。
+///
+/// 空串 = 清空（回退到全局配置）—— 前端把输入框清空就是这个语义，
+/// 所以这里不能把空串当错误，否则用户没法「改回全局」。
+/// 返回值统一成 `lo-hi` 的紧凑写法，避免 `" 20000 - 30000 "` 这类
+/// 前后端着写着不一样的字符串被原样存进库。
+pub fn normalize_port_range(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let (lo, hi) = rscross_config::parse_port_range(raw)
+        .map_err(|e| ApiError::bad_request(format!("端口池格式无效（应形如 20000-30000）: {e}")))?;
+    Ok(Some(format!("{lo}-{hi}")))
 }
 
 /// 带完整配置项的节点开通。`provision_node` 保留给只需要最小参数的调用方
@@ -112,6 +131,9 @@ pub async fn provision_node_with(
         name,
         status: rscross_common::ClientStatus::Pending.as_str().to_string(),
         node_token_hash: token_hash(&token),
+        // 明文一并留存，否则「复制接入命令」只能靠轮换 token 来实现 ——
+        // 轮换会让在线节点立刻掉线（见 NodeRecord::node_token_plain 的注释）。
+        node_token_plain: Some(token.clone()),
         tunnel_token,
         // 表单里不再提供「对外主机」：它与「服务端地址」语义重叠，且内嵌形态
         // 下由启动流程自动维护（见 plane.rs），由代码决定比让人手填可靠。
@@ -124,6 +146,8 @@ pub async fn provision_node_with(
             .unwrap_or_else(|| DEFAULT_TRANSPORT.to_string()),
         // 默认开启：直连失败还能走中继，比「连不上」好。
         allow_relay: extras.allow_relay.unwrap_or(true),
+        // 再校验一次（与 public_addr 同理）：CLI 引导等调用方不经过 HTTP 层。
+        port_range: normalize_port_range(extras.port_range.as_deref())?,
         tunnel_port: None,
         ingress_port: None,
         version: None,
@@ -160,11 +184,11 @@ pub async fn rotate_token(state: &AppState, node_id: &str) -> Result<String, Api
         .ok_or_else(|| ApiError::not_found("节点不存在"))?;
 
     let token = new_node_token();
-    // 复用 update 通道：这里直接改 token 摘要需要 store 支持，因此借助 patch 结构体不可行，
-    // 改为「删掉再插回同一 id」不现实，遂在 store 侧提供专用方法。
+    // 摘要与明文一起写：只更新摘要的话，「接入命令」会继续吐出旧 token，
+    // 复制出去的命令注定连不上（详见 store::set_node_token 的注释）。
     state
         .store
-        .set_node_token_hash(&node.id, &token_hash(&token))
+        .set_node_token(&node.id, &token_hash(&token), &token)
         .await
         .map_err(ApiError::from)?;
 
@@ -278,6 +302,9 @@ pub async fn resolve_node_optional(
 /// `tunnel_token` 是数据面（FerroTunnel）的握手凭据，拿到它就能直连节点的
 /// 隧道端口。只读角色能看到拓扑，但不该拿到能用的凭据。
 fn mask_node_secrets(node: &mut NodeRecord) {
+    // `node_token_plain` 不在这里处理：它带 `#[serde(skip_serializing)]`，
+    // 从类型层面就不会出现在任何列表/详情响应里 —— 只经
+    // `GET /api/v1/nodes/{id}/command` 按需返回，且那个接口本身就要求管理员。
     if !node.tunnel_token.is_empty() {
         node.tunnel_token = TOKEN_MASK.to_string();
     }
@@ -301,6 +328,9 @@ pub struct CreateNodeRequest {
     pub transport: Option<String>,
     /// P2P 直连失败时是否回退中继，默认开启。
     pub allow_relay: Option<bool>,
+    /// 该节点上端口转发隧道的公网端口池，形如 `20000-30000`。
+    /// 留空则沿用全局 `ingress.port_range`。
+    pub port_range: Option<String>,
 }
 
 /// 创建节点响应。
@@ -308,10 +338,49 @@ pub struct CreateNodeRequest {
 pub struct CreateNodeResponse {
     /// 节点记录。
     pub node: NodeRecord,
-    /// node token 明文（**只返回一次**）。
+    /// node token 明文。
+    ///
+    /// 创建时就带上，脚本化创建可以直接取用；它同时也留存在库里，
+    /// 之后可用 `GET /api/v1/nodes/{id}/command` 再取回（不再是"只此一次"）。
     pub node_token: String,
     /// 在目标机器上执行的接入命令。
     pub command: String,
+}
+
+/// `GET /api/v1/nodes/{id}/command` —— 取回该节点的接入命令。
+///
+/// 为什么要有这个接口：接入命令过去只在「创建那一次」出现在响应里，
+/// 关掉弹窗就永远拿不回来了。用户要重装节点、或把命令贴进部署脚本时，
+/// 只能新建一个节点再来一遍 —— 于是控制台里堆满了一次性节点。
+///
+/// 单独成接口（而不是塞进 `list_nodes`）是为了让 token 明文**只在被索要时
+/// 才离开服务端**：列表接口在任何页面都会被调用，不该顺带把每个节点的
+/// 长期凭据撒出去。
+pub async fn get_node_command(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.require_admin(&headers).await?;
+    let node = state
+        .store
+        .find_node(&id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::not_found("节点不存在"))?;
+
+    let Some(token) = node.node_token_plain.as_deref().filter(|t| !t.is_empty()) else {
+        // 老数据（升级前创建）没留明文。这里给一条能让人知道「下一步做什么」
+        // 的错误，而不是回一个空命令让用户复制出个半截指令。
+        return Err(ApiError::bad_request(
+            "该节点创建于本版本之前，未保存接入命令原文；请用「轮换令牌」重新生成（注意：在线节点会掉线）",
+        ));
+    };
+
+    let cfg = state.config_snapshot().await;
+    Ok(Json(serde_json::json!({
+        "command": node_command(&cfg, &node.name, token),
+    })))
 }
 
 /// `GET /api/v1/nodes`
@@ -349,6 +418,7 @@ pub async fn create_node(
             public_addr: normalize_public_addr(req.public_addr.as_deref())?,
             transport: normalize_transport(req.transport.as_deref())?,
             allow_relay: req.allow_relay,
+            port_range: normalize_port_range(req.port_range.as_deref())?,
         },
     )
     .await?;
@@ -595,6 +665,8 @@ pub struct PatchNodeRequest {
     pub transport: Option<String>,
     /// P2P 直连失败时是否回退中继。
     pub allow_relay: Option<bool>,
+    /// 该节点的公网端口池（传空字符串表示清空、回退到全局 `ingress.port_range`）。
+    pub port_range: Option<String>,
 }
 
 /// `PATCH /api/v1/nodes/{id}`
@@ -624,12 +696,18 @@ pub async fn patch_node(
         None => None,
     };
     let transport = normalize_transport(req.transport.as_deref())?;
+    // 与 public_addr 同样的三态：不传 = 不改；空串 = 清空（回退全局）；非法 = 400。
+    let port_range = match req.port_range.as_deref() {
+        Some(v) => Some(normalize_port_range(Some(v))?),
+        None => None,
+    };
 
     if name.is_some()
         || public_addr.is_some()
         || description.is_some()
         || transport.is_some()
         || req.allow_relay.is_some()
+        || port_range.is_some()
     {
         state
             .store
@@ -643,6 +721,7 @@ pub async fn patch_node(
                 description,
                 transport,
                 allow_relay: req.allow_relay,
+                port_range,
             })
             .await
             .map_err(map_store_conflict)?;
@@ -1136,18 +1215,45 @@ mod tests {
     }
 
     #[test]
+    fn port_range_is_normalized_and_empty_means_inherit() {
+        // 空串不是错误，而是「回退到全局配置」—— 用户清空输入框就是这个动作。
+        // 把它判成 400 的话，节点一旦设过端口池就再也改不回全局了。
+        assert_eq!(normalize_port_range(None).expect("缺省"), None);
+        assert_eq!(normalize_port_range(Some("  ")).expect("空白"), None);
+        // 写法上的空白要吃掉，否则库里会存进 "20000 - 30000" 这种
+        // 「前后端各自读到不同字符串」的值。
+        assert_eq!(
+            normalize_port_range(Some(" 20000 - 30000 ")).expect("带空白"),
+            Some("20000-30000".to_string())
+        );
+        assert_eq!(
+            normalize_port_range(Some("443-443")).expect("单端口"),
+            Some("443-443".to_string())
+        );
+        // 上界小于下界 / 缺横杠 / 含 0 / 非数字都必须拒：
+        // 这类值一旦入库，表现是「隧道创建成功但端口永远分配不出来」，
+        // 报错点离真正的原因很远。
+        assert!(normalize_port_range(Some("30000-20000")).is_err());
+        assert!(normalize_port_range(Some("20000")).is_err());
+        assert!(normalize_port_range(Some("0-100")).is_err());
+        assert!(normalize_port_range(Some("abc-def")).is_err());
+    }
+
+    #[test]
     fn node_endpoint_uses_reported_coordinates() {
         let node = NodeRecord {
             id: "n1".to_string(),
             name: "node-1".to_string(),
             status: "online".to_string(),
             node_token_hash: "h".to_string(),
+            node_token_plain: None,
             tunnel_token: "tt".to_string(),
             public_host: None,
             public_addr: None,
             description: None,
             transport: "tcp".to_string(),
             allow_relay: true,
+            port_range: None,
             tunnel_port: Some(17835),
             ingress_port: None,
             version: None,

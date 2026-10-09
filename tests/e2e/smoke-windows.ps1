@@ -12,7 +12,9 @@
 param(
     # rscross-server.exe 所在目录
     [string]$Dist = ".",
-    # 控制台端口（与 console.bind 的默认值一致）
+    # 内嵌控制台的监听端口。会把 <state-dir>/console.toml 的 console.bind
+    # 写成 127.0.0.1:$Port，因此这个端口是**真的生效**的
+    # （默认 7800 与服务端内置默认一致）。
     [int]$Port = 7800,
     # 等待控制台就绪的上限（秒）
     [int]$TimeoutSec = 60
@@ -75,6 +77,29 @@ $state = Join-Path $work "state"
 $stdout = Join-Path $work "server.out.log"
 $stderr = Join-Path $work "server.err.log"
 $base = "http://127.0.0.1:$Port"
+
+# 让 -Port 真正生效。
+#
+# 内嵌控制台的监听地址**不在** --config 指向的节点配置里，而在它自己的
+# 配置文件 <state-dir>/console.toml（见 rscross-server 的 start_embedded_console）。
+# 这里过去只把 $cfg 交给 --config 却从没写过它，于是控制台永远用内置默认的 7800：
+# 传 -Port 7815 时脚本会老实去轮询 7815，等满 60 秒再报「控制台未就绪」，
+# 而服务端日志里明明写着绑在 7800。CI 一直用的就是默认值，所以这个坑始终没露头。
+New-Item -ItemType Directory -Force -Path $state | Out-Null
+$consoleCfg = Join-Path $state "console.toml"
+# TOML 的双引号字符串里反斜杠是转义符，换成正斜杠最省事（SQLite 同样接受）。
+$dbPath = (Join-Path $state "console.db") -replace '\\', '/'
+$consoleToml = @"
+[console]
+name = "smoke-console"
+bind = "127.0.0.1:$Port"
+
+[database]
+path = "$dbPath"
+"@
+# 显式写成 UTF-8 **无 BOM**：PS 5.1 的 Set-Content -Encoding utf8 会加 BOM，
+# 而 BOM 会让 TOML 解析器在第一行就报错。
+[System.IO.File]::WriteAllText($consoleCfg, $consoleToml, (New-Object System.Text.UTF8Encoding($false)))
 
 Write-Host "==> 启动 $exe"
 Write-Host "    控制台地址 $base ，状态目录 $state"

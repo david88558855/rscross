@@ -49,6 +49,15 @@ pub struct NodeRecord {
     /// node token 摘要。**不对外序列化**。
     #[serde(skip_serializing)]
     pub node_token_hash: String,
+    /// node token 明文，供「复制接入命令」按需取用。
+    ///
+    /// 为什么不沿用「只留摘要」：节点的接入命令里那段 token 是**长期凭据**
+    /// （节点每次心跳都用它鉴权），不落库就只能靠「轮换」来重新生成命令 ——
+    /// 而轮换会让**在线节点立刻掉线**。把「复制命令」做成一个有破坏性的动作
+    /// 是荒唐的，所以这里与 `tunnel_token` 走同一条路：明文入库，
+    /// 仅管理员可读、且只经专用接口按需返回（见 `GET /api/v1/nodes/{id}/command`）。
+    #[serde(skip_serializing)]
+    pub node_token_plain: Option<String>,
     /// FerroTunnel 握手 token。节点与归属该节点的客户端都要用它，
     /// 因此必须以可读回的形式保存（仅管理员接口可见）。
     pub tunnel_token: String,
@@ -68,6 +77,14 @@ pub struct NodeRecord {
     pub transport: String,
     /// P2P 直连失败时是否允许回退到该节点中继（默认开启）。
     pub allow_relay: bool,
+    /// 该节点上端口转发隧道的公网端口池（`lo-hi`，如 `20000-30000`）。
+    ///
+    /// 为空表示沿用全局的 `ingress.port_range`。需要按节点配置的原因是
+    /// 各节点常在不同云厂商，安全组放行的端口段并不一致 —— 只有一份全局
+    /// 配置时，总有一边「端口分配成功但外面连不进来」，而报错只会出现在
+    /// 客户端那一侧，控制台上完全看不出所以然。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_range: Option<String>,
     /// 反向隧道控制面监听端口（节点上报）。
     pub tunnel_port: Option<i64>,
     /// 公网入口监听端口（节点上报）。
@@ -167,8 +184,19 @@ pub struct ClientRecord {
 /// 接入令牌记录（客户端用；可绑定到某个节点）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollTokenRecord {
+    /// 条目 ID（UUID）。
+    ///
+    /// 与 `token_hash` 分离是为了不让「摘要」充当业务标识：撤销、复制命令
+    /// 这类操作在 URL 里带的是 id，而不是可以直接离线爆破比对的摘要。
+    pub id: String,
     /// token 摘要。
     pub token_hash: String,
+    /// token 明文，供「复制接入命令」取用；老数据（v4 之前签发）为 `None`。
+    ///
+    /// 与 `node_token_plain` 同样的取舍：明文入库、仅管理员可读。
+    /// 差别在于客户端令牌是**一次性**的（注册后即失效），风险面比节点令牌更小。
+    #[serde(skip_serializing)]
+    pub token_plain: Option<String>,
     /// 绑定的服务端节点。
     pub node_id: Option<String>,
     /// 绑定的客户端名（可空，表示由客户端自报）。

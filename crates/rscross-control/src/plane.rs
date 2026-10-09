@@ -200,6 +200,8 @@ impl ControlPlane {
                             description: None,
                             transport: None,
                             allow_relay: None,
+                            // 内嵌形态只维护对外主机名，端口池由用户在控制台配置。
+                            port_range: None,
                         })
                         .await
                         .map_err(Error::store)?;

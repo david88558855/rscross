@@ -238,6 +238,8 @@ pub enum ControlResponse {
         name: String,
         /// node token（之后每次心跳都要带上）。
         node_token: String,
+        /// 当前生效的 FerroTunnel 握手 token（节点据此感知轮换）。
+        tunnel_token: String,
         /// 心跳间隔（秒）。
         heartbeat_secs: u64,
         /// 控制台对外地址。

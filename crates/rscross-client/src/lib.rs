@@ -12,8 +12,10 @@
 pub mod access;
 pub mod agent;
 pub mod api;
+pub mod discover;
 pub mod identity;
 pub mod logsink;
+pub mod wsclient;
 
 pub use access::AccessArgs;
 pub use agent::{run, run_with_args, Args, Command};

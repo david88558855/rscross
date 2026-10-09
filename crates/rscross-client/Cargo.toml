@@ -16,6 +16,10 @@ name = "rscross-client"
 path = "src/main.rs"
 
 [dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+tokio-tungstenite = { workspace = true }
+hickory-resolver = { workspace = true }
+
 rscross-common = { workspace = true, features = ["runtime"] }
 rscross-config = { workspace = true }
 rscross-transport = { workspace = true }

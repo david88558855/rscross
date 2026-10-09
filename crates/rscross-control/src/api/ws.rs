@@ -20,7 +20,7 @@ use rscross_common::control::{
     ControlRequest, ControlResponse, Role, CONTROL_VERSION, MAX_HEARTBEAT_SECS,
     MIN_HEARTBEAT_SECS,
 };
-use rscross_common::NodeRuntime;
+use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
@@ -59,13 +59,13 @@ async fn run_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
         let frame = match next {
             Err(_) => {
                 tracing::info!(?role, %peer_ip, "控制面连接静默超时，关闭");
+                // 只说「我走了」，不解释原因 —— 客户端重连时会重新做版本协商，
+                // 这里的 reason 对它没有意义。
                 let _ = sink
-                    .send(Message::Close(
-                        tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Away,
-                            reason: "idle timeout".into(),
-                        },
-                    ))
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::CloseCode::Away,
+                        reason: Cow::Borrowed("idle timeout"),
+                    })))
                     .await;
                 return;
             }
@@ -155,7 +155,7 @@ async fn run_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                 let req = agent::EnrollRequest {
                     token,
                     name,
-                    runtime: to_client_runtime(runtime),
+                    runtime,
                 };
                 match agent::enroll_inner(&state, req, peer_ip).await {
                     Ok(r) => ControlResponse::Enrolled {
@@ -182,7 +182,7 @@ async fn run_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                     headers.insert(crate::api::AGENT_HEADER, v);
                 }
                 let req = agent::HeartbeatRequest {
-                    runtime: to_client_runtime(runtime),
+                    runtime,
                 };
                 match agent::heartbeat_inner(&state, &headers, req, peer_ip).await {
                     Ok(r) => ControlResponse::Heartbeat {
@@ -206,6 +206,14 @@ async fn run_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                 if let Ok(v) = token.parse() {
                     headers.insert(crate::api::AGENT_HEADER, v);
                 }
+                let entries = entries
+                    .into_iter()
+                    .map(|e| agent::ClientLogEntry {
+                        level: e.level,
+                        message: e.message,
+                        target: e.target,
+                    })
+                    .collect();
                 match agent::push_logs_inner(&state, &headers, entries).await {
                     Ok(accepted) => ControlResponse::LogsAccepted { id, accepted },
                     Err(err) => err.into_control_response(id),
@@ -225,9 +233,11 @@ async fn run_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                         id,
                         node_id: r.node_id,
                         name: r.name,
+                        node_token: r.node_token,
                         tunnel_token: r.tunnel_token,
                         heartbeat_secs: clamp_heartbeat(r.heartbeat_secs),
                         public_url: r.public_url,
+                        tunnels: r.tunnels,
                     },
                     Err(err) => err.into_control_response(id),
                 }
@@ -302,15 +312,7 @@ fn clamp_heartbeat(secs: u64) -> u64 {
     secs.clamp(MIN_HEARTBEAT_SECS, MAX_HEARTBEAT_SECS)
 }
 
-fn to_client_runtime(rt: NodeRuntime) -> rscross_common::ClientRuntime {
-    rscross_common::ClientRuntime {
-        version: rt.version,
-        os: rt.os,
-        arch: rt.arch,
-        endpoint_id: rt.endpoint_id,
-        endpoint_addr: rt.endpoint_addr,
-    }
-}
+
 
 /// 供测试与文档引用：连接上可以承载的角色。
 pub const ROLES: &[Role] = &[Role::Agent, Role::Node];

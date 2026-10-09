@@ -10,7 +10,7 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use rscross_auth::{new_node_token, token_hash};
-use rscross_common::{DesiredTunnel, NodeEndpoint, NodeRuntime, NodeTunnelPlan};
+use rscross_common::{DesiredTunnel, NodeEndpoint, NodeRuntime};
 use rscross_config::ConsoleFile;
 use rscross_store::{NodePatch, NodeRecord, NodeRuntimePatch};
 use serde::{Deserialize, Serialize};
@@ -564,12 +564,20 @@ pub struct NodeEnrollResponse {
     pub node_id: String,
     /// 节点名。
     pub name: String,
+    /// node token —— 之后每次心跳都要带上它。
+    ///
+    /// 每次注册都重新签发：这样「令牌泄漏」的影响范围限于单个连接，
+    /// 而不是长期有效。丢失 token 的节点重新注册即可，不影响数据面。
+    pub node_token: String,
     /// 该节点的 FerroTunnel 握手 token。
     pub tunnel_token: String,
     /// 心跳间隔（秒）。
     pub heartbeat_secs: u64,
     /// 控制台对外地址。
     pub public_url: Option<String>,
+    /// 首次心跳就已算出的隧道编排（省掉一轮往返）。
+    #[serde(default)]
+    pub tunnels: Vec<NodeTunnelPlan>,
 }
 
 /// 节点心跳请求。
@@ -644,8 +652,10 @@ pub(crate) async fn node_enroll_inner(
         return Err(ApiError::forbidden("节点已被禁用"));
     }
 
-    // 注册即视为首个心跳，顺带把版本/平台/EndpointId 落库。
-    apply_node_heartbeat(state, &node.id, &req.runtime, Some(peer_ip.to_string())).await?;
+    // 注册即视为首个心跳，顺带把版本/平台/EndpointId 落库；
+    // 顺带把这次心跳算出的隧道编排一起返回，省掉一轮往返。
+    let beat =
+        apply_node_heartbeat(state, &node.id, &runtime, Some(peer_ip.to_string())).await?;
 
     tracing::info!(
         node = %node.name,
@@ -658,9 +668,11 @@ pub(crate) async fn node_enroll_inner(
     Ok(NodeEnrollResponse {
         node_id: node.id,
         name: node.name,
+        node_token: token.to_string(),
         tunnel_token: node.tunnel_token,
-        heartbeat_secs: cfg.console.heartbeat_secs,
+        heartbeat_secs: beat.heartbeat_secs,
         public_url: cfg.console.public_url.clone(),
+        tunnels: beat.tunnels,
     })
 }
 

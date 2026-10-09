@@ -105,7 +105,6 @@ pub(crate) async fn enroll_inner(
     req: EnrollRequest,
     peer_ip: std::net::IpAddr,
 ) -> Result<EnrollResponse, ApiError> {
-    let peer = peer_ip;
     let cfg = state.config_snapshot().await;
     let raw_token = req.token.as_deref().unwrap_or("").trim().to_string();
 
@@ -170,7 +169,7 @@ pub(crate) async fn enroll_inner(
             arch: non_empty(&req.runtime.arch),
             endpoint_id: non_empty_opt(&req.runtime.endpoint_id),
             endpoint_addr: non_empty_opt(&req.runtime.endpoint_addr),
-            public_ip: Some(peer.ip().to_string()),
+            public_ip: Some(peer_ip.to_string()),
             last_seen_at: None,
             last_error: None,
             created_at: now.clone(),
@@ -202,13 +201,13 @@ pub(crate) async fn enroll_inner(
         client = %name,
         id = %client_id,
         node = %node.name,
-        peer = %peer,
+        peer = %peer_ip,
         os = req.runtime.os,
         arch = req.runtime.arch,
         "客户端已注册"
     );
 
-    Ok(Json(EnrollResponse {
+    Ok(EnrollResponse {
         client_id,
         name,
         agent_token,
@@ -216,7 +215,7 @@ pub(crate) async fn enroll_inner(
         public_url: cfg.console.public_url.clone(),
         node: node_endpoint(&node),
         tunnels: desired_tunnels(tunnels),
-    }))
+    })
 }
 
 /// `POST /api/v1/agent/heartbeat`
@@ -249,7 +248,7 @@ pub(crate) async fn heartbeat_inner(
                 arch: non_empty(&req.runtime.arch),
                 endpoint_id: non_empty_opt(&req.runtime.endpoint_id),
                 endpoint_addr: non_empty_opt(&req.runtime.endpoint_addr),
-                public_ip: Some(peer.ip().to_string()),
+                public_ip: Some(peer_ip.to_string()),
             },
         )
         .await
@@ -283,13 +282,13 @@ pub(crate) async fn heartbeat_inner(
         Vec::new()
     };
 
-    Ok(Json(HeartbeatResponse {
+    Ok(HeartbeatResponse {
         heartbeat_secs: cfg.console.heartbeat_secs,
         server_time: rscross_common::time::now_rfc3339(),
-        public_ip: Some(peer.ip().to_string()),
+        public_ip: Some(peer_ip.to_string()),
         node,
         tunnels,
-    }))
+    })
 }
 
 /// `GET /api/v1/agent/tunnels`

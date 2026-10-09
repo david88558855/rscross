@@ -236,9 +236,33 @@ mod tests {
         assert!(js.contains("/api/v1/auth/login"), "app.js 缺少登录调用");
     }
 
+    /// 构造请求头。
+    fn headers_with_accept(accept: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::ACCEPT,
+            axum::http::HeaderValue::from_str(accept).expect("accept"),
+        );
+        h
+    }
+
+    /// 浏览器式请求（Accept 含 text/html）。
+    fn browser_headers() -> axum::http::HeaderMap {
+        headers_with_accept("text/html,application/xhtml+xml")
+    }
+
+    /// 客户端式请求（不发 text/html）。
+    fn client_headers() -> axum::http::HeaderMap {
+        headers_with_accept("*/*")
+    }
+
     #[tokio::test]
     async fn root_serves_spa_index_html() {
-        let resp = fallback(axum::http::Uri::from_static("/")).await;
+        let resp = fallback(
+            axum::http::Uri::from_static("/"),
+            browser_headers(),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = content_type_of(&resp).await;
         assert!(
@@ -252,11 +276,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn root_redirects_non_browsers_to_the_control_socket() {
+        // 这是 `--console http://host:7700` 能用的前提：客户端请求根路径
+        // 必须拿到 307 才能换到 WebSocket 地址。
+        let resp = fallback(axum::http::Uri::from_static("/"), client_headers()).await;
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = resp
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert_eq!(location, rscross_common::console::CONTROL_WS_PATH);
+    }
+
+    #[tokio::test]
+    async fn missing_accept_header_still_serves_the_page() {
+        // 没发 Accept 的请求按「什么都想要」处理，返回页面而不是把它弹去
+        // WebSocket 端点 —— 后者会让 curl / 浏览器书签这类访问一脸懵。
+        let resp = fallback(axum::http::Uri::from_static("/"), axum::http::HeaderMap::new()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn static_assets_are_served_with_correct_content_type() {
         for (path, needle) in [("/app.js", "javascript"), ("/app.css", "css")] {
             // 用 `str::parse` 而不是 `Uri::from_str`：后者需要把 `std::str::FromStr`
             // 引入作用域，`http` crate 只给 HeaderValue/Method 提供了同名固有方法。
-            let resp = fallback(path.parse().unwrap()).await;
+            let resp = fallback(path.parse().unwrap(), client_headers()).await;
             assert_eq!(resp.status(), StatusCode::OK, "{path} 应可访问");
             let ct = content_type_of(&resp).await;
             assert!(
@@ -268,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_static_asset_is_404_not_masked_as_html() {
-        let resp = fallback(axum::http::Uri::from_static("/not-here.js")).await;
+        let resp = fallback(axum::http::Uri::from_static("/not-here.js"), client_headers()).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let ct = content_type_of(&resp).await;
         assert!(
@@ -280,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_api_path_returns_json_404() {
-        let resp = fallback(axum::http::Uri::from_static("/api/v1/nope")).await;
+        let resp = fallback(axum::http::Uri::from_static("/api/v1/nope"), client_headers()).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = text_of(resp).await;
         let value: serde_json::Value = serde_json::from_str(&body).expect("应为 JSON");
@@ -289,7 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn spa_deep_link_falls_back_to_index() {
-        let resp = fallback(axum::http::Uri::from_static("/tunnels")).await;
+        let resp = fallback(axum::http::Uri::from_static("/tunnels"), client_headers()).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(text_of(resp).await.contains(r#"id="app""#));
     }

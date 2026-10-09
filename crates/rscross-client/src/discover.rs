@@ -92,17 +92,13 @@ async fn probe_redirect(addr: &ConsoleAddress) -> Result<(String, usize, String)
         .build()
         .map_err(Error::transport)?;
 
-    let response = client
-        .get(addr.spec.trim())
-        .send()
-        .await
-        .map_err(|err| {
-            Error::transport(format!(
-                "探测控制台入口 {} 失败：{err}（若该地址只接受 WebSocket，\
+    let response = client.get(addr.spec.trim()).send().await.map_err(|err| {
+        Error::transport(format!(
+            "探测控制台入口 {} 失败：{err}（若该地址只接受 WebSocket，\
                  请直接用 ws:// 或 wss:// 填写）",
-                addr.spec
-            ))
-        })?;
+            addr.spec
+        ))
+    })?;
 
     let status = response.status();
     if !matches!(status.as_u16(), 307 | 308) {
@@ -211,7 +207,12 @@ fn absolutize(location: &str, base: &str) -> String {
     let after = &base[idx + 3..];
     let authority = after.split('/').next().unwrap_or(after);
     if let Some(stripped) = loc.strip_prefix('/') {
-        format!("{}{}{}", &base[..idx + 3], authority, format!("/{stripped}"))
+        format!(
+            "{}{}{}",
+            &base[..idx + 3],
+            authority,
+            format!("/{stripped}")
+        )
     } else {
         format!("{}{}{}", &base[..idx + 3], authority, loc)
     }
@@ -242,7 +243,9 @@ mod tests {
 
     #[tokio::test]
     async fn bad_spec_reports_supported_forms() {
-        let err = discover("1.2.3.4:7700").await.expect_err("缺 scheme 应报错");
+        let err = discover("1.2.3.4:7700")
+            .await
+            .expect_err("缺 scheme 应报错");
         let text = err.to_string();
         // 提示里必须列出全部五种写法 —— 只说「格式错误」的话，
         // 用户得自己猜这五种里哪一种才对。
@@ -256,7 +259,9 @@ mod tests {
     #[tokio::test]
     async fn scheme_is_matched_case_insensitively() {
         // 用户从文档里复制 WSS:// 是很常见的；大小写不该影响解析。
-        let addr = discover("WSS://c.example.com/ws").await.expect("大小写不敏感");
+        let addr = discover("WSS://c.example.com/ws")
+            .await
+            .expect("大小写不敏感");
         assert_eq!(addr.scheme, rscross_common::console::ConsoleScheme::Wss);
         // 关键是 host / path 原样保留 —— 路径可能大小写敏感，
         // 顺手改小写会真的连错地址。
@@ -265,9 +270,14 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_scheme_lists_the_known_ones() {
-        let err = discover("ftp://x.example.com").await.expect_err("未知 scheme 应报错");
+        let err = discover("ftp://x.example.com")
+            .await
+            .expect_err("未知 scheme 应报错");
         let text = err.to_string();
-        assert!(text.contains("ftp://x.example.com"), "应回显原始输入：{text}");
+        assert!(
+            text.contains("ftp://x.example.com"),
+            "应回显原始输入：{text}"
+        );
         assert!(text.contains("wss"), "应列出可用写法：{text}");
     }
 

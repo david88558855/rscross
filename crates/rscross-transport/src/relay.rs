@@ -70,11 +70,7 @@ impl std::fmt::Debug for RelayServer {
 
 impl RelayServer {
     /// 按配置构建（不启动）。
-    pub fn build(
-        bind: SocketAddr,
-        http_bind: SocketAddr,
-        section: &TunnelSection,
-    ) -> Result<Self> {
+    pub fn build(bind: SocketAddr, http_bind: SocketAddr, section: &TunnelSection) -> Result<Self> {
         if section.token.trim().is_empty() {
             return Err(Error::config("tunnel.token 为空，无法启动反向隧道服务端"));
         }
@@ -288,14 +284,12 @@ mod tests {
     fn empty_token_is_rejected() {
         let s = TunnelSection::default();
         assert!(RelayTunnelClient::build("t1", "127.0.0.1:1", "127.0.0.1:2", &s).is_err());
-        assert!(
-            RelayServer::build(
-                "127.0.0.1:0".parse().expect("addr"),
-                "127.0.0.1:0".parse().expect("addr"),
-                &s
-            )
-            .is_err()
-        );
+        assert!(RelayServer::build(
+            "127.0.0.1:0".parse().expect("addr"),
+            "127.0.0.1:0".parse().expect("addr"),
+            &s
+        )
+        .is_err());
     }
 
     #[test]

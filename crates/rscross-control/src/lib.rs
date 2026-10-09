@@ -30,8 +30,8 @@ pub use bootstrap::{
     build_plane, console_default_config, ensure_initial_admin, init_logging, run_console,
     run_console_with, wait_for_signal, ConsoleArgs,
 };
-pub use rscross_common::NodeTunnelPlan;
 pub use error::ApiError;
 pub use logbus::{LogBus, LogEvent};
 pub use plane::ControlPlane;
+pub use rscross_common::NodeTunnelPlan;
 pub use state::AppState;

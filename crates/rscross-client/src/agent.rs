@@ -48,7 +48,12 @@ pub struct Args {
     pub command: Option<Command>,
 
     /// 配置文件路径（不存在时自动生成默认配置）。
-    #[arg(short, long, default_value = "rscross-client.toml", env = "RSROSS_CLIENT_CONFIG")]
+    #[arg(
+        short,
+        long,
+        default_value = "rscross-client.toml",
+        env = "RSROSS_CLIENT_CONFIG"
+    )]
     pub config: PathBuf,
     /// 控制台地址，例如 `http://1.2.3.4:7800`。
     #[arg(long, env = "RSROSS_CONSOLE")]
@@ -226,15 +231,8 @@ pub async fn run_with_args(args: Args) -> Result<()> {
     }
 
     if !identity.is_registered() {
-        identity = register_with_retry(
-            &api,
-            &state_dir,
-            &cfg,
-            provided_token,
-            &p2p,
-            &shutdown,
-        )
-        .await?;
+        identity =
+            register_with_retry(&api, &state_dir, &cfg, provided_token, &p2p, &shutdown).await?;
     } else {
         tracing::info!(
             client_id = identity.client_id.as_deref().unwrap_or("-"),
@@ -386,7 +384,9 @@ async fn register_with_retry(
     shutdown: &CancellationToken,
 ) -> Result<Identity> {
     if provided_token.is_none() {
-        tracing::warn!("没有可用的接入令牌，尝试自助注册（需要控制台 auth.allow_self_enroll = true）");
+        tracing::warn!(
+            "没有可用的接入令牌，尝试自助注册（需要控制台 auth.allow_self_enroll = true）"
+        );
     }
 
     let mut attempt: u32 = 0;
@@ -739,7 +739,8 @@ impl TunnelManager {
                 continue;
             }
 
-            self.targets.set(route_key.clone(), target.local_addr.clone());
+            self.targets
+                .set(route_key.clone(), target.local_addr.clone());
             tracing::info!(
                 tunnel = %target.name,
                 proto = %target.proto,

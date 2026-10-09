@@ -377,7 +377,10 @@ mod tests {
         // 达到阈值 → 锁定，且能给出剩余秒数（文案由调用方拼）
         t.record_failure("ip", 2, 1);
         let remain = t.locked_for("ip").expect("达到阈值后应锁定");
-        assert!(remain > 0 && remain <= 60, "剩余秒数应在 1..=60，实际 {remain}");
+        assert!(
+            remain > 0 && remain <= 60,
+            "剩余秒数应在 1..=60，实际 {remain}"
+        );
 
         // 计数键之间必须互相独立：否则一个人输错密码会锁掉同 IP 的其他人
         assert_eq!(t.locked_for("other-ip"), None);
@@ -394,7 +397,10 @@ mod tests {
     #[test]
     fn bearer_extraction() {
         assert_eq!(extract_bearer(Some("Bearer abc")).as_deref(), Some("abc"));
-        assert_eq!(extract_bearer(Some("  Bearer  abc  ")).as_deref(), Some("abc"));
+        assert_eq!(
+            extract_bearer(Some("  Bearer  abc  ")).as_deref(),
+            Some("abc")
+        );
         assert_eq!(extract_bearer(Some("Basic abc")), None);
         assert_eq!(extract_bearer(None), None);
     }
@@ -422,6 +428,9 @@ mod tests {
             .expect("verify")
             .expect("应当有效");
         assert_eq!(found.user_id, "u1");
-        assert!(verify_session(&store, "nope").await.expect("verify").is_none());
+        assert!(verify_session(&store, "nope")
+            .await
+            .expect("verify")
+            .is_none());
     }
 }

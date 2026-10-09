@@ -55,9 +55,11 @@ impl AppState {
 
     /// 从请求头里取会话 token：`Authorization: Bearer` / `X-Rscross-Token` / Cookie。
     pub fn session_token(headers: &HeaderMap) -> Option<String> {
-        if let Some(token) =
-            extract_bearer(headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()))
-        {
+        if let Some(token) = extract_bearer(
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+        ) {
             return Some(token);
         }
         if let Some(token) = headers

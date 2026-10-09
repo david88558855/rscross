@@ -60,11 +60,7 @@ impl ApiError {
 
     /// 500。
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            message,
-        )
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
     }
 }
 
@@ -108,7 +104,9 @@ impl From<Error> for ApiError {
             Error::Auth(_) => StatusCode::UNAUTHORIZED,
             Error::Config(_) | Error::Api(_) | Error::Json(_) => StatusCode::BAD_REQUEST,
             Error::Transport(_) => StatusCode::BAD_GATEWAY,
-            Error::Io(_) | Error::Store(_) | Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::Io(_) | Error::Store(_) | Error::Internal(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         };
         Self {
             status,

@@ -86,7 +86,12 @@ impl LogBus {
     }
 
     /// 读取环形缓冲（倒序，最新的在前），支持级别与关键字过滤。
-    pub fn recent(&self, limit: usize, level: Option<&str>, keyword: Option<&str>) -> Vec<LogEvent> {
+    pub fn recent(
+        &self,
+        limit: usize,
+        level: Option<&str>,
+        keyword: Option<&str>,
+    ) -> Vec<LogEvent> {
         let ring = match self.inner.ring.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -213,7 +218,11 @@ mod tests {
     #[test]
     fn filtering_works() {
         let bus = LogBus::new(128);
-        for (lvl, msg) in [("INFO", "启动完成"), ("ERROR", "连接失败"), ("INFO", "心跳正常")] {
+        for (lvl, msg) in [
+            ("INFO", "启动完成"),
+            ("ERROR", "连接失败"),
+            ("INFO", "心跳正常"),
+        ] {
             bus.push(LogEvent {
                 seq: 0,
                 ts: "t".to_string(),

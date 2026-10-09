@@ -30,7 +30,12 @@ use crate::state::AppState;
 )]
 pub struct ConsoleArgs {
     /// 配置文件路径（不存在时自动生成默认配置）。
-    #[arg(short, long, default_value = "rscross-console.toml", env = "RSROSS_CONSOLE_CONFIG")]
+    #[arg(
+        short,
+        long,
+        default_value = "rscross-console.toml",
+        env = "RSROSS_CONSOLE_CONFIG"
+    )]
     pub config: PathBuf,
     /// 覆盖监听地址。
     #[arg(long)]
@@ -97,7 +102,14 @@ pub async fn run_console_with(args: ConsoleArgs) -> Result<()> {
     );
 
     let shutdown = CancellationToken::new();
-    let plane = build_plane(cfg.clone(), args.config.clone(), bus, false, shutdown.clone()).await?;
+    let plane = build_plane(
+        cfg.clone(),
+        args.config.clone(),
+        bus,
+        false,
+        shutdown.clone(),
+    )
+    .await?;
 
     let addr: SocketAddr = cfg
         .console
@@ -157,7 +169,10 @@ pub async fn build_plane(
 /// 初始化 `tracing`：stdout（text/json）+ 控制面日志环形缓冲。
 pub fn init_logging(section: &LogSection, bus: LogBus) {
     let filter = EnvFilter::try_new(&section.level).unwrap_or_else(|err| {
-        eprintln!("日志过滤表达式非法（{}），回退到 info: {err}", section.level);
+        eprintln!(
+            "日志过滤表达式非法（{}），回退到 info: {err}",
+            section.level
+        );
         EnvFilter::new("info")
     });
     let bus_layer = bus.layer();

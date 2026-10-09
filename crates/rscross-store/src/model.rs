@@ -116,7 +116,9 @@ impl NodeRecord {
             if addr.contains(':') && !addr.ends_with(':') {
                 return addr.to_string();
             }
-            let port = self.tunnel_port_as_u16().unwrap_or(rscross_common::DEFAULT_TUNNEL_PORT);
+            let port = self
+                .tunnel_port_as_u16()
+                .unwrap_or(rscross_common::DEFAULT_TUNNEL_PORT);
             return format!("{addr}:{port}");
         }
 
@@ -127,7 +129,11 @@ impl NodeRecord {
             .filter(|h| !h.is_empty())
             .or(self.public_ip.as_deref())
             .unwrap_or("127.0.0.1");
-        format!("{host}:{}", self.tunnel_port_as_u16().unwrap_or(rscross_common::DEFAULT_TUNNEL_PORT))
+        format!(
+            "{host}:{}",
+            self.tunnel_port_as_u16()
+                .unwrap_or(rscross_common::DEFAULT_TUNNEL_PORT)
+        )
     }
 
     /// 节点上报的反向隧道端口（i64 → u16，非法值按未设置处理）。

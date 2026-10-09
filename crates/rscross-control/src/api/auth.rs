@@ -182,7 +182,9 @@ pub async fn login(
         user: view(&user),
     })
     .into_response();
-    response.headers_mut().insert(header::SET_COOKIE, cookie_value);
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, cookie_value);
     Ok(response)
 }
 
@@ -229,7 +231,8 @@ pub async fn change_password(
         return Err(ApiError::bad_request("新密码不能与当前密码相同"));
     }
 
-    let ok = verify_password_offloaded(req.current_password.clone(), user.password_hash.clone()).await?;
+    let ok =
+        verify_password_offloaded(req.current_password.clone(), user.password_hash.clone()).await?;
     if !ok {
         state
             .audit(

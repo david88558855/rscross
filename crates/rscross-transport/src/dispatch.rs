@@ -841,7 +841,12 @@ mod tests {
         iroh::SecretKey::generate()
     }
 
-    fn entry(id: &str, kind: TunnelKind, port: Option<u16>, access_key: Option<&str>) -> DispatchEntry {
+    fn entry(
+        id: &str,
+        kind: TunnelKind,
+        port: Option<u16>,
+        access_key: Option<&str>,
+    ) -> DispatchEntry {
         DispatchEntry {
             tunnel_id: id.to_string(),
             name: format!("t-{id}"),
@@ -858,18 +863,36 @@ mod tests {
 
     #[test]
     fn only_port_forwarding_occupies_a_public_port() {
-        assert_eq!(entry("a", TunnelKind::Port, Some(20000), None).listen_port(), Some(20000));
+        assert_eq!(
+            entry("a", TunnelKind::Port, Some(20000), None).listen_port(),
+            Some(20000)
+        );
         // 私有 / P2P 刻意不暴露公网端口
-        assert_eq!(entry("b", TunnelKind::Private, Some(20000), Some("k")).listen_port(), None);
-        assert_eq!(entry("c", TunnelKind::P2p, Some(20000), Some("k")).listen_port(), None);
+        assert_eq!(
+            entry("b", TunnelKind::Private, Some(20000), Some("k")).listen_port(),
+            None
+        );
+        assert_eq!(
+            entry("c", TunnelKind::P2p, Some(20000), Some("k")).listen_port(),
+            None
+        );
         // 域名解析走 HTTP 入口
-        assert_eq!(entry("d", TunnelKind::Domain, None, None).listen_port(), None);
+        assert_eq!(
+            entry("d", TunnelKind::Domain, None, None).listen_port(),
+            None
+        );
     }
 
     #[test]
     fn access_mode_prefers_direct_only_for_p2p() {
-        assert_eq!(entry("a", TunnelKind::P2p, None, Some("k")).access_mode(), "p2p");
-        assert_eq!(entry("b", TunnelKind::Private, None, Some("k")).access_mode(), "relay");
+        assert_eq!(
+            entry("a", TunnelKind::P2p, None, Some("k")).access_mode(),
+            "p2p"
+        );
+        assert_eq!(
+            entry("b", TunnelKind::Private, None, Some("k")).access_mode(),
+            "relay"
+        );
     }
 
     #[test]
@@ -937,7 +960,10 @@ mod tests {
     fn empty_access_key_is_not_indexed() {
         let index = TunnelIndex::new();
         index.replace_all(vec![entry("a", TunnelKind::Private, None, Some(""))]);
-        assert!(index.by_access_key("").is_none(), "空密钥不能成为可命中的索引");
+        assert!(
+            index.by_access_key("").is_none(),
+            "空密钥不能成为可命中的索引"
+        );
         assert_eq!(index.len(), 1, "隧道本身仍在索引里");
         assert!(index.listen_ports().is_empty());
     }
@@ -966,6 +992,9 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_string(&denied).expect("ser");
-        assert!(!json.contains("tunnel_key"), "拒绝应答不应带隧道信息: {json}");
+        assert!(
+            !json.contains("tunnel_key"),
+            "拒绝应答不应带隧道信息: {json}"
+        );
     }
 }

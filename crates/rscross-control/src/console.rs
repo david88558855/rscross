@@ -245,7 +245,10 @@ mod tests {
             ct.contains("text/html"),
             "首页 Content-Type 应为 text/html，实际 {ct}"
         );
-        assert!(text_of(resp).await.contains(r#"id="app""#), "首页缺少挂载点");
+        assert!(
+            text_of(resp).await.contains(r#"id="app""#),
+            "首页缺少挂载点"
+        );
     }
 
     #[tokio::test]

@@ -13,13 +13,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite;
 use rscross_common::control::{
     ControlRequest, ControlResponse, Role, CONTROL_VERSION, MAX_HEARTBEAT_SECS, MIN_HEARTBEAT_SECS,
 };
 use rscross_common::{ClientRuntime, Error, Result};
 use serde::de::DeserializeOwned;
 use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio_tungstenite::tungstenite;
 
 /// 建连超时。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -77,16 +77,13 @@ impl ControlSocket {
 
         // 每次连接都用新的 Client：连接池里残留的旧连接在重连场景下会造成
         // 「明明断了却还能发出去」的假象。
-        let (stream, _resp) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url))
-            .await
-            .map_err(|_| {
-                Error::transport(format!(
-                    "连接控制面 {url} 超时（{CONNECT_TIMEOUT:?}）"
-                ))
-            })?
-            .map_err(|err| {
-                Error::transport(format!("连接控制面 {url} 失败：{err}"))
-            })?;
+        let (stream, _resp) =
+            tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url))
+                .await
+                .map_err(|_| {
+                    Error::transport(format!("连接控制面 {url} 超时（{CONNECT_TIMEOUT:?}）"))
+                })?
+                .map_err(|err| Error::transport(format!("连接控制面 {url} 失败：{err}")))?;
 
         tracing::info!(role = ?role, url = %url, "控制面连接已建立");
 
@@ -216,9 +213,7 @@ impl ControlSocket {
             ControlResponse::Error { message, .. } => {
                 Err(Error::api(format!("控制台拒绝连接：{message}")))
             }
-            other => Err(Error::api(format!(
-                "版本协商收到意外应答：{other:?}"
-            ))),
+            other => Err(Error::api(format!("版本协商收到意外应答：{other:?}"))),
         }
     }
 
@@ -282,9 +277,10 @@ impl ControlSocket {
         let resp = self.request(build).await?;
         match resp {
             ControlResponse::Error { message, .. } => Err(Error::auth(message)),
-            other => serde_json::from_value(serde_json::to_value(&other).map_err(|err| {
-                Error::api(format!("序列化控制面应答失败：{err}"))
-            })?)
+            other => serde_json::from_value(
+                serde_json::to_value(&other)
+                    .map_err(|err| Error::api(format!("序列化控制面应答失败：{err}")))?,
+            )
             .map_err(|err| Error::api(format!("控制面应答结构不符：{err}"))),
         }
     }

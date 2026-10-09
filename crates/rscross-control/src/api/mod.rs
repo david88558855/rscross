@@ -45,7 +45,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/overview", get(misc::overview))
         .route("/api/v1/traffic", get(misc::traffic))
         // 服务端节点（控制台侧管理）
-        .route("/api/v1/nodes", get(nodes::list_nodes).post(nodes::create_node))
+        .route(
+            "/api/v1/nodes",
+            get(nodes::list_nodes).post(nodes::create_node),
+        )
         .route(
             "/api/v1/nodes/{id}",
             get(nodes::get_node)
@@ -80,7 +83,10 @@ pub fn router() -> Router<AppState> {
         // 审计 / 日志 / 配置
         .route("/api/v1/logs", get(misc::logs))
         .route("/api/v1/audit", get(misc::audit_log))
-        .route("/api/v1/config", get(misc::get_config).put(misc::put_config))
+        .route(
+            "/api/v1/config",
+            get(misc::get_config).put(misc::put_config),
+        )
         // 访问端（免鉴权：凭访问密钥换取节点坐标；密钥本身就是凭证）
         .route("/api/v1/access/resolve", post(access::resolve))
         // 服务端节点侧（节点进程调用）
@@ -157,7 +163,9 @@ pub fn normalize_name(raw: &str) -> Result<String, crate::error::ApiError> {
         return Err(crate::error::ApiError::bad_request("名称不能为空"));
     }
     if name.len() > 64 {
-        return Err(crate::error::ApiError::bad_request("名称不能超过 64 个字符"));
+        return Err(crate::error::ApiError::bad_request(
+            "名称不能超过 64 个字符",
+        ));
     }
     if !name
         .chars()

@@ -71,14 +71,9 @@ mod tests {
         let mut dst_read: &[u8] = b"pong";
         let mut dst_write: Vec<u8> = Vec::new();
 
-        let (up, down) = bridge_split(
-            &mut src_read,
-            &mut src_write,
-            &mut dst_read,
-            &mut dst_write,
-        )
-        .await
-        .expect("bridge");
+        let (up, down) = bridge_split(&mut src_read, &mut src_write, &mut dst_read, &mut dst_write)
+            .await
+            .expect("bridge");
 
         assert_eq!(up, 4, "src → dst 应搬运 4 字节");
         assert_eq!(down, 4, "dst → src 应搬运 4 字节");

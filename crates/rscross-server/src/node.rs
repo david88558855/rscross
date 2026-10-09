@@ -46,7 +46,12 @@ const DISPATCH_DIAL_TIMEOUT_SECS: u64 = 12;
 )]
 pub struct NodeArgs {
     /// 配置文件路径（不存在时自动生成默认配置）。
-    #[arg(short, long, default_value = "rscross-server.toml", env = "RSROSS_SERVER_CONFIG")]
+    #[arg(
+        short,
+        long,
+        default_value = "rscross-server.toml",
+        env = "RSROSS_SERVER_CONFIG"
+    )]
     pub config: PathBuf,
     /// 节点名。
     #[arg(long)]
@@ -288,10 +293,7 @@ async fn run_configured(cfg: NodeFile, args: NodeArgs) -> Result<()> {
     // 立刻发一次心跳，把数据面端口 / EndpointId / 出口 IP 落到控制台。
     // 不做这一步会有真实竞态：客户端可能在节点第一次心跳之前就注册，
     // 那时控制台算不出 `tunnel_server`，客户端会连到错误的端口。
-    match link
-        .heartbeat(&identity, &runtime_info(&cfg, &p2p))
-        .await
-    {
+    match link.heartbeat(&identity, &runtime_info(&cfg, &p2p)).await {
         Ok(_) => tracing::debug!("首次心跳已发送"),
         Err(err) => tracing::warn!(error = %err, "首次心跳失败，将在心跳循环中重试"),
     }

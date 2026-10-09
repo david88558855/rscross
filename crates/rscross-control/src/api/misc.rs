@@ -168,7 +168,11 @@ pub async fn audit_log(
 ) -> Result<Json<Vec<rscross_store::AuditEntry>>, ApiError> {
     state.require_user(&headers).await?;
     let limit = query.limit.unwrap_or(200).clamp(1, 1000);
-    let entries = state.store.list_audit(limit).await.map_err(ApiError::from)?;
+    let entries = state
+        .store
+        .list_audit(limit)
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(entries))
 }
 

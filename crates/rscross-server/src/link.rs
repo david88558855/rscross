@@ -11,8 +11,8 @@
 //! 也就不存在「自己给自己发一个 token 再拿去鉴权」这种绕圈设计。
 
 use rscross_common::{Error, NodeRuntime, Result};
-use rscross_control::NodeTunnelPlan;
 use rscross_control::ControlPlane;
+use rscross_control::NodeTunnelPlan;
 
 use rscross_control::node_client::NodeApiClient;
 
@@ -59,7 +59,7 @@ impl ControlLink {
     pub fn describe(&self) -> &'static str {
         match self {
             Self::Embedded { .. } => "embedded-console",
-                    Self::Http { .. } => "remote-console",
+            Self::Http { .. } => "remote-console",
         }
     }
 
@@ -104,7 +104,7 @@ impl ControlLink {
                     heartbeat_secs: None,
                 })
             }
-                    Self::Http { client } => {
+            Self::Http { client } => {
                 let token = enroll_token
                     .map(str::trim)
                     .filter(|t| !t.is_empty())
@@ -152,7 +152,7 @@ impl ControlLink {
                     tunnels: response.tunnels,
                 })
             }
-                    Self::Http { client } => {
+            Self::Http { client } => {
                 let token = identity
                     .node_token
                     .as_deref()

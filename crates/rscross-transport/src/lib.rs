@@ -20,24 +20,28 @@
 
 pub mod dispatch;
 pub mod forward;
-pub mod path;
 pub mod p2p;
+pub mod path;
 pub mod relay;
 
 pub use dispatch::{
     bridge_tcp_to_stream, AccessHandler, AccessReply, AccessSession, DispatchEntry, IndexChange,
     PortIngress, TunnelDispatcher, TunnelIndex, ALPN_ACCESS,
 };
-pub use path::{PathChoice, PathProbe, PathSelector};
 pub use p2p::{
     addr_from_id, decode_addr, encode_addr, load_or_create_secret_key, probe_control,
     read_stream_key, write_stream_key, NodeInfoHandler, P2pDataHandler, P2pNode, P2pOptions,
     P2pStream, TunnelTargets, ALPN_CONTROL, ALPN_DATA,
 };
+pub use path::{PathChoice, PathProbe, PathSelector};
 pub use relay::{RelayServer, RelayTunnelClient, RelayTunnelState};
 
 /// 便捷重导出：底层两套传输库的顶层类型。
 pub mod upstream {
-    pub use ferrotunnel::{Client as FerryClient, Server as FerryServer, TunnelInfo as FerryTunnelInfo};
-    pub use iroh::{Endpoint as IrohEndpoint, EndpointAddr as IrohEndpointAddr, SecretKey as IrohSecretKey};
+    pub use ferrotunnel::{
+        Client as FerryClient, Server as FerryServer, TunnelInfo as FerryTunnelInfo,
+    };
+    pub use iroh::{
+        Endpoint as IrohEndpoint, EndpointAddr as IrohEndpointAddr, SecretKey as IrohSecretKey,
+    };
 }

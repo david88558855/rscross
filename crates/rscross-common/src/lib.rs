@@ -483,7 +483,8 @@ impl ClientStatus {
 /// （老版本客户端、精简上报、手工 curl 调试都依赖这一点）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ClientRuntime {    /// 客户端版本号。
+pub struct ClientRuntime {
+    /// 客户端版本号。
     pub version: String,
     /// 操作系统。
     pub os: String,
@@ -569,7 +570,12 @@ pub struct NodeEndpoint {
 impl NodeEndpoint {
     /// 客户端连服务端时用的地址：显式配置优先，其次自动推导。
     pub fn connect_addr(&self) -> &str {
-        match self.public_addr.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        match self
+            .public_addr
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             Some(v) => v,
             None => self.tunnel_server.as_str(),
         }
@@ -776,10 +782,7 @@ mod tests {
         };
         assert_eq!(tcp.route_key(), "web", "TCP 隧道按名字路由，忽略 Host");
 
-        let http_no_host = DesiredTunnel {
-            host: None,
-            ..http
-        };
+        let http_no_host = DesiredTunnel { host: None, ..http };
         assert_eq!(http_no_host.route_key(), "web", "缺 Host 时回落到名字");
     }
 

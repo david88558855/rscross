@@ -126,7 +126,9 @@ pub async fn provision_node_with(
         // 再校验一次：CLI 引导等调用方不经过 HTTP 层，不能绕过格式检查。
         public_addr: normalize_public_addr(extras.public_addr.as_deref())?,
         description: normalize_description(extras.description.as_deref())?,
-        transport: extras.transport.unwrap_or_else(|| DEFAULT_TRANSPORT.to_string()),
+        transport: extras
+            .transport
+            .unwrap_or_else(|| DEFAULT_TRANSPORT.to_string()),
         // 默认开启：直连失败还能走中继，比「连不上」好。
         allow_relay: extras.allow_relay.unwrap_or(true),
         tunnel_port: None,
@@ -197,7 +199,9 @@ async fn unique_node_name(state: &AppState, desired: String) -> Result<String, A
             return Ok(candidate);
         }
     }
-    Err(ApiError::conflict(format!("名称 {name} 及其派生名均已被占用")))
+    Err(ApiError::conflict(format!(
+        "名称 {name} 及其派生名均已被占用"
+    )))
 }
 
 /// 把节点记录转成客户端要用的数据面坐标。
@@ -223,10 +227,7 @@ pub fn node_endpoint(node: &NodeRecord) -> NodeEndpoint {
 /// - 指定了 `node_id` → 必须是存在且启用的节点；
 /// - 未指定且控制台里只有一个节点 → 自动选中（单机内嵌场景的默认行为）；
 /// - 其余情况 → 报错，要求显式指定。
-pub async fn resolve_node(
-    state: &AppState,
-    node_id: Option<&str>,
-) -> Result<NodeRecord, ApiError> {
+pub async fn resolve_node(state: &AppState, node_id: Option<&str>) -> Result<NodeRecord, ApiError> {
     if let Some(id) = node_id {
         let node = state
             .store
@@ -473,9 +474,9 @@ pub fn normalize_public_addr(raw: Option<&str>) -> Result<Option<String>, ApiErr
         if p.is_empty() {
             return Err(ApiError::bad_request("服务端地址的端口不能为空"));
         }
-        let parsed: u16 = p.parse().map_err(|_| {
-            ApiError::bad_request(format!("端口必须是 1-65535 的整数（当前 {p}）"))
-        })?;
+        let parsed: u16 = p
+            .parse()
+            .map_err(|_| ApiError::bad_request(format!("端口必须是 1-65535 的整数（当前 {p}）")))?;
         if parsed == 0 {
             return Err(ApiError::bad_request("端口不能是 0"));
         }
@@ -535,7 +536,13 @@ pub async fn patch_node(
     };
     let transport = normalize_transport(req.transport.as_deref())?;
 
-    if name.is_some() || public_host.is_some() || public_addr.is_some() || description.is_some() || transport.is_some() || req.allow_relay.is_some() {
+    if name.is_some()
+        || public_host.is_some()
+        || public_addr.is_some()
+        || description.is_some()
+        || transport.is_some()
+        || req.allow_relay.is_some()
+    {
         state
             .store
             .update_node(NodePatch {
@@ -560,7 +567,11 @@ pub async fn patch_node(
         state
             .audit(
                 Some(&user.id),
-                if disabled { "disable_node" } else { "enable_node" },
+                if disabled {
+                    "disable_node"
+                } else {
+                    "enable_node"
+                },
                 Some(id.clone()),
                 None,
                 &headers,
@@ -747,8 +758,7 @@ pub(crate) async fn node_enroll_inner(
 
     // 注册即视为首个心跳，顺带把版本/平台/EndpointId 落库；
     // 顺带把这次心跳算出的隧道编排一起返回，省掉一轮往返。
-    let beat =
-        apply_node_heartbeat(state, &node.id, &runtime, Some(peer_ip.to_string())).await?;
+    let beat = apply_node_heartbeat(state, &node.id, &runtime, Some(peer_ip.to_string())).await?;
 
     tracing::info!(
         node = %node.name,
@@ -1001,7 +1011,11 @@ mod tests {
         assert!(normalize_description(Some(&ok)).is_ok());
         let too_long = "港".repeat(MAX_DESCRIPTION + 1);
         let err = normalize_description(Some(&too_long)).expect_err("超限应报错");
-        assert!(err.message.contains(&MAX_DESCRIPTION.to_string()), "{}", err.message);
+        assert!(
+            err.message.contains(&MAX_DESCRIPTION.to_string()),
+            "{}",
+            err.message
+        );
         assert_eq!(normalize_description(Some("   ")).expect("空白"), None);
         assert_eq!(normalize_description(None).expect("未填"), None);
     }
@@ -1009,13 +1023,20 @@ mod tests {
     #[test]
     fn transport_whitelist_rejects_typos() {
         assert_eq!(
-            normalize_transport(Some("WSS")).expect("大小写不敏感").as_deref(),
+            normalize_transport(Some("WSS"))
+                .expect("大小写不敏感")
+                .as_deref(),
             Some("wss")
         );
-        assert!(normalize_transport(Some("")).expect("空串=未设置").is_none());
+        assert!(normalize_transport(Some(""))
+            .expect("空串=未设置")
+            .is_none());
         // sctp / typo 必须被拒 —— 它拼错后的表现是「节点上线了但隧道全不通」
         assert!(normalize_transport(Some("sctp")).is_err());
-        assert!(normalize_transport(Some("tcp ")).is_ok(), "两端空白应被容忍");
+        assert!(
+            normalize_transport(Some("tcp ")).is_ok(),
+            "两端空白应被容忍"
+        );
     }
 
     #[test]

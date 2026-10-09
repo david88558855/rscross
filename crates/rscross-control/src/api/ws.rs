@@ -17,8 +17,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use rscross_common::control::{
-    ControlRequest, ControlResponse, Role, CONTROL_VERSION, MAX_HEARTBEAT_SECS,
-    MIN_HEARTBEAT_SECS,
+    ControlRequest, ControlResponse, Role, CONTROL_VERSION, MAX_HEARTBEAT_SECS, MIN_HEARTBEAT_SECS,
 };
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -172,18 +171,12 @@ async fn run_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                 }
             }
 
-            ControlRequest::Heartbeat {
-                id,
-                token,
-                runtime,
-            } => {
+            ControlRequest::Heartbeat { id, token, runtime } => {
                 let mut headers = HeaderMap::new();
                 if let Ok(v) = token.parse() {
                     headers.insert(crate::api::AGENT_HEADER, v);
                 }
-                let req = agent::HeartbeatRequest {
-                    runtime,
-                };
+                let req = agent::HeartbeatRequest { runtime };
                 match agent::heartbeat_inner(&state, &headers, req, peer_ip).await {
                     Ok(r) => ControlResponse::Heartbeat {
                         id,
@@ -197,11 +190,7 @@ async fn run_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                 }
             }
 
-            ControlRequest::PushLogs {
-                id,
-                token,
-                entries,
-            } => {
+            ControlRequest::PushLogs { id, token, entries } => {
                 let mut headers = HeaderMap::new();
                 if let Ok(v) = token.parse() {
                     headers.insert(crate::api::AGENT_HEADER, v);
@@ -243,11 +232,7 @@ async fn run_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                 }
             }
 
-            ControlRequest::NodeHeartbeat {
-                id,
-                token,
-                runtime,
-            } => {
+            ControlRequest::NodeHeartbeat { id, token, runtime } => {
                 let mut headers = HeaderMap::new();
                 if let Ok(v) = token.parse() {
                     headers.insert(crate::api::NODE_HEADER, v);
@@ -305,18 +290,12 @@ async fn send_err<S>(sink: &mut S, id: u64, message: &str) -> Result<(), ()>
 where
     S: SinkExt<Message> + Unpin,
 {
-    send_resp(
-        sink,
-        ControlResponse::error(id, "bad_frame", message),
-    )
-    .await
+    send_resp(sink, ControlResponse::error(id, "bad_frame", message)).await
 }
 
 fn clamp_heartbeat(secs: u64) -> u64 {
     secs.clamp(MIN_HEARTBEAT_SECS, MAX_HEARTBEAT_SECS)
 }
-
-
 
 /// 供测试与文档引用：连接上可以承载的角色。
 pub const ROLES: &[Role] = &[Role::Agent, Role::Node];

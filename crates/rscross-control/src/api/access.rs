@@ -168,7 +168,11 @@ pub async fn resolve(
         })?
         .to_string();
 
-    let mode = if kind.prefers_direct() { "p2p" } else { "relay" };
+    let mode = if kind.prefers_direct() {
+        "p2p"
+    } else {
+        "relay"
+    };
     tracing::info!(
         tunnel = %tunnel.name,
         kind = %kind,

@@ -41,9 +41,7 @@ pub async fn wait_for_shutdown() {
     #[cfg(windows)]
     {
         use std::future::pending;
-        use tokio::signal::windows::{
-            ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown,
-        };
+        use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown};
 
         // 注册失败不致命：能拿到几个就用几个，降级即可。
         let mut sigint = ctrl_c().ok();

@@ -6,14 +6,14 @@
 
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection, OptionalExtension, Row};
 use rscross_common::{Error, Result};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 
 pub mod model;
 
 pub use model::{
-    AuditEntry, ClientRecord, EnrollTokenRecord, LogEntry, NodeRecord, OverviewStats, SessionRecord,
-    TrafficPoint, TunnelRecord, UserRecord,
+    AuditEntry, ClientRecord, EnrollTokenRecord, LogEntry, NodeRecord, OverviewStats,
+    SessionRecord, TrafficPoint, TunnelRecord, UserRecord,
 };
 
 /// 数据库句柄。内部是 `Arc<Mutex<Connection>>`，克隆开销极低。
@@ -342,9 +342,13 @@ impl Store {
     pub async fn find_node(&self, id: &str) -> Result<Option<NodeRecord>> {
         let id = id.to_string();
         self.blocking(move |c| {
-            c.query_row(&format!("{NODE_SELECT} WHERE id = ?1"), params![id], map_node)
-                .optional()
-                .map_err(Error::store)
+            c.query_row(
+                &format!("{NODE_SELECT} WHERE id = ?1"),
+                params![id],
+                map_node,
+            )
+            .optional()
+            .map_err(Error::store)
         })
         .await
     }
@@ -1756,7 +1760,11 @@ mod tests {
 
         let found = store.find_node(&id).await.expect("find").expect("some");
         assert_eq!(found.status, "pending");
-        assert_eq!(found.tunnel_server(), "127.0.0.1:7835", "未知出口 IP 时回落到本地默认端口");
+        assert_eq!(
+            found.tunnel_server(),
+            "127.0.0.1:7835",
+            "未知出口 IP 时回落到本地默认端口"
+        );
 
         store
             .touch_node(
@@ -1878,7 +1886,11 @@ mod tests {
             "10.0.0.5:17835",
             "public_addr 传 None 表示不改，不该被清掉"
         );
-        assert_eq!(got.description.as_deref(), Some("香港出口"), "未传的字段不该变");
+        assert_eq!(
+            got.description.as_deref(),
+            Some("香港出口"),
+            "未传的字段不该变"
+        );
         assert_eq!(got.transport, "kcp", "只改 transport，另两个不该动");
         assert!(!got.allow_relay, "未传的 allow_relay 不该变");
 
@@ -1911,7 +1923,10 @@ mod tests {
 
         let mut second = node_rec("dup");
         second.node_token_hash = "other".to_string();
-        assert!(store.insert_node(second).await.is_err(), "重名节点必须被拒绝");
+        assert!(
+            store.insert_node(second).await.is_err(),
+            "重名节点必须被拒绝"
+        );
 
         let mut third = node_rec("dup2");
         third.node_token_hash = format!("nhash-{}", "dup");
@@ -1948,7 +1963,10 @@ mod tests {
         assert_eq!(of_node.len(), 1);
         assert_eq!(of_node[0].name, "c1");
 
-        store.reassign_client(&of_node[0].id, None).await.expect("reassign");
+        store
+            .reassign_client(&of_node[0].id, None)
+            .await
+            .expect("reassign");
         assert!(store
             .list_clients_of_node(&node_id)
             .await
@@ -2080,12 +2098,20 @@ mod tests {
             .expect("tunnel");
 
         assert_eq!(
-            store.list_tunnels_of_node(&node_id).await.expect("by node").len(),
+            store
+                .list_tunnels_of_node(&node_id)
+                .await
+                .expect("by node")
+                .len(),
             1
         );
         store.delete_client(&client_id).await.expect("delete");
         assert_eq!(
-            store.list_tunnels_of_node(&node_id).await.expect("by node").len(),
+            store
+                .list_tunnels_of_node(&node_id)
+                .await
+                .expect("by node")
+                .len(),
             0
         );
     }

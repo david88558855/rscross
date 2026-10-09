@@ -123,7 +123,9 @@ pub struct ApiClient {
 
 impl std::fmt::Debug for ApiClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ApiClient").field("base", &self.base).finish()
+        f.debug_struct("ApiClient")
+            .field("base", &self.base)
+            .finish()
     }
 }
 

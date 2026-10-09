@@ -84,7 +84,11 @@ pub async fn get_client(
         .await
         .map_err(ApiError::from)?;
     let node = match client.node_id.as_deref() {
-        Some(node_id) => state.store.find_node(node_id).await.map_err(ApiError::from)?,
+        Some(node_id) => state
+            .store
+            .find_node(node_id)
+            .await
+            .map_err(ApiError::from)?,
         None => None,
     };
     Ok(Json(serde_json::json!({

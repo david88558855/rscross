@@ -42,7 +42,10 @@ pub struct P2pOptions {
 
 impl P2pOptions {
     /// 从配置的 `[p2p]` 段构造。
-    pub fn from_section(section: &rscross_config::P2pSection, secret_key: Option<SecretKey>) -> Self {
+    pub fn from_section(
+        section: &rscross_config::P2pSection,
+        secret_key: Option<SecretKey>,
+    ) -> Self {
         Self {
             relay_mode: section.relay_mode.clone(),
             relay_urls: section.relay_urls.clone(),
@@ -162,11 +165,7 @@ impl P2pNode {
     /// 节点侧需要同时接住两类连接：客户端来的**控制面探测**（`ALPN_CONTROL`）
     /// 与访问端来的**密钥握手**（`ALPN_ACCESS`）。一个 Endpoint 只能挂一个
     /// Router，所以必须把它们注册在同一个 Router 上。
-    pub fn spawn_dual_router<H1, H2>(
-        &self,
-        first: (&[u8], H1),
-        second: (&[u8], H2),
-    ) -> Router
+    pub fn spawn_dual_router<H1, H2>(&self, first: (&[u8], H1), second: (&[u8], H2)) -> Router
     where
         H1: ProtocolHandler,
         H2: ProtocolHandler,
@@ -180,7 +179,8 @@ impl P2pNode {
     /// 对目标节点做一次数据面连通性 + RTT 探测（供 [`crate::PathSelector`] 使用）。
     pub async fn probe(&self, remote: &EndpointAddr, timeout: Duration) -> PathProbe {
         let started = Instant::now();
-        match tokio::time::timeout(timeout, self.endpoint.connect(remote.clone(), ALPN_DATA)).await {
+        match tokio::time::timeout(timeout, self.endpoint.connect(remote.clone(), ALPN_DATA)).await
+        {
             Err(_) => PathProbe::failed("探测超时（打洞可能失败，等待 relay 回退）"),
             Ok(Err(err)) => PathProbe::failed(format!("{err}")),
             Ok(Ok(conn)) => {
@@ -303,7 +303,8 @@ impl TunnelTargets {
 
 /// 客户端侧的数据面处理器：接受远端开来的流，转发到对应本地服务。
 #[derive(Debug, Clone)]
-pub struct P2pDataHandler {    targets: TunnelTargets,
+pub struct P2pDataHandler {
+    targets: TunnelTargets,
     dial_timeout: Duration,
 }
 

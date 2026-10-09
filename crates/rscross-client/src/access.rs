@@ -88,9 +88,10 @@ pub async fn run(args: AccessArgs) -> Result<()> {
     init_tracing(&args);
     args.check_key_shape()?;
 
-    let listen: SocketAddr = args.listen.parse().map_err(|e| {
-        Error::config(format!("--listen 非法（应形如 127.0.0.1:8080）: {e}"))
-    })?;
+    let listen: SocketAddr = args
+        .listen
+        .parse()
+        .map_err(|e| Error::config(format!("--listen 非法（应形如 127.0.0.1:8080）: {e}")))?;
 
     // ---- 1. 凭访问密钥换取节点坐标 ----
     //
@@ -248,7 +249,10 @@ mod tests {
             .check_key_shape()
             .expect_err("少一位必须被拦下");
         assert!(err.to_string().contains("格式不对"), "{err}");
-        assert!(err.to_string().contains("16 位"), "提示要给出期望形状: {err}");
+        assert!(
+            err.to_string().contains("16 位"),
+            "提示要给出期望形状: {err}"
+        );
 
         // 多一位（多抄）
         assert!(args_with(&format!("{good}0")).check_key_shape().is_err());
@@ -277,6 +281,8 @@ mod tests {
             rscross_common::ACCESS_KEY_PREFIX,
             "b".repeat(rscross_common::ACCESS_KEY_HEX_LEN)
         );
-        args_with(&good).check_key_shape().expect("两侧空白应被忽略");
+        args_with(&good)
+            .check_key_shape()
+            .expect("两侧空白应被忽略");
     }
 }

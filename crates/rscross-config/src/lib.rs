@@ -275,18 +275,18 @@ impl ConsoleFile {
     /// 一眼看出浏览器连的是哪一套控制台。
     pub fn central_default() -> Self {
         let mut cfg = Self::default();
-        cfg.console.bind = format!(
-            "0.0.0.0:{}",
-            rscross_common::DEFAULT_CENTRAL_CONSOLE_PORT
-        );
+        cfg.console.bind = format!("0.0.0.0:{}", rscross_common::DEFAULT_CENTRAL_CONSOLE_PORT);
         cfg
     }
 
     /// 独立中央控制台：加载并校验；文件不存在时按 [`Self::central_default`] 创建。
     pub fn load_or_init_central(path: impl AsRef<Path>) -> Result<Self> {
-        load_or_init_toml_with(path, "中央控制台", Self::central_default, |cfg: &Self| {
-            cfg.validate()
-        })
+        load_or_init_toml_with(
+            path,
+            "中央控制台",
+            Self::central_default,
+            |cfg: &Self| cfg.validate(),
+        )
     }
 
     /// 写回文件。
@@ -765,7 +765,9 @@ fn check_tunnel(tunnel: &TunnelSection) -> Result<()> {
         ));
     }
     if tunnel.http_response_timeout_secs == 0 {
-        return Err(Error::config("tunnel.http_response_timeout_secs 必须大于 0"));
+        return Err(Error::config(
+            "tunnel.http_response_timeout_secs 必须大于 0",
+        ));
     }
     if tunnel.tls_enabled && (tunnel.tls_cert_path.is_none() || tunnel.tls_key_path.is_none()) {
         return Err(Error::config(
@@ -865,17 +867,23 @@ mod tests {
 
     #[test]
     fn console_default_is_valid() {
-        ConsoleFile::default().validate().expect("默认控制台配置应当合法");
+        ConsoleFile::default()
+            .validate()
+            .expect("默认控制台配置应当合法");
     }
 
     #[test]
     fn node_default_is_valid() {
-        NodeFile::default().validate().expect("默认节点配置应当合法");
+        NodeFile::default()
+            .validate()
+            .expect("默认节点配置应当合法");
     }
 
     #[test]
     fn client_default_is_valid() {
-        ClientFile::default().validate().expect("默认客户端配置应当合法");
+        ClientFile::default()
+            .validate()
+            .expect("默认客户端配置应当合法");
     }
 
     #[test]
@@ -915,7 +923,10 @@ mod tests {
         }
         cfg.client.console_url = "127.0.0.1:7700".to_string();
         let err = cfg.validate().expect_err("缺 scheme 应被拒");
-        assert!(err.to_string().contains("ws"), "提示应列出支持的 scheme：{err}");
+        assert!(
+            err.to_string().contains("ws"),
+            "提示应列出支持的 scheme：{err}"
+        );
     }
 
     #[test]
@@ -1014,7 +1025,10 @@ bind = "127.0.0.1:7800"
         assert!(central.validate().is_ok());
 
         // 两者只差端口，其余默认值必须一致，否则会出现「换个形态配置就变」的错觉
-        assert_eq!(central.console.heartbeat_secs, embedded.console.heartbeat_secs);
+        assert_eq!(
+            central.console.heartbeat_secs,
+            embedded.console.heartbeat_secs
+        );
         assert_eq!(central.ingress.port_range, embedded.ingress.port_range);
         assert_eq!(central.limits, embedded.limits);
     }
@@ -1024,7 +1038,9 @@ bind = "127.0.0.1:7800"
         let dir = std::env::temp_dir().join(format!(
             "rscross-cfg-{}-{}",
             std::process::id(),
-            rscross_common::time::now().timestamp_nanos_opt().unwrap_or_default()
+            rscross_common::time::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
         ));
         std::fs::create_dir_all(&dir).expect("创建临时目录");
         let path = dir.join("rscross-console.toml");
@@ -1033,7 +1049,10 @@ bind = "127.0.0.1:7800"
         assert_eq!(created.bind_port(), Some(7700));
         let text = std::fs::read_to_string(&path).expect("读回");
         assert!(text.contains("7700"), "生成的配置里应写明 7700：{text}");
-        assert!(!text.contains("7800"), "中央控制台配置不应出现内嵌端口 7800");
+        assert!(
+            !text.contains("7800"),
+            "中央控制台配置不应出现内嵌端口 7800"
+        );
 
         // 已存在时按文件读，不再覆盖
         let again = ConsoleFile::load_or_init_central(&path).expect("二次加载");

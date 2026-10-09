@@ -1614,7 +1614,7 @@ def scenario_node_extras(dist: Path, root: Path) -> None:
     # 之前把它们弹去 WS 端点，Windows 冒烟测试的首页断言直接拿到 400。
     status, _ = raw_request("GET", base + "/", accept="*/*")
     check_eq(f"{label}: Accept 通配符仍返回页面", 200, status)
-    # 只有明确声明不要 HTML 才拿 307（与 discover.rs 的探测请求一致）
+    # 只有明确声明不要HTML 才拿 307（与 discover.rs 的探测请求一致）
     status, headers = raw_request("GET", base + "/", accept="application/json")
     check_eq(f"{label}: 客户端访问根路径得307（发现入口）", 307, status)
     check(

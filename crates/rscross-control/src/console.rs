@@ -89,16 +89,26 @@ pub async fn fallback(uri: axum::http::Uri, headers: axum::http::HeaderMap) -> R
     // WS 端点然后连接失败；全给页面则 http:// 入口没法用。
     // 只有**明确声明不要 HTML** 的请求才走 307。
     //
-    // 判据刻意严格：`Accept: */*` 也算「要 HTML」。命令行工具、浏览器书签、
-    // 健康检查全都发 `*/*` —— 把它们送去 WebSocket 端点会得到一个
-    // 莫名其妙的 400（那里不是 HTTP 服务）。Windows 冒烟测试就是这么炸的：
-    // 首页断言拿到 Bad Request。
+    // 判据：
+    //   - 含 `text/html` → 要页面（浏览器）
+    //   - 恰好是 `*/*` → 要页面（命令行工具、书签、健康检查）
+    //   - 明确列出别的类型（如 `application/json`）→ 不要页面，走 307
+    //   - 没有 Accept 头 → 要页面（什么都没声明，别乱猜）
     //
-    // 反过来，客户端探测不发 Accept 时会落到 HTML 分支，拿不到 307 ——
-    // 所以 discover.rs 那边显式带了 Accept: application/json。
-    let wants_html = match headers.get(axum::http::header::ACCEPT).and_then(|v| v.to_str().ok()) {
+    // `*/*` 那条是 Windows 冒烟测试教会的：Invoke-WebRequest 默认发
+    // `*/*`，被送去 WS 端点后首页断言拿到 400 Bad Request（那里不是 HTTP 服务）。
+    // 客户端探测则在 discover.rs 里显式发 `Accept: application/json`。
+    let wants_html = match headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+    {
         None => true,
-        Some(accept) => accept.contains("text/html") || !accept.trim().is_empty(),
+        Some(accept) => {
+            accept.is_empty()
+                || accept == "*/*"
+                || accept.split(',').any(|part| part.trim().starts_with("text/html"))
+        }
     };
     if path == "/" && !wants_html {
         return (
@@ -281,6 +291,34 @@ mod tests {
             text_of(resp).await.contains(r#"id="app""#),
             "首页缺少挂载点"
         );
+    }
+
+    #[tokio::test]
+    async fn accept_decision_covers_the_cases_that_actually_occur() {
+        // 这张表就是判据本身。四种请求都真实存在，每一种都在实际测试里出现过。
+        let cases: &[(&str, StatusCode)] = &[
+            // 浏览器：明确要 HTML
+            ("text/html,application/xhtml+xml,*/*;q=0.8", StatusCode::OK),
+            // 命令行工具 / 健康检查：通配 → 仍给页面（Windows 冒烟测试的坑）
+            ("*/*", StatusCode::OK),
+            ("", StatusCode::OK),
+            // 客户端探测：明确声明要 JSON → 307
+            ("application/json", StatusCode::TEMPORARY_REDIRECT),
+            // 只列 JSON 不列通配，也要307
+            ("application/json, text/plain", StatusCode::TEMPORARY_REDIRECT),
+        ];
+        for (accept, want) in cases {
+            let resp = fallback(
+                axum::http::Uri::from_static("/"),
+                headers_with_accept(accept),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                *want,
+                "Accept: {accept:?} 应得到 {want:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -465,11 +465,19 @@ pub fn normalize_public_addr(raw: Option<&str>) -> Result<Option<String>, ApiErr
     // plan_console_address 只管 scheme 与主机，端口要另查 ——
     // 它对 `--console` 是有意的（那里端口可以缺省，走默认），
     // 但配置里的地址必须是完整可用的。
-    if let Some(port) = url_port(&addr.ws_url) {
-        if port == 0 || port > 65535 {
+    match url_port(&addr.ws_url) {
+        Ok(Some(port)) if port == 0 || port > 65535 => {
             return Err(ApiError::bad_request(format!(
                 "端口必须在 1-65535 之间（当前 {port}）"
-            )));
+            )))
+        }
+        Ok(_) => {}
+        // 写了冒号但不是数字 —— 这是拼错了，不是「没填端口」。
+        // 放过去的话客户端会拿 host:abc 去连，报错发生在远端而不是这里。
+        Err(()) => {
+            return Err(ApiError::bad_request(format!(
+                "端口必须是数字（实际是 {text:?}）"
+            )))
         }
     }
     Ok(Some(text.to_string()))
@@ -477,27 +485,38 @@ pub fn normalize_public_addr(raw: Option<&str>) -> Result<Option<String>, ApiErr
 
 /// 从 ws/wss URL 里取端口。
 ///
+/// 返回 `Err(())` 表示「有冒号但后面不是数字」—— 与「没有端口」是两件事，
+/// 前者几乎总是拼错了，不该放过去。
+///
 /// 裸 IPv6（`ws://[::1]:7800`）不能靠「最后一个冒号」判断 ——
 /// 方括号里的冒号会让人把 `1]:7800` 当端口。剥掉方括号内容再找。
-fn url_port(url: &str) -> Option<u32> {
-    let rest = url.split("://").nth(1)?;
+fn url_port(url: &str) -> Result<Option<u32>, ()> {
+    let Some(rest) = url.split("://").nth(1) else {
+        return Ok(None);
+    };
     // 去掉路径 / 查询 / 片段
-    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host_port = if let Some(end) = authority.strip_prefix('[') {
-        // [2001:db8::1]:7800 → 保留方括号后的部分
+        // [2001:db8::1]:7800 → 只看方括号之后的部分
         match end.find(']') {
             Some(i) => &end[i + 1..],
-            None => authority,
+            None => return Ok(None),
         }
     } else {
         authority
     };
-    let colon = host_port.rfind(':')?;
+    let Some(colon) = host_port.rfind(':') else {
+        return Ok(None);
+    };
     let digits = &host_port[colon + 1..];
-    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
-        return None;
+    // 冒号结尾（`host:`）算拼错；IPv6 的冒号在方括号里，不会走到这里
+    if digits.is_empty() {
+        return Err(());
     }
-    digits.parse().ok()
+    if !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err(());
+    }
+    digits.parse().map(Some).map_err(|_| ())
 }
 
 /// 修改节点请求。
@@ -992,14 +1011,15 @@ mod tests {
     #[test]
     fn url_port_handles_ipv6_and_paths() {
         // 裸 IPv6 的冒号不能被当成端口分隔符
-        assert_eq!(url_port("ws://[2001:db8::1]:7800"), Some(7800));
-        assert_eq!(url_port("ws://[::1]"), None);
-        assert_eq!(url_port("ws://203.0.113.9:7800"), Some(7800));
-        assert_eq!(url_port("wss://host.example.com/api/v1/control/ws"), None);
-        assert_eq!(url_port("ws://host.example.com:7800/ws"), Some(7800));
-        assert_eq!(url_port("ws://host.example.com"), None);
-        // 非数字端口（畸形）返回 None，交给上层按「无端口」处理
-        assert_eq!(url_port("ws://host:abc"), None);
+        assert_eq!(url_port("ws://[2001:db8::1]:7800"), Ok(Some(7800)));
+        assert_eq!(url_port("ws://[::1]"), Ok(None));
+        assert_eq!(url_port("ws://203.0.113.9:7800"), Ok(Some(7800)));
+        assert_eq!(url_port("wss://host.example.com/api/v1/control/ws"), Ok(None));
+        assert_eq!(url_port("ws://host.example.com:7800/ws"), Ok(Some(7800)));
+        assert_eq!(url_port("ws://host.example.com"), Ok(None));
+        // 写了冒号但不是数字 → Err（拼错了，不是「没填」）
+        assert_eq!(url_port("ws://host:abc"), Err(()));
+        assert_eq!(url_port("ws://host:"), Err(()));
     }
 
     #[test]

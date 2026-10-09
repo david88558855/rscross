@@ -462,6 +462,21 @@ pub fn normalize_public_addr(raw: Option<&str>) -> Result<Option<String>, ApiErr
         }
     }
 
+    // 路径：只允许根路径（控制台地址就是主机加端口）。
+    // 填了 /ws 之类的路径几乎总是从文档里抄错了 ——
+    // 而路径写错的表现是 404 或者连上了别的东西，很难一眼看出。
+    let after_scheme = text.split("://").nth(1).unwrap_or("");
+    let path = after_scheme
+        .split_once('/')
+        .map(|(_, rest)| rest)
+        .unwrap_or("");
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    if !path.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "服务端地址不要带路径（只填 ws://主机:端口），当前是 {text:?}"
+        )));
+    }
+
     // plan_console_address 只管 scheme 与主机，端口要另查 ——
     // 它对 `--console` 是有意的（那里端口可以缺省，走默认），
     // 但配置里的地址必须是完整可用的。

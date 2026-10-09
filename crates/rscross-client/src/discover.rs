@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+use hickory_proto::rr::RData;
 use rscross_common::console::{
     normalize_console_target, plan_console_address, ConsoleAddress, ConsoleScheme, CONTROL_WS_PATH,
 };
@@ -158,7 +159,23 @@ async fn lookup_txt(domain: &str) -> Result<String> {
             ))
         })?;
 
-    let records: Vec<String> = lookup.iter().map(|r| r.to_string()).collect();
+    // 必须从 RData::TXT 里取原始字节，不能用 Record 的 Display ——
+    // 后者按 RFC 1033 输出 `<name> <ttl> <class> TXT <data>` 的完整记录，
+    // 拿它去当地址必然失败。
+    let mut records: Vec<String> = Vec::new();
+    for record in lookup.answers() {
+        if let Some(RData::TXT(txt)) = record.data() {
+            // 一条 TXT 记录可以有多段字符串，按 RFC 7208 拼起来。
+            let joined: Vec<String> = txt
+                .iter()
+                .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+                .collect();
+            let value = joined.concat().trim().to_string();
+            if !value.is_empty() {
+                records.push(value);
+            }
+        }
+    }
     if records.is_empty() {
         return Err(Error::config(format!(
             "域名 {domain} 没有 TXT 记录。\

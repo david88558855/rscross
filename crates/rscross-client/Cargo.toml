@@ -19,6 +19,8 @@ path = "src/main.rs"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 tokio-tungstenite = { workspace = true }
 hickory-resolver = { workspace = true }
+# 直接用 RData::TXT 取原始字节 —— Record 的 Display 是 RFC 1033 的完整记录格式
+hickory-proto = { version = "0.26" }
 
 rscross-common = { workspace = true, features = ["runtime"] }
 rscross-config = { workspace = true }

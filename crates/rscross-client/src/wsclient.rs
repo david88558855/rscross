@@ -103,13 +103,12 @@ impl ControlSocket {
             // 发送侧：把队列里的帧刷出去。
             let sender_stop = driver_stop.clone();
             let sender_task = tokio::spawn(async move {
+                // `select!` 的分支里不能写 break（E0590），所以这里让它返回
+                // Option，用 None 表示「该退出了」。
                 while let Some(text) = tokio::select! {
                     biased;
-                    _ = sender_stop.cancelled() => break,
-                    text = tx_rx.recv() => match text {
-                        Some(t) => t,
-                        None => break,
-                    },
+                    _ = sender_stop.cancelled() => None,
+                    text = tx_rx.recv() => text,
                 } {
                     if sink
                         .send(tungstenite::Message::Text(text.into()))
@@ -127,7 +126,7 @@ impl ControlSocket {
             loop {
                 let next = tokio::select! {
                     biased;
-                    _ = driver_stop.cancelled() => break,
+                    _ = driver_stop.cancelled() => None,
                     item = stream.next() => item,
                 };
                 let Some(Ok(msg)) = next else { break };

@@ -162,6 +162,8 @@ mod tests {
                 tunnel_token: "tt".to_string(),
                 endpoint_id: None,
                 endpoint_addr: None,
+                public_addr: None,
+                transport: "tcp".to_string(),
             }),
         };
         state.save_identity(&identity).expect("save");

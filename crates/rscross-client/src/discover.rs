@@ -139,9 +139,9 @@ async fn probe_redirect(addr: &ConsoleAddress) -> Result<(String, usize, String)
 async fn lookup_txt(domain: &str) -> Result<String> {
     // `builder_tokio()` 读系统 DNS 配置（Unix 用 /etc/resolv.conf，Windows 用注册表）——
     // 企业网络里的 split-horizon DNS 只能靠系统配置解析，自建 nameserver 会绕过它。
-    let resolver = hickory_resolver::TokioResolver::builder_tokio().map_err(|err| {
-        Error::config(format!("初始化 DNS 解析器失败：{err}"))
-    })?;
+    let resolver = hickory_resolver::TokioResolver::builder_tokio()
+        .map_err(|err| Error::config(format!("初始化 DNS 解析器失败：{err}")))?
+        .build();
 
     let lookup = tokio::time::timeout(DNS_TIMEOUT, resolver.txt_lookup(domain))
         .await

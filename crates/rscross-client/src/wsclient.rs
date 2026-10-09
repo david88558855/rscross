@@ -109,7 +109,7 @@ impl ControlSocket {
                     tungstenite::Message::Text(t) => t.to_string(),
                     tungstenite::Message::Close(_) => break,
                     tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_) => continue,
-                    tungstenite::Message::Binary(b) => match String::from_utf8(b) {
+                    tungstenite::Message::Binary(b) => match String::from_utf8(b.to_vec()) {
                         Ok(t) => t,
                         Err(_) => continue,
                     },

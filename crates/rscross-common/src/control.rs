@@ -257,6 +257,8 @@ pub enum ControlResponse {
         server_time: String,
         /// 控制台观测到的出口 IP。
         public_ip: Option<String>,
+        /// 当前生效的 FerroTunnel 握手 token（便于节点感知轮换）。
+        tunnel_token: String,
         /// 本节点要承载的隧道编排。
         tunnels: Vec<NodeTunnelPlan>,
     },

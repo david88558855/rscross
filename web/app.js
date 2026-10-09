@@ -438,9 +438,14 @@
     const rows = nodes.length
       ? nodes.map((n) => '' +
           '<tr>' +
-            '<td><strong>' + esc(n.name) + '</strong></td>' +
+            '<td><strong>' + esc(n.name) + '</strong>' +
+              (n.description ? '<div class="muted" style="font-size:12px">' + esc(n.description) + '</div>' : '') +
+              (n.allow_relay === false ? '<div class="muted" style="font-size:12px">P2P 中继已关</div>' : '') +
+              '</td>' +
             '<td>' + statusTag(n.status) + '</td>' +
             '<td class="mono">' + esc(n.public_host || n.public_ip || '—') + '</td>' +
+            '<td class="mono" title="' + esc(n.public_addr || '') + '">' + esc(n.public_addr || '自动') + '</td>' +
+            '<td class="mono">' + esc((n.transport || 'tcp').toUpperCase()) + '</td>' +
             '<td class="mono">' + esc(n.tunnel_port != null ? ':' + n.tunnel_port : '—') + '</td>' +
             '<td class="mono">' + esc((n.os || '') + ' ' + (n.arch || '')) + '</td>' +
             '<td class="mono">' + esc(n.version || '—') + '</td>' +
@@ -454,7 +459,7 @@
               '<button class="sm danger" data-node-del="' + esc(n.id) + '" data-name="' + esc(n.name) + '">删除</button>' +
             '</td>' +
           '</tr>').join('')
-      : '<tr><td colspan="9"><div class="empty">还没有服务端节点。' +
+      : '<tr><td colspan="11"><div class="empty">还没有服务端节点。' +
         (state.embedded ? '内嵌控制台会在服务端启动时自动注册本机节点。'
                         : '点击「添加节点」签发令牌。') + '</div></td></tr>';
 
@@ -465,7 +470,8 @@
           (state.embedded ? ' disabled title="内嵌形态下节点由服务端进程自身注册"' : '') +
           '>添加节点</button>' +
       '</div><div class="card-body tight"><table>' +
-        '<thead><tr><th>名称</th><th>状态</th><th>对外主机</th><th>隧道端口</th><th>平台</th>' +
+        '<thead><tr><th>名称</th><th>状态</th><th>对外主机</th><th>服务端地址</th>' +
+        '<th>协议</th><th>隧道端口</th><th>平台</th>' +
         '<th>版本</th><th>EndpointId</th><th>最近心跳</th><th></th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table></div></div>' +
       (state.embedded
@@ -539,15 +545,37 @@
     bindCopyButtons();
   }
 
+  // 与后端 rscross_control::api::nodes::TRANSPORTS 保持一致。
+  const TRANSPORTS = ['tcp', 'udp', 'quic', 'kcp', 'ws', 'wss'];
+
   function openNodeModal() {
     const html = '' +
       '<div class="modal-mask" id="modal"><div class="modal">' +
-        '<h3>添加服务端节点</h3><div class="modal-body">' +
+        '<h3>添加自建节点</h3><div class="modal-body">' +
           '<label class="field"><span>节点名</span><input id="n-name" placeholder="node-hk-1" />' +
             '<div class="hint">仅字母、数字、-、_、.。</div></label>' +
+          '<label class="field"><span>介绍</span>' +
+            '<input id="n-desc" placeholder="香港出口 · 带宽 20Mbps" />' +
+            '<div class="hint">仅展示，方便区分多台节点；不影响连接。</div></label>' +
           '<label class="field"><span>对外主机 / IP</span>' +
             '<input id="n-host" placeholder="203.0.113.9 或 node1.example.com" />' +
-            '<div class="hint">客户端会用它连接该节点的反向隧道；留空则用控制台观测到的出口 IP。</div></label>' +
+            '<div class="hint">对外怎么访问（DNS 解析用）。留空则用控制台观测到的出口 IP。</div></label>' +
+          '<label class="field"><span>服务端地址</span>' +
+            '<input id="n-addr" placeholder="10.0.0.5:17835 或 node1.example.com:17835" />' +
+            '<div class="hint"><strong>客户端据此地址连接该服务端</strong>。' +
+              '与上面的「对外主机」不同：内嵌形态下节点拿不到自己的公网出口 IP，' +
+              '自动推导会回落到 127.0.0.1，客户端照着连就连到本机去了。' +
+              '本机部署可留空。</div></label>' +
+          '<label class="field"><span>传输协议</span>' +
+            '<select id="n-transport">' +
+              TRANSPORTS.map((t) => '<option value="' + t + '"' + (t === 'tcp' ? ' selected' : '') + '>' + t + '</option>').join('') +
+            '</select>' +
+            '<div class="hint">该节点承载流量时使用的传输协议。</div></label>' +
+          '<label class="field"><span>P2P 中继</span>' +
+            '<label class="switch"><input type="checkbox" id="n-relay" checked />' +
+              '<span>直连失败时回退到该节点中继</span></label>' +
+            '<div class="hint">关闭后 P2P 隧道在中继不可用时会直接连不上。' +
+              '保持开启：直连快，失败还能通。</div></label>' +
           '<div id="n-result"></div>' +
         '</div>' +
         '<div class="modal-foot">' +
@@ -567,7 +595,14 @@
       try {
         const res = await api('/api/v1/nodes', {
           method: 'POST',
-          body: { name, public_host: $('n-host').value.trim() || null },
+          body: {
+            name,
+            description: $('n-desc').value.trim() || null,
+            public_host: $('n-host').value.trim() || null,
+            public_addr: $('n-addr').value.trim() || null,
+            transport: $('n-transport').value,
+            allow_relay: $('n-relay').checked,
+          },
         });
         $('n-result').innerHTML =
           '<label class="field"><span>在公网机器上执行</span></label>' +

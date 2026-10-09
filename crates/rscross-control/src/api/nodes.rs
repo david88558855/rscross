@@ -210,6 +210,12 @@ pub fn node_endpoint(node: &NodeRecord) -> NodeEndpoint {
         tunnel_token: node.tunnel_token.clone(),
         endpoint_id: node.endpoint_id.clone(),
         endpoint_addr: node.endpoint_addr.clone(),
+        public_addr: node.public_addr.clone(),
+        transport: if node.transport.is_empty() {
+            DEFAULT_TRANSPORT.to_string()
+        } else {
+            node.transport.clone()
+        },
     }
 }
 
@@ -868,6 +874,10 @@ mod tests {
             node_token_hash: "h".to_string(),
             tunnel_token: "tt".to_string(),
             public_host: None,
+            public_addr: None,
+            description: None,
+            transport: "tcp".to_string(),
+            allow_relay: true,
             tunnel_port: Some(17835),
             ingress_port: None,
             version: None,

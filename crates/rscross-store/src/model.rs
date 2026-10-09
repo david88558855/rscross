@@ -97,11 +97,29 @@ pub struct NodeRecord {
 }
 
 impl NodeRecord {
-    /// 客户端接入该节点时使用的地址：`tunnel_server`。
+    /// 客户端接入该节点时使用的地址。
     ///
-    /// 优先级：管理员配置的 `public_host` > 控制台观测到的 `public_ip` > `127.0.0.1`。
+    /// 优先级：`public_addr`（管理员显式配置的服务端地址）>
+    /// `public_host` > 控制台观测到的 `public_ip` > `127.0.0.1`。
     /// 端口优先用节点上报值，其次回落到默认端口。
+    ///
+    /// `public_addr` 里可以自带端口；带了就用它带的 —— 服务端监听端口
+    /// 常常不是默认值（同一个节点上跑着别的服务），强制覆盖成上报值会让
+    /// 管理员配的地址失效。
     pub fn tunnel_server(&self) -> String {
+        if let Some(addr) = self
+            .public_addr
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+        {
+            if addr.contains(':') && !addr.ends_with(':') {
+                return addr.to_string();
+            }
+            let port = self.tunnel_port_as_u16().unwrap_or(rscross_common::DEFAULT_TUNNEL_PORT);
+            return format!("{addr}:{port}");
+        }
+
         let host = self
             .public_host
             .as_deref()
@@ -109,11 +127,12 @@ impl NodeRecord {
             .filter(|h| !h.is_empty())
             .or(self.public_ip.as_deref())
             .unwrap_or("127.0.0.1");
-        let port = self
-            .tunnel_port
-            .and_then(|p| u16::try_from(p).ok())
-            .unwrap_or(rscross_common::DEFAULT_TUNNEL_PORT);
-        format!("{host}:{port}")
+        format!("{host}:{}", self.tunnel_port_as_u16().unwrap_or(rscross_common::DEFAULT_TUNNEL_PORT))
+    }
+
+    /// 节点上报的反向隧道端口（i64 → u16，非法值按未设置处理）。
+    fn tunnel_port_as_u16(&self) -> Option<u16> {
+        self.tunnel_port.and_then(|p| u16::try_from(p).ok())
     }
 }
 

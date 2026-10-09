@@ -61,9 +61,11 @@ async fn run_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                 tracing::info!(?role, %peer_ip, "控制面连接静默超时，关闭");
                 // 只说「我走了」，不解释原因 —— 客户端重连时会重新做版本协商，
                 // 这里的 reason 对它没有意义。
+                // 1001 = Going Away。只说「我走了」，不解释原因 ——
+                // 客户端重连时会重新做版本协商，这里的 reason 对它没有意义。
                 let _ = sink
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                        code: axum::extract::ws::CloseCode::Away,
+                        code: 1001,
                         reason: Cow::Borrowed("idle timeout"),
                     })))
                     .await;
@@ -130,6 +132,7 @@ async fn run_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                         &mut sink,
                         ControlResponse::Error {
                             id,
+                            code: "version_mismatch".to_string(),
                             message: format!(
                                 "控制面协议版本不一致：本端 {CONTROL_VERSION}，你的 {version}"
                             ),
@@ -305,7 +308,11 @@ async fn send_err<S>(sink: &mut S, id: u64, message: &str) -> Result<(), ()>
 where
     S: SinkExt<Message> + Unpin,
 {
-    send_resp(sink, ControlResponse::Error { id, message: message.to_string() }).await
+    send_resp(
+        sink,
+        ControlResponse::error(id, "bad_frame", message),
+    )
+    .await
 }
 
 fn clamp_heartbeat(secs: u64) -> u64 {

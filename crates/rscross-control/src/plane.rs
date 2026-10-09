@@ -196,6 +196,10 @@ impl ControlPlane {
                             id: existing.id.clone(),
                             name: None,
                             public_host: Some(Some(host)),
+                            public_addr: None,
+                            description: None,
+                            transport: None,
+                            allow_relay: None,
                         })
                         .await
                         .map_err(Error::store)?;

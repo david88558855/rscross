@@ -159,18 +159,16 @@ async fn lookup_txt(domain: &str) -> Result<String> {
             ))
         })?;
 
-    // 必须从 RData::TXT 里取原始字节，不能用 Record 的 Display ——
-    // 后者按 RFC 1033 输出 `<name> <ttl> <class> TXT <data>` 的完整记录，
-    // 拿它去当地址必然失败。
+    // 必须拿 TXT 载荷本身，不能用 Record 的 Display ——
+    // 后者按 RFC 1033 输出 `<name> <ttl> <class> TXT <data>` 的完整资源记录，
+    // 拿它当地址必然失败（txt:// 会永远报「不是合法的 ws:// 地址」）。
+    //
+    // 路径：Record 的公开字段 `data` → 匹配 `RData::TXT` → 用
+    // `Display for TXT`（只渲染载荷；多段字符串在 Display 里已按 RFC 7208 拼好）。
     let mut records: Vec<String> = Vec::new();
     for record in lookup.answers() {
-        if let Some(RData::TXT(txt)) = record.data() {
-            // 一条 TXT 记录可以有多段字符串，按 RFC 7208 拼起来。
-            let joined: Vec<String> = txt
-                .iter()
-                .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
-                .collect();
-            let value = joined.concat().trim().to_string();
+        if let RData::TXT(txt) = &record.data {
+            let value = txt.to_string().trim().to_string();
             if !value.is_empty() {
                 records.push(value);
             }

@@ -106,12 +106,15 @@
 ./rscross-server --managed --console http://<控制台IP>:7700 \
                  --name hk-1 --enroll-token rsn_xxxx
 
-# ③ 在「客户端管理」页签发令牌（选择归属节点），复制命令到内网机器执行：
+# ③ 在「客户端管理」页签发令牌（选择归属节点，也可先不选、之后再改派），复制命令到内网机器执行：
 ./rscross-client --console http://<控制台IP>:7700 --name office-nas --enroll-token rse_xxxx
 ```
 
 > 客户端命令里**不含节点地址**：归属由令牌决定，之后还能在控制台改派。
 > 因此把客户端迁到另一台节点不需要动客户端机器上的任何文件。
+>
+> **客户端与节点相互独立**：控制台里一个节点都没有时也能签发令牌、客户端也能完成注册，
+> 只是暂时不承载隧道；等节点上线后在客户端列表里「改派」即可。
 
 ### `--console` 的四种写法
 
@@ -147,6 +150,26 @@ wss://console.example.com/api/v1/control/ws
 
 注意它与「反向隧道控制面地址」（`host:7835`）是两件事 —— 协议不同、端口不同，
 客户端分别用它们连不同的东西。详见 [docs/CONSOLE-PROTOCOL.md](docs/CONSOLE-PROTOCOL.md)。
+
+## 账号与权限
+
+控制台默认只有一个初始管理员（密码打印在首次启动的 stderr 里）。
+新增账号有两条路径：
+
+| 路径 | 入口 | 说明 |
+|---|---|---|
+| **管理员建号** | 配置页 → 用户管理 → 新建用户 | 最可控；角色可选 `admin` / `viewer`，默认 `viewer` |
+| **自助注册** | 登录页 → 注册 | 需要先在配置里打开 `admin.allow_registration`；新账号固定是 `viewer` |
+
+角色是**真**权限边界，不只是命名：
+
+- `admin`：可读可写；能看到隧道访问密钥与节点的隧道握手令牌。
+- `viewer`：只读。所有写接口返回 403，**且看不到访问密钥 / 隧道令牌**（列表里显示为 `****`），
+  因为 `/api/v1/access/resolve` 是免鉴权的 —— 拿到密钥就等于拿到通道。
+
+两条硬约束：**不能把最后一个启用状态的管理员降级或删除**，
+**不能删除当前登录的账号**。改密在配置页 →「账号安全」；
+管理员重置他人密码、或禁用某个账号时，该账号的登录会话会立即失效。
 
 ## 四类隧道怎么选
 
@@ -201,7 +224,7 @@ P2P 隧道会先尝试与客户端直连，直连失败且允许回退时自动�
 crates/
 ├── rscross-common/      共享错误、ID、协议常量、控制面 DTO
 ├── rscross-config/      三份配置模型：ConsoleFile / NodeFile / ClientFile
-├── rscross-store/       SQLite 持久化（nodes / clients / tunnels / …）
+├── rscross-store/       SQLite 持久化（nodes / clients / tunnels / users / …）
 ├── rscross-auth/        Argon2id、四类令牌（含访问密钥）、会话、失败限流
 ├── rscross-transport/   Iroh + FerroTunnel 适配、路径选择、字节转发
 ├── rscross-control/     控制面（API + Web + 持久化），两种形态共用

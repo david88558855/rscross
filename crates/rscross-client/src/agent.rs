@@ -404,19 +404,28 @@ async fn register_with_retry(
                     agent_token: Some(response.agent_token.clone()),
                     name: Some(response.name.clone()),
                     heartbeat_secs: Some(response.heartbeat_secs),
-                    node: Some(response.node.clone()),
+                    node: response.node.clone(),
                 };
                 state_dir.save_identity(&identity)?;
                 state_dir.clear_enroll_token();
 
-                tracing::info!(
-                    client_id = %response.client_id,
-                    name = %response.name,
-                    node = %response.node.name,
-                    tunnel_server = %response.node.tunnel_server,
-                    public_url = response.public_url.as_deref().unwrap_or("-"),
-                    "注册成功"
-                );
+                match &response.node {
+                    Some(node) => tracing::info!(
+                        client_id = %response.client_id,
+                        name = %response.name,
+                        node = %node.name,
+                        tunnel_server = %node.tunnel_server,
+                        public_url = response.public_url.as_deref().unwrap_or("-"),
+                        "注册成功"
+                    ),
+                    // 控制台里还没有可用节点 —— 这不是错误：客户端保持在线，
+                    // 等控制台改派归属后，心跳里就会带上节点坐标并自动建隧道。
+                    None => tracing::warn!(
+                        client_id = %response.client_id,
+                        name = %response.name,
+                        "注册成功，但控制台尚未分配服务端节点：保持心跳，等待改派"
+                    ),
+                }
                 return Ok(identity);
             }
             Err(err) => {

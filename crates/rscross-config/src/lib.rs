@@ -85,6 +85,12 @@ pub struct AdminSection {
     pub session_ttl_hours: u64,
     /// 是否允许在控制台修改配置。
     pub allow_config_edit: bool,
+    /// 是否开放**自助注册**（`POST /api/v1/auth/register`）。
+    ///
+    /// 默认关闭：控制台能看到所有客户端、隧道与访问密钥，开放注册等于
+    /// 把内网拓扑摊给任何能访问到端口的人。团队内共用时再显式打开；
+    /// 不开也能用 —— 管理员可在「配置 → 用户管理」里直接创建账号。
+    pub allow_registration: bool,
 }
 
 impl Default for AdminSection {
@@ -94,6 +100,7 @@ impl Default for AdminSection {
             initial_password: String::new(),
             session_ttl_hours: 12,
             allow_config_edit: true,
+            allow_registration: false,
         }
     }
 }

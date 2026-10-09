@@ -11,10 +11,21 @@ use rscross_config::{parse_port_range, ConsoleFile};
 use rscross_store::{ClientRecord, EnrollTokenRecord, TunnelPatch, TunnelRecord};
 use serde::{Deserialize, Serialize};
 
-use crate::api::nodes::{console_url_of, resolve_node};
-use crate::api::{map_store_conflict, normalize_name, parse_proto};
+use crate::api::misc::TOKEN_MASK;
+use crate::api::nodes::{console_url_of, resolve_node, resolve_node_optional};
+use crate::api::{map_store_conflict, normalize_name, parse_proto, ROLE_ADMIN};
 use crate::error::ApiError;
 use crate::state::AppState;
+
+/// 掩掉非管理员不该看到的隧道访问密钥。
+///
+/// 访问密钥等价于「进入该内网服务的凭据」，且 `/api/v1/access/resolve`
+/// 免鉴权 —— 只读角色能看到隧道存在，但不该拿到能直接用的钥匙。
+fn mask_tunnel_secrets(tunnel: &mut TunnelRecord) {
+    if tunnel.access_key.is_some() {
+        tunnel.access_key = Some(TOKEN_MASK.to_string());
+    }
+}
 
 // ------------------------------------------------------------------ 客户端
 
@@ -36,10 +47,10 @@ pub struct CreateClientResponse {
     pub enroll_token: String,
     /// 过期时间。
     pub expires_at: String,
-    /// 归属节点 ID。
-    pub node_id: String,
-    /// 归属节点名。
-    pub node_name: String,
+    /// 归属节点 ID；`null` 表示暂未指定（客户端先注册、之后再改派）。
+    pub node_id: Option<String>,
+    /// 归属节点名；`null` 同上。
+    pub node_name: Option<String>,
     /// 可直接复制执行的接入命令。
     pub command: String,
 }
@@ -71,18 +82,23 @@ pub async fn get_client(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    state.require_user(&headers).await?;
+    let user = state.require_user(&headers).await?;
     let client = state
         .store
         .find_client(&id)
         .await
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::not_found("客户端不存在"))?;
-    let tunnels = state
+    let mut tunnels = state
         .store
         .list_tunnels_of_client(&id)
         .await
         .map_err(ApiError::from)?;
+    if user.role != ROLE_ADMIN {
+        for tunnel in tunnels.iter_mut() {
+            mask_tunnel_secrets(tunnel);
+        }
+    }
     let node = match client.node_id.as_deref() {
         Some(node_id) => state
             .store
@@ -107,8 +123,10 @@ pub async fn create_client(
     let user = state.require_admin(&headers).await?;
     let cfg = state.config_snapshot().await;
 
-    // 校验/解析归属节点：多节点时必须显式指定。
-    let node = resolve_node(&state, req.node_id.as_deref()).await?;
+    // 归属节点是**可选的**：控制台里还没有节点、或用户想稍后再分配，
+    // 都不该拦住「先把客户端登记进来」。这条路径过去会报
+    // 「控制台里还没有服务端节点」，把节点变成了创建客户端的前置条件。
+    let node = resolve_node_optional(&state, req.node_id.as_deref()).await?;
 
     let name = match req.name.as_deref() {
         Some(raw) if !raw.trim().is_empty() => Some(normalize_name(raw)?),
@@ -128,7 +146,7 @@ pub async fn create_client(
         .store
         .insert_enroll_token(EnrollTokenRecord {
             token_hash: token_hash(&token),
-            node_id: Some(node.id.clone()),
+            node_id: node.as_ref().map(|n| n.id.clone()),
             client_name: name.clone(),
             created_by: Some(user.username.clone()),
             created_at: rscross_common::time::to_rfc3339(now),
@@ -146,7 +164,12 @@ pub async fn create_client(
             Some(&user.id),
             "issue_enroll_token",
             name.clone(),
-            Some(format!("归属节点={} 有效期={ttl}分钟", node.name)),
+            Some(format!(
+                "归属节点={} 有效期={ttl}分钟",
+                node.as_ref()
+                    .map(|n| n.name.as_str())
+                    .unwrap_or("未指定")
+            )),
             &headers,
         )
         .await;
@@ -154,8 +177,8 @@ pub async fn create_client(
     Ok(Json(CreateClientResponse {
         enroll_token: token,
         expires_at,
-        node_id: node.id,
-        node_name: node.name,
+        node_id: node.as_ref().map(|n| n.id.clone()),
+        node_name: node.as_ref().map(|n| n.name.clone()),
         command,
     }))
 }
@@ -341,8 +364,14 @@ pub async fn list_tunnels(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<TunnelRecord>>, ApiError> {
-    state.require_user(&headers).await?;
-    let tunnels = state.store.list_tunnels().await.map_err(ApiError::from)?;
+    let user = state.require_user(&headers).await?;
+    let admin = user.role == ROLE_ADMIN;
+    let mut tunnels = state.store.list_tunnels().await.map_err(ApiError::from)?;
+    if !admin {
+        for tunnel in tunnels.iter_mut() {
+            mask_tunnel_secrets(tunnel);
+        }
+    }
     Ok(Json(tunnels))
 }
 
@@ -352,12 +381,18 @@ pub async fn list_client_tunnels(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<TunnelRecord>>, ApiError> {
-    state.require_user(&headers).await?;
-    let tunnels = state
+    let user = state.require_user(&headers).await?;
+    let admin = user.role == ROLE_ADMIN;
+    let mut tunnels = state
         .store
         .list_tunnels_of_client(&id)
         .await
         .map_err(ApiError::from)?;
+    if !admin {
+        for tunnel in tunnels.iter_mut() {
+            mask_tunnel_secrets(tunnel);
+        }
+    }
     Ok(Json(tunnels))
 }
 

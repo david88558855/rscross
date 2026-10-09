@@ -17,11 +17,15 @@ pub const TOKEN_MASK: &str = "****";
 /// `GET /api/v1/health`（免鉴权，供探活 / 负载均衡使用）
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let uptime = (rscross_common::time::now() - state.started_at).num_seconds();
+    // 登录页要据此决定是否显示「注册」入口：这个字段是公开信息，
+    // 不泄漏任何账号数据，但能避免让用户点了才发现「自助注册已关闭」。
+    let registration_open = state.config_snapshot().await.admin.allow_registration;
     Json(serde_json::json!({
         "ok": true,
         "name": "rscross-console",
         "version": rscross_common::VERSION,
         "embedded": state.embedded,
+        "registration_open": registration_open,
         "started_at": rscross_common::time::to_rfc3339(state.started_at),
         "uptime_secs": uptime,
         "console_assets": crate::console::asset_count(),

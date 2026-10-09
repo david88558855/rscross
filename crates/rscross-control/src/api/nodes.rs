@@ -15,7 +15,8 @@ use rscross_config::ConsoleFile;
 use rscross_store::{NodePatch, NodeRecord, NodeRuntimePatch};
 use serde::{Deserialize, Serialize};
 
-use crate::api::{header_token, map_store_conflict, normalize_name, NODE_HEADER};
+use crate::api::misc::TOKEN_MASK;
+use crate::api::{header_token, map_store_conflict, normalize_name, NODE_HEADER, ROLE_ADMIN};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -251,6 +252,53 @@ pub async fn resolve_node(state: &AppState, node_id: Option<&str>) -> Result<Nod
     }
 }
 
+/// 解析归属节点，**允许「当前还没有节点」**。
+///
+/// 与 [`resolve_node`] 的唯一区别：不把「没有可用节点」当成错误。
+/// 客户端与节点的生命周期本来就相互独立 —— 先把客户端登记进来、
+/// 等节点上线再改派，是完全正常的顺序（也是「内网先装机、公网后开服」的常态）。
+///
+/// - 指定 `node_id` → 必须存在且启用（显式绑定的错误不能吞掉）；
+/// - 未指定、恰好一个启用节点 → 自动选中（单机内嵌场景的默认行为）；
+/// - 未指定、没有可用节点 → `None`：客户端先注册，暂不承载隧道；
+/// - 未指定、多个节点 → `None`：归属待显式指定，不随便替用户挑一台。
+pub async fn resolve_node_optional(
+    state: &AppState,
+    node_id: Option<&str>,
+) -> Result<Option<NodeRecord>, ApiError> {
+    if let Some(id) = node_id.map(str::trim).filter(|s| !s.is_empty()) {
+        let node = state
+            .store
+            .find_node(id)
+            .await
+            .map_err(ApiError::from)?
+            .ok_or_else(|| ApiError::not_found("指定的服务端节点不存在"))?;
+        if node.disabled {
+            return Err(ApiError::forbidden(format!("节点 {} 已被禁用", node.name)));
+        }
+        return Ok(Some(node));
+    }
+
+    let mut enabled = state
+        .store
+        .list_nodes()
+        .await
+        .map_err(ApiError::from)?
+        .into_iter()
+        .filter(|n| !n.disabled);
+    Ok(enabled.next())
+}
+
+/// 掩掉非管理员不该看到的节点密钥。
+///
+/// `tunnel_token` 是数据面（FerroTunnel）的握手凭据，拿到它就能直连节点的
+/// 隧道端口。只读角色能看到拓扑，但不该拿到能用的凭据。
+fn mask_node_secrets(node: &mut NodeRecord) {
+    if !node.tunnel_token.is_empty() {
+        node.tunnel_token = TOKEN_MASK.to_string();
+    }
+}
+
 // ============================================================ 管理侧 API
 
 /// 创建节点请求。
@@ -287,8 +335,14 @@ pub async fn list_nodes(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<NodeRecord>>, ApiError> {
-    state.require_user(&headers).await?;
-    let nodes = state.store.list_nodes().await.map_err(ApiError::from)?;
+    let user = state.require_user(&headers).await?;
+    let admin = user.role == ROLE_ADMIN;
+    let mut nodes = state.store.list_nodes().await.map_err(ApiError::from)?;
+    if !admin {
+        for node in nodes.iter_mut() {
+            mask_node_secrets(node);
+        }
+    }
     Ok(Json(nodes))
 }
 
@@ -341,8 +395,9 @@ pub async fn get_node(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    state.require_user(&headers).await?;
-    let node = state
+    let user = state.require_user(&headers).await?;
+    let admin = user.role == ROLE_ADMIN;
+    let mut node = state
         .store
         .find_node(&id)
         .await
@@ -358,9 +413,16 @@ pub async fn get_node(
         .list_tunnels_of_node(&id)
         .await
         .map_err(ApiError::from)?;
+    let mut endpoint = node_endpoint(&node);
+    if !admin {
+        mask_node_secrets(&mut node);
+        if !endpoint.tunnel_token.is_empty() {
+            endpoint.tunnel_token = TOKEN_MASK.to_string();
+        }
+    }
     Ok(Json(serde_json::json!({
         "node": node,
-        "endpoint": node_endpoint(&node),
+        "endpoint": endpoint,
         "clients": clients,
         "tunnels": tunnels,
     })))

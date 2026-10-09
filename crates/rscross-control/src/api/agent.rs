@@ -15,7 +15,7 @@ use rscross_common::{ClientRuntime, DesiredTunnel, NodeEndpoint};
 use rscross_store::{ClientRecord, ClientRuntimePatch, EnrollTokenRecord};
 use serde::{Deserialize, Serialize};
 
-use crate::api::nodes::{node_endpoint, resolve_node};
+use crate::api::nodes::{node_endpoint, resolve_node_optional};
 use crate::api::{desired_tunnels, header_token, AGENT_HEADER};
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -46,7 +46,11 @@ pub struct EnrollResponse {
     /// 控制台对外地址。
     pub public_url: Option<String>,
     /// 归属的服务端节点（数据面坐标）。
-    pub node: NodeEndpoint,
+    ///
+    /// `null` 表示控制台暂时没有可分配（或未指定）的节点：客户端照常注册并
+    /// 保持心跳，但在被改派之前不承载任何隧道。这样「先把内网机器接入控制台」
+    /// 与「公网节点何时就绪」两件事可以分开做。
+    pub node: Option<NodeEndpoint>,
     /// 已下发的隧道列表。
     pub tunnels: Vec<DesiredTunnel>,
 }
@@ -142,8 +146,13 @@ pub(crate) async fn enroll_inner(
         }
     }
 
-    // 归属节点：令牌里指定的优先，否则在「只有一个节点」时自动选中。
-    let node = resolve_node(state, enroll.as_ref().and_then(|e| e.node_id.as_deref())).await?;
+    // 归属节点：令牌里指定的优先；否则在「只有一个启用节点」时自动选中。
+    //
+    // 这里刻意用 `_optional`：注册**不要求**控制台里已经有节点。
+    // 客户端与节点是两条独立的生命周期，「还没有节点就先别接入客户端」
+    // 会让内网侧无法先行部署。
+    let node =
+        resolve_node_optional(state, enroll.as_ref().and_then(|e| e.node_id.as_deref())).await?;
 
     let desired_name = enroll
         .as_ref()
@@ -160,7 +169,7 @@ pub(crate) async fn enroll_inner(
         .store
         .insert_client(ClientRecord {
             id: client_id.clone(),
-            node_id: Some(node.id.clone()),
+            node_id: node.as_ref().map(|n| n.id.clone()),
             name: name.clone(),
             status: rscross_common::ClientStatus::Pending.as_str().to_string(),
             agent_token_hash: token_hash(&agent_token),
@@ -200,7 +209,7 @@ pub(crate) async fn enroll_inner(
     tracing::info!(
         client = %name,
         id = %client_id,
-        node = %node.name,
+        node = node.as_ref().map(|n| n.name.as_str()).unwrap_or("未分配"),
         peer = %peer_ip,
         os = req.runtime.os,
         arch = req.runtime.arch,
@@ -213,7 +222,7 @@ pub(crate) async fn enroll_inner(
         agent_token,
         heartbeat_secs: cfg.console.heartbeat_secs,
         public_url: cfg.console.public_url.clone(),
-        node: node_endpoint(&node),
+        node: node.as_ref().map(node_endpoint),
         tunnels: desired_tunnels(tunnels),
     })
 }

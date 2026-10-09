@@ -346,13 +346,17 @@ def raw_request(
         return err.code, {k.lower(): v for k, v in err.headers.items()}
 
 
-def login(base: str, password: str) -> str | None:
+def login_as(base: str, username: str, password: str) -> str | None:
     status, payload = http_json(
-        "POST", base + "/api/v1/auth/login", {"username": "admin", "password": password}
+        "POST", base + "/api/v1/auth/login", {"username": username, "password": password}
     )
     if status == 200 and payload and payload.get("token"):
         return payload["token"]
     return None
+
+
+def login(base: str, password: str) -> str | None:
+    return login_as(base, "admin", password)
 
 
 def health_ok(base: str) -> bool:
@@ -407,6 +411,26 @@ def check_web_console(label: str, base: str) -> None:
         status == 200 and "javascript" in ct and len(js) > 1000,
         f"status={status} content-type={ct} len={len(js)}")
     web("app.js 确实调用控制台 API", "/api/v1/" in js, js[:160])
+    # 前端校验必须与后端同源：曾经它是按「只填 host 或 host:port」写的，
+    # 于是填了正确的 ws://host:port 反而被拦下 —— 这类「界面说不能填、
+    # 后端说必须填」的分歧，只有在前端源码层面守一道才不会再回来。
+    web("服务端地址校验不再要求「不带协议前缀」",
+        "只填 host 或 host:port" not in js, "app.js 仍残留旧的 host:port 校验文案")
+    web("服务端地址校验要求 ws:// 前缀", "ws://" in js, "app.js 未提及 ws://")
+    # 与后端 TRANSPORTS 白名单（不含 udp）保持一致。
+    web("节点表单的传输协议选项不含 udp",
+        "const TRANSPORTS = ['tcp', 'quic', 'kcp', 'ws', 'wss']" in js,
+        "app.js 的 TRANSPORTS 与后端白名单不一致")
+    web("登录页提供注册入口", "auth/register" in js, "app.js 未调用注册接口")
+    web("配置页提供改密入口", "auth/password" in js, "app.js 未调用改密接口")
+    # 建完节点不刷新：`render.bind(null)` 只是造了个绑定函数就丢掉，列表停在旧数据。
+    # 这类「看着像调用了、其实没有」的写法只能靠源码层面守。
+    web("节点创建后确实触发重绘（不是 render.bind 空调用）",
+        ".bind(null)" not in js, "app.js 仍存在 render.bind(null) 这类无效调用")
+    # `state.nodes = null` 曾把缓存置空，而顶栏角标直接取 .length —— 关闭弹窗后
+    # 切到别的页面就会抛 TypeError 变成白屏。节点集合要么是数组，要么就别动它。
+    web("节点缓存不会被置空（避免顶栏角标取 length 崩溃）",
+        "state.nodes = null" not in js, "app.js 仍会把 state.nodes 置空")
 
     status, headers, css = http_raw(base + "/app.css")
     ct = headers.get("content-type", "")
@@ -1727,6 +1751,298 @@ def scenario_node_extras(dist: Path, root: Path) -> None:
     console.stop()
 
 
+def scenario_accounts_and_orphan_client(dist: Path, work: Path) -> None:
+    """账号体系（注册 / 改密 / 用户管理）与「无节点也能创建客户端」。
+
+    这两件事放在同一个场景里，是因为它们共用一台**全新的空控制台**：
+      - 一个节点都没有，正好用来验证「创建客户端不依赖节点」；
+      - 没有节点也意味着不会有任何数据面干扰，账号相关的断言更干净。
+    """
+    label = "账号与无节点客户端"
+    print("\n" + "-" * 72, flush=True)
+    print(f"场景：{label} —— 注册 / 改密 / 用户管理 / 无节点客户端", flush=True)
+    print("-" * 72, flush=True)
+
+    root = work / "accounts"
+    root.mkdir(parents=True, exist_ok=True)
+    password = "e2e-password-123"
+    port = free_port()
+
+    cfg_path = root / "console.toml"
+    cfg_path.write_text(
+        f"""[console]
+name = "e2e-accounts"
+bind = "127.0.0.1:{port}"
+heartbeat_secs = 2
+offline_after_secs = 30
+shutdown_grace_secs = 5
+
+[admin]
+initial_user = "admin"
+initial_password = "{password}"
+session_ttl_hours = 1
+allow_registration = false
+
+[database]
+path = "{(root / 'console.db').as_posix()}"
+
+[auth]
+allow_self_enroll = false
+
+[log]
+level = "info"
+ring_capacity = 500
+""",
+        encoding="utf-8",
+    )
+
+    console = Proc(
+        f"{label}/console",
+        bin_path(dist, "rscross-console"),
+        ["--config", str(cfg_path), "--bind", f"127.0.0.1:{port}"],
+        root / "console.log",
+    )
+    base = f"http://127.0.0.1:{port}"
+    if not check(f"{label}: 空控制台启动", wait_console_ready(base, console), base):
+        console.stop()
+        return
+
+    token = login(base, password)
+    if not check(f"{label}: 管理员可登录", bool(token), base):
+        console.stop()
+        return
+
+    # ---------------------------------------------------------- ① 无节点也能创建客户端
+    status, nodes = http_json("GET", base + "/api/v1/nodes", token=token)
+    check_eq(f"{label}: 控制台里当前没有服务端节点", 0, len(nodes or []))
+
+    status, issued = http_json(
+        "POST", base + "/api/v1/clients", {"name": "orphan", "ttl_minutes": 10}, token=token
+    )
+    if not check(
+        f"{label}: 没有节点时仍可签发客户端令牌",
+        status == 200 and (issued or {}).get("enroll_token"),
+        f"status={status} body={issued}",
+    ):
+        console.stop()
+        return
+    check_eq(f"{label}: 未指定归属时 node_id 为空", None, (issued or {}).get("node_id"))
+    check(
+        f"{label}: 无节点时的接入命令仍指向控制台",
+        "--console" in issued["command"] and issued["enroll_token"] in issued["command"],
+        issued["command"],
+    )
+
+    client_cfg = root / "client.toml"
+    write_client_config(
+        client_cfg, name="orphan", console_port=port, state_dir=root / "client-state"
+    )
+    client = Proc(
+        f"{label}/client",
+        bin_path(dist, "rscross-client"),
+        ["--config", str(client_cfg), "--enroll-token", issued["enroll_token"]],
+        root / "client.log",
+    )
+
+    ok, found = wait_client_online(base, token, "orphan")
+    if not check(
+        f"{label}: 没有节点时客户端也能完成注册并心跳为 online", ok, str(found)
+    ):
+        console.stop()
+        return
+    check_eq(f"{label}: 客户端注册后保持「未归属」状态", None, found.get("node_id"))
+
+    # ---------------------------------------------------------- ② 自助注册开关
+    status, err = http_json(
+        "POST", base + "/api/v1/auth/register", {"username": "bob", "password": "bob-password"}
+    )
+    check(
+        f"{label}: 自助注册默认关闭",
+        status == 403,
+        f"status={status} body={err}",
+    )
+    status, health = http_json("GET", base + "/api/v1/health")
+    check_eq(
+        f"{label}: health 标明自助注册已关闭",
+        False,
+        bool((health or {}).get("registration_open")),
+    )
+
+    status, cfg = http_json("GET", base + "/api/v1/config", token=token)
+    conf = ((cfg or {}).get("config") or {})
+    conf.setdefault("admin", {})["allow_registration"] = True
+    status, put = http_json("PUT", base + "/api/v1/config", conf, token=token)
+    check_eq(f"{label}: 可在配置里打开自助注册", 200, status)
+
+    status, health = http_json("GET", base + "/api/v1/health")
+    check_eq(
+        f"{label}: health 立刻反映开放状态",
+        True,
+        bool((health or {}).get("registration_open")),
+    )
+
+    status, reg = http_json(
+        "POST", base + "/api/v1/auth/register", {"username": "bob", "password": "bob-password"}
+    )
+    check(
+        f"{label}: 打开后可自助注册并直接拿到会话（只读角色）",
+        status == 200
+        and (reg or {}).get("token")
+        and ((reg or {}).get("user") or {}).get("role") == "viewer",
+        f"status={status} body={reg}",
+    )
+    bob_token = (reg or {}).get("token")
+
+    status, _ = http_json(
+        "POST", base + "/api/v1/auth/register", {"username": "bob", "password": "bob-password"}
+    )
+    check_eq(f"{label}: 重复用户名被拒", 409, status)
+
+    status, err = http_json(
+        "POST", base + "/api/v1/auth/register", {"username": "carol", "password": "123"}
+    )
+    check(f"{label}: 弱密码被拒", status == 400, f"status={status} body={err}")
+
+    # ---------------------------------------------------------- ③ 只读角色的边界
+    status, _ = http_json("GET", base + "/api/v1/nodes", token=bob_token)
+    check_eq(f"{label}: 只读角色可读节点列表", 200, status)
+    status, err = http_json("POST", base + "/api/v1/nodes", {"name": "nope"}, token=bob_token)
+    check(f"{label}: 只读角色不能创建节点", status == 403, f"status={status} body={err}")
+    status, _ = http_json("GET", base + "/api/v1/config", token=bob_token)
+    check_eq(f"{label}: 只读角色读不到控制台配置", 403, status)
+    status, _ = http_json("GET", base + "/api/v1/users", token=bob_token)
+    check_eq(f"{label}: 只读角色读不到用户列表", 403, status)
+
+    # 建一个节点，验证密钥对非管理员是掩码的
+    status, created = http_json(
+        "POST", base + "/api/v1/nodes",
+        {"name": "acct-node", "public_addr": "ws://203.0.113.7:7800"},
+        token=token,
+    )
+    node_id = ((created or {}).get("node") or {}).get("id")
+    if not check(f"{label}: 管理员可创建节点", bool(node_id), f"status={status} body={created}"):
+        console.stop()
+        return
+
+    status, nodes = http_json("GET", base + "/api/v1/nodes", token=bob_token)
+    first = (nodes or [{}])[0]
+    check_eq(f"{label}: 只读角色看到的是掩码后的隧道令牌", "****", first.get("tunnel_token"))
+    check_eq(f"{label}: 只读角色仍能看到节点名", "acct-node", first.get("name"))
+    status, nodes = http_json("GET", base + "/api/v1/nodes", token=token)
+    check(
+        f"{label}: 管理员能看到真实隧道令牌",
+        bool((nodes or [{}])[0].get("tunnel_token"))
+        and nodes[0]["tunnel_token"] != "****",
+        str(nodes)[:200],
+    )
+
+    # 把「未归属」的客户端改派到新节点 —— 这正是无节点先注册的价值所在
+    status, _ = http_json(
+        "PATCH", f"{base}/api/v1/clients/{found['id']}", {"node_id": node_id}, token=token
+    )
+    check_eq(f"{label}: 可把未归属客户端改派到新节点", 200, status)
+    status, clients = http_json("GET", base + "/api/v1/clients", token=token)
+    mine = next((c for c in (clients or []) if c.get("id") == found["id"]), {})
+    check_eq(f"{label}: 改派后归属节点已更新", node_id, mine.get("node_id"))
+
+    # ---------------------------------------------------------- ④ 改密
+    status, _ = http_json(
+        "POST", base + "/api/v1/auth/password",
+        {"current_password": "definitely-wrong", "new_password": "bob-new-password"},
+        token=bob_token,
+    )
+    check_eq(f"{label}: 当前密码不对时改密被拒", 401, status)
+
+    status, err = http_json(
+        "POST", base + "/api/v1/auth/password",
+        {"current_password": "bob-password", "new_password": "bob-new-password"},
+        token=bob_token,
+    )
+    check_eq(f"{label}: 可修改自己的密码", 200, status)
+    check(
+        f"{label}: 改密后新密码可登录",
+        bool(login_as(base, "bob", "bob-new-password")),
+        "新密码登录失败",
+    )
+    check(
+        f"{label}: 改密后旧密码立即失效",
+        not login_as(base, "bob", "bob-password"),
+        "旧密码仍然可用",
+    )
+
+    # ---------------------------------------------------------- ⑤ 管理员用户管理
+    status, users = http_json("GET", base + "/api/v1/users", token=token)
+    check(
+        f"{label}: 管理员可列出用户",
+        status == 200 and len(users or []) >= 2,
+        f"status={status} body={users}",
+    )
+    users = users or []
+    admin_id = next((u["id"] for u in users if u["username"] == "admin"), None)
+    bob_id = next((u["id"] for u in users if u["username"] == "bob"), None)
+
+    status, made = http_json(
+        "POST", base + "/api/v1/users",
+        {"username": "carol", "password": "carol-password", "role": "admin"},
+        token=token,
+    )
+    carol_id = (made or {}).get("id")
+    check(
+        f"{label}: 管理员可创建管理员账号",
+        status == 200 and (made or {}).get("role") == "admin",
+        f"status={status} body={made}",
+    )
+
+    status, made2 = http_json(
+        "POST", base + "/api/v1/users", {"username": "dave", "password": "dave-password"},
+        token=token,
+    )
+    check_eq(f"{label}: 新建用户默认只读", "viewer", (made2 or {}).get("role"))
+
+    status, _ = http_json(
+        "PATCH", f"{base}/api/v1/users/{bob_id}", {"password": "bob-reset-password"}, token=token
+    )
+    check_eq(f"{label}: 管理员可重置他人密码", 200, status)
+    check(
+        f"{label}: 重置后可用新密码登录",
+        bool(login_as(base, "bob", "bob-reset-password")),
+        "重置后的密码登录失败",
+    )
+
+    status, _ = http_json(
+        "PATCH", f"{base}/api/v1/users/{bob_id}", {"disabled": True}, token=token
+    )
+    check_eq(f"{label}: 可禁用用户", 200, status)
+    check(
+        f"{label}: 被禁用后无法登录",
+        not login_as(base, "bob", "bob-reset-password"),
+        "被禁用用户仍可登录",
+    )
+
+    # 最后一个管理员保护：先把 carol 降级（还剩 admin，允许），再降 admin（应被拒）
+    status, _ = http_json(
+        "PATCH", f"{base}/api/v1/users/{carol_id}", {"role": "viewer"}, token=token
+    )
+    check_eq(f"{label}: 有备用管理员时可降级", 200, status)
+    status, err = http_json(
+        "PATCH", f"{base}/api/v1/users/{admin_id}", {"role": "viewer"}, token=token
+    )
+    check(
+        f"{label}: 不能把最后一个管理员降级",
+        status == 400,
+        f"status={status} body={err}",
+    )
+    status, _ = http_json("DELETE", f"{base}/api/v1/users/{admin_id}", token=token)
+    check_eq(f"{label}: 不能删除当前登录账号", 400, status)
+
+    status, _ = http_json("DELETE", f"{base}/api/v1/users/{bob_id}", token=token)
+    check_eq(f"{label}: 可删除其它用户", 200, status)
+    check(f"{label}: 被删除用户无法登录", not login_as(base, "bob", "bob-reset-password"), "")
+
+    client.stop()
+    console.stop()
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print("用法: python3 tests/e2e/e2e.py <二进制目录>", file=sys.stderr)
@@ -1805,6 +2121,7 @@ def main() -> int:
         scenario_standalone(dist, work)
         scenario_default_port(dist, work)
         scenario_console_addr(dist, work)
+        scenario_accounts_and_orphan_client(dist, work)
     except Exception as err:  # noqa: BLE001 - e2e 必须给出可诊断的失败，而不是裸 traceback
         check("e2e 脚本执行未抛异常", False, f"{type(err).__name__}: {err}")
         import traceback

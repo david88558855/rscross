@@ -19,6 +19,10 @@ rscross-client.toml
 # 工作区临时文件（CI 助手脚本等）
 .workbuddy/
 
+# Python 字节码缓存（tests/e2e 的 py_compile 会生成）
+__pycache__/
+*.pyc
+
 # IDE / OS
 .idea/
 .vscode/

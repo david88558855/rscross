@@ -200,8 +200,9 @@ pub enum ControlResponse {
         heartbeat_secs: u64,
         /// 控制台对外地址。
         public_url: Option<String>,
-        /// 归属节点（数据面坐标）。
-        node: NodeEndpoint,
+        /// 归属节点（数据面坐标）；`None` 表示暂未分配，
+        /// 客户端应保持在线但不建立隧道，等心跳下发为止。
+        node: Option<NodeEndpoint>,
         /// 初始隧道列表。
         tunnels: Vec<DesiredTunnel>,
     },

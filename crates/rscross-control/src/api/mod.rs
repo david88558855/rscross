@@ -6,6 +6,7 @@ pub mod auth;
 pub mod client;
 pub mod misc;
 pub mod nodes;
+pub mod users;
 pub mod ws;
 
 use axum::routing::{get, patch, post};
@@ -14,12 +15,54 @@ use rscross_common::{DesiredTunnel, TunnelKind};
 use rscross_store::TunnelRecord;
 
 use crate::console;
+use crate::error::ApiError;
 use crate::state::AppState;
 
 /// 服务端节点认证头。
 pub const NODE_HEADER: &str = "x-rscross-node";
 /// 内网客户端认证头。
 pub const AGENT_HEADER: &str = "x-rscross-agent";
+
+/// 管理员角色：可读可写，能看到令牌 / 访问密钥。
+pub const ROLE_ADMIN: &str = "admin";
+/// 只读角色：能看列表与统计，但所有写操作被拒，且看不到令牌 / 访问密钥。
+pub const ROLE_VIEWER: &str = "viewer";
+
+/// 校验角色名。缺省按 `viewer`（最小权限）。
+pub fn normalize_role(raw: Option<&str>) -> Result<String, ApiError> {
+    match raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(ROLE_VIEWER)
+    {
+        ROLE_ADMIN => Ok(ROLE_ADMIN.to_string()),
+        ROLE_VIEWER => Ok(ROLE_VIEWER.to_string()),
+        other => Err(ApiError::bad_request(format!(
+            "角色只能是 {ROLE_ADMIN} 或 {ROLE_VIEWER}（实际 {other:?}）"
+        ))),
+    }
+}
+
+/// 密码最短长度。
+pub const PASSWORD_MIN_LEN: usize = 8;
+/// 密码最长长度（挡住把整段文件当密码贴进来的情况）。
+pub const PASSWORD_MAX_LEN: usize = 128;
+
+/// 校验密码强度。注册与改密共用同一套规则，避免「注册能过、改密被拒」这类不一致。
+pub fn validate_password(password: &str) -> Result<(), ApiError> {
+    let len = password.chars().count();
+    if len < PASSWORD_MIN_LEN {
+        return Err(ApiError::bad_request(format!(
+            "密码至少 {PASSWORD_MIN_LEN} 位"
+        )));
+    }
+    if len > PASSWORD_MAX_LEN {
+        return Err(ApiError::bad_request(format!(
+            "密码不能超过 {PASSWORD_MAX_LEN} 位"
+        )));
+    }
+    Ok(())
+}
 
 /// 组装路由。
 ///
@@ -38,9 +81,19 @@ pub fn router() -> Router<AppState> {
         )
         // 控制台认证
         .route("/api/v1/auth/login", post(auth::login))
+        .route("/api/v1/auth/register", post(auth::register))
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/auth/me", get(auth::me))
         .route("/api/v1/auth/password", post(auth::change_password))
+        // 用户管理（仅管理员）
+        .route(
+            "/api/v1/users",
+            get(users::list_users).post(users::create_user),
+        )
+        .route(
+            "/api/v1/users/{id}",
+            patch(users::patch_user).delete(users::delete_user),
+        )
         // 概览 / 报表
         .route("/api/v1/overview", get(misc::overview))
         .route("/api/v1/traffic", get(misc::traffic))
@@ -196,4 +249,30 @@ pub fn header_token(headers: &axum::http::HeaderMap, name: &str) -> Option<Strin
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_defaults_to_viewer_and_rejects_typos() {
+        // 不给角色时按最小权限处理 —— 自助注册与管理员建号都会走到这里。
+        assert_eq!(normalize_role(None).expect("缺省"), ROLE_VIEWER);
+        assert_eq!(normalize_role(Some("  ")).expect("空白"), ROLE_VIEWER);
+        assert_eq!(normalize_role(Some("admin")).expect("admin"), ROLE_ADMIN);
+        assert_eq!(normalize_role(Some("VIEWER")).expect("只读"), ROLE_VIEWER);
+        assert!(normalize_role(Some("operator")).is_err());
+    }
+
+    #[test]
+    fn password_policy_is_shared_by_register_and_change() {
+        assert!(validate_password("1234567").is_err(), "短于 8 位应被拒");
+        assert!(validate_password("12345678").is_ok());
+        // 按字符数而不是字节数：中文密码不该因为「字节够长」而通过、
+        // 也不该因为「一个汉字 3 字节」被误判为超长。
+        assert!(validate_password("密码密码").is_err(), "4 个汉字应被拒");
+        assert!(validate_password(&"x".repeat(PASSWORD_MAX_LEN)).is_ok());
+        assert!(validate_password(&"x".repeat(PASSWORD_MAX_LEN + 1)).is_err());
+    }
 }

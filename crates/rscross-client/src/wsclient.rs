@@ -350,8 +350,8 @@ pub struct Enrolled {
     pub heartbeat_secs: u64,
     /// 控制台对外地址。
     pub public_url: Option<String>,
-    /// 归属节点的数据面坐标。
-    pub node: rscross_common::NodeEndpoint,
+    /// 归属节点的数据面坐标；`None` 表示控制台暂未分配节点。
+    pub node: Option<rscross_common::NodeEndpoint>,
     /// 初始隧道列表。
     pub tunnels: Vec<rscross_common::DesiredTunnel>,
 }

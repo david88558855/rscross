@@ -223,6 +223,98 @@ impl Store {
         .await
     }
 
+    /// 列出全部用户（按创建时间正序，最初的管理员排在最前）。
+    pub async fn list_users(&self) -> Result<Vec<UserRecord>> {
+        self.blocking(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT id, username, password_hash, role, disabled, created_at, last_login_at
+                     FROM users ORDER BY created_at ASC",
+                )
+                .map_err(Error::store)?;
+            let rows = stmt.query_map([], map_user).map_err(Error::store)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 统计管理员数量（用于「不能把最后一个管理员禁掉/删掉」这类保护）。
+    pub async fn count_admins(&self) -> Result<i64> {
+        self.blocking(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 禁用 / 启用用户。
+    pub async fn set_user_disabled(&self, user_id: &str, disabled: bool) -> Result<()> {
+        let (id, flag) = (user_id.to_string(), disabled as i64);
+        self.blocking(move |c| {
+            let n = c
+                .execute(
+                    "UPDATE users SET disabled = ?1 WHERE id = ?2",
+                    params![flag, id],
+                )
+                .map_err(Error::store)?;
+            if n == 0 {
+                return Err(Error::store("用户不存在"));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// 修改用户角色。
+    pub async fn set_user_role(&self, user_id: &str, role: &str) -> Result<()> {
+        let (id, role) = (user_id.to_string(), role.to_string());
+        self.blocking(move |c| {
+            let n = c
+                .execute(
+                    "UPDATE users SET role = ?1 WHERE id = ?2",
+                    params![role, id],
+                )
+                .map_err(Error::store)?;
+            if n == 0 {
+                return Err(Error::store("用户不存在"));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// 删除某用户的全部会话（改密 / 重置密码 / 禁用后调用，让旧登录态立即失效）。
+    pub async fn purge_user_sessions(&self, user_id: &str) -> Result<usize> {
+        let id = user_id.to_string();
+        self.blocking(move |c| {
+            c.execute("DELETE FROM sessions WHERE user_id = ?1", params![id])
+                .map_err(Error::store)
+        })
+        .await
+    }
+
+    /// 删除用户；其会话一并清理，避免留下可用的登录态。
+    pub async fn delete_user(&self, user_id: &str) -> Result<()> {
+        let id = user_id.to_string();
+        self.blocking(move |c| {
+            c.execute("DELETE FROM sessions WHERE user_id = ?1", params![id])
+                .map_err(Error::store)?;
+            let n = c
+                .execute("DELETE FROM users WHERE id = ?1", params![id])
+                .map_err(Error::store)?;
+            if n == 0 {
+                return Err(Error::store("用户不存在"));
+            }
+            Ok(())
+        })
+        .await
+    }
+
     // ------------------------------------------------------------- sessions
 
     /// 新建会话。
@@ -2034,6 +2126,93 @@ mod tests {
             .await
             .expect("first use ok");
         assert!(store.consume_enroll_token("h1", "c2").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn enroll_token_may_have_no_node() {
+        // 「控制台里还没有节点」是合法状态：令牌照发，归属留空。
+        // 这条守的是「创建客户端不依赖节点」这条产品规则，
+        // 一旦有人把 node_id 改回 NOT NULL，测试会立刻失败。
+        let store = Store::open_in_memory().expect("open");
+        let now = rscross_common::time::now();
+        store
+            .insert_enroll_token(EnrollTokenRecord {
+                token_hash: "orphan".to_string(),
+                node_id: None,
+                client_name: None,
+                created_by: None,
+                created_at: rscross_common::time::to_rfc3339(now),
+                expires_at: rscross_common::time::to_rfc3339(now + chrono::Duration::minutes(30)),
+                used_at: None,
+                used_client_id: None,
+            })
+            .await
+            .expect("无归属节点的令牌也要能落库");
+
+        let found = store
+            .find_enroll_token("orphan")
+            .await
+            .expect("find")
+            .expect("some");
+        assert!(found.node_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn user_admin_crud_and_last_admin_guard_inputs() {
+        let store = Store::open_in_memory().expect("open");
+        let admin = store
+            .create_user("admin".to_string(), "hash-a".to_string(), "admin".to_string())
+            .await
+            .expect("create admin");
+        let viewer = store
+            .create_user("alice".to_string(), "hash-b".to_string(), "viewer".to_string())
+            .await
+            .expect("create viewer");
+
+        assert_eq!(store.count_users().await.expect("count"), 2);
+        assert_eq!(store.count_admins().await.expect("admins"), 1);
+
+        let users = store.list_users().await.expect("list");
+        assert_eq!(users.len(), 2);
+        let names: std::collections::HashSet<&str> =
+            users.iter().map(|u| u.username.as_str()).collect();
+        assert!(names.contains("admin") && names.contains("alice"));
+        assert!(users.iter().all(|u| !u.disabled));
+
+        store
+            .set_user_disabled(&viewer.id, true)
+            .await
+            .expect("disable");
+        let found = store
+            .find_user_by_id(&viewer.id)
+            .await
+            .expect("find")
+            .expect("some");
+        assert!(found.disabled);
+
+        store
+            .set_user_role(&viewer.id, "admin")
+            .await
+            .expect("promote");
+        assert_eq!(store.count_admins().await.expect("admins"), 1, "被禁用的管理员不计入");
+        store
+            .set_user_disabled(&viewer.id, false)
+            .await
+            .expect("enable");
+        assert_eq!(store.count_admins().await.expect("admins"), 2);
+
+        store
+            .set_password(&admin.id, "hash-c".to_string())
+            .await
+            .expect("set password");
+        store
+            .purge_user_sessions(&admin.id)
+            .await
+            .expect("purge sessions");
+
+        store.delete_user(&viewer.id).await.expect("delete");
+        assert_eq!(store.count_users().await.expect("count"), 1);
+        assert!(store.delete_user(&viewer.id).await.is_err(), "重复删除应报错");
     }
 
     #[tokio::test]

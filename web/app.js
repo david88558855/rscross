@@ -22,6 +22,8 @@
     logsAuto: true,
     logLevel: '',
     logKeyword: '',
+    // 是否开放自助注册（来自 /api/v1/health），决定登录页是否给出注册入口。
+    registrationOpen: false,
     // 隧道管理当前选中的分类（域名解析 / 端口转发 / 私有隧道 / P2P 隧道）
     tunnelTab: 'domain',
   };
@@ -56,12 +58,17 @@
 
   async function api(path, options) {
     const opts = Object.assign({ method: 'GET' }, options || {});
+    // 认证类接口的 401 是「这次操作被拒」（密码错 / 当前密码错），
+    // 不代表会话失效；对它们不能做自动登出，否则输错密码会被提示成
+    // 「会话已过期」并被弹回登录页，用户完全不知道真正的原因。
+    const local401 = !!opts.local401;
+    delete opts.local401;
     opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
     if (state.token) opts.headers.Authorization = 'Bearer ' + state.token;
     if (opts.body && typeof opts.body !== 'string') opts.body = JSON.stringify(opts.body);
 
     const res = await fetch(path, opts);
-    if (res.status === 401) {
+    if (res.status === 401 && !local401) {
       logoutLocal();
       throw new Error('会话已过期，请重新登录');
     }
@@ -130,12 +137,12 @@
 
   function nodeName(id) {
     if (!id) return '<span class="muted">未分配</span>';
-    const n = state.nodes.find((x) => x.id === id);
+    const n = (state.nodes || []).find((x) => x.id === id);
     return n ? esc(n.name) : '<span class="muted">(已删除)</span>';
   }
 
   function clientName(id) {
-    const c = state.clients.find((x) => x.id === id);
+    const c = (state.clients || []).find((x) => x.id === id);
     return c ? c.name : '(已删除)';
   }
 
@@ -235,8 +242,9 @@
     const items = NAV.map((item) => {
       if (item.group) return '<div class="nav-group">' + esc(item.group) + '</div>';
       let badge = '';
-      if (item.key === 'nodes') badge = state.nodes.length;
-      if (item.key === 'clients') badge = state.clients.length;
+      // 角标只是锦上添花：缓存还没就位时不该让整个页面挂掉。
+      if (item.key === 'nodes') badge = (state.nodes || []).length;
+      if (item.key === 'clients') badge = (state.clients || []).length;
       return '<div class="nav-item' + (item.key === active ? ' active' : '') +
         '" data-nav="' + item.key + '"><span class="ico">' + item.ico + '</span>' +
         esc(item.label) +
@@ -245,6 +253,10 @@
     }).join('');
 
     const mode = state.embedded ? '内嵌控制台' : '独立控制台';
+    // 只读角色在顶栏明示：否则用户只会看到一连串「需要管理员权限」的弹窗，
+    // 却不知道是角色的问题。
+    const roleTag = (state.user && state.user.role !== 'admin')
+      ? '<span class="tag info">只读</span>' : '';
     return '' +
       '<div class="layout">' +
         '<aside class="sidebar">' +
@@ -256,6 +268,7 @@
           '<header class="topbar">' +
             '<h1>' + esc(title) + '</h1>' +
             '<div class="spacer"></div>' +
+            roleTag +
             '<span class="who">' + esc(state.user ? state.user.username : '') + '</span>' +
             '<button class="sm" id="btn-refresh">刷新</button>' +
             '<button class="sm" id="btn-logout">退出</button>' +
@@ -293,20 +306,28 @@
 
   // ------------------------------------------------------------ 登录页
 
+  function authShell(inner) {
+    return '<div class="login-wrap"><div class="login-box">' +
+      '<div class="brand-row"><span class="logo">RS</span>' +
+        '<div><h1>rscross 控制台</h1><p class="sub">直连优先 · 中继兜底 · 多节点汇聚</p></div>' +
+      '</div>' + inner + '</div></div>';
+  }
+
   function renderLogin() {
-    document.body.innerHTML = '' +
-      '<div class="login-wrap"><div class="login-box">' +
-        '<div class="brand-row"><span class="logo">RS</span>' +
-          '<div><h1>rscross 控制台</h1><p class="sub">直连优先 · 中继兜底 · 多节点汇聚</p></div>' +
-        '</div>' +
-        '<label class="field"><span>用户名</span>' +
-          '<input id="login-user" autocomplete="username" value="admin" /></label>' +
-        '<label class="field"><span>密码</span>' +
-          '<input id="login-pass" type="password" autocomplete="current-password" /></label>' +
-        '<button class="primary" id="login-go" style="width:100%">登录</button>' +
-        '<p class="muted" style="font-size:12px;margin:14px 0 0">' +
-          '首次启动的管理员密码打印在服务端/控制台进程的标准错误输出中。</p>' +
-      '</div></div>';
+    document.body.innerHTML = authShell(
+      '<label class="field"><span>用户名</span>' +
+        '<input id="login-user" autocomplete="username" value="admin" /></label>' +
+      '<label class="field"><span>密码</span>' +
+        '<input id="login-pass" type="password" autocomplete="current-password" /></label>' +
+      '<button class="primary" id="login-go" style="width:100%">登录</button>' +
+      '<p class="muted" style="font-size:12px;margin:14px 0 0">' +
+        '首次启动的管理员密码打印在服务端/控制台进程的标准错误输出中。</p>' +
+      (state.registrationOpen
+        ? '<div class="toolbar" style="margin-top:10px;justify-content:center">' +
+            '<button class="sm" id="login-to-register">还没有账号？注册</button></div>'
+        : '<p class="muted" style="font-size:12px;margin:8px 0 0">' +
+            '自助注册已关闭。需要新账号请让管理员在「配置 → 用户管理」里创建。</p>')
+    );
 
     const go = async () => {
       const username = $('login-user').value.trim();
@@ -318,6 +339,7 @@
         const res = await api('/api/v1/auth/login', {
           method: 'POST',
           body: { username, password },
+          local401: true,
         });
         state.token = res.token;
         state.user = res.user;
@@ -332,7 +354,62 @@
 
     $('login-go').onclick = go;
     $('login-pass').onkeydown = (e) => { if (e.key === 'Enter') go(); };
+    const toRegister = $('login-to-register');
+    if (toRegister) toRegister.onclick = renderRegister;
     $('login-pass').focus();
+  }
+
+  // 自助注册。仅在控制台开启 admin.allow_registration 时可达
+  // （登录页据此决定是否显示入口；后端也会再挡一次）。
+  function renderRegister() {
+    document.body.innerHTML = authShell(
+      '<label class="field"><span>用户名</span>' +
+        '<input id="reg-user" autocomplete="username" placeholder="仅字母、数字、-、_、." /></label>' +
+      '<label class="field"><span>密码（至少 8 位）</span>' +
+        '<input id="reg-pass" type="password" autocomplete="new-password" /></label>' +
+      '<label class="field"><span>确认密码</span>' +
+        '<input id="reg-pass2" type="password" autocomplete="new-password" /></label>' +
+      '<button class="primary" id="reg-go" style="width:100%">注册并登录</button>' +
+      '<p class="muted" style="font-size:12px;margin:14px 0 0">' +
+        '新账号是只读角色（viewer）：可以查看节点 / 客户端 / 隧道与统计，' +
+        '但不能创建、修改或删除资源，也不会看到访问密钥与节点令牌。' +
+        '需要管理权限请让管理员在「配置 → 用户管理」里调整角色。</p>' +
+      '<div class="toolbar" style="margin-top:10px;justify-content:center">' +
+        '<button class="sm" id="reg-back">返回登录</button></div>'
+    );
+
+    $('reg-back').onclick = renderLogin;
+
+    const go = async () => {
+      const username = $('reg-user').value.trim();
+      const password = $('reg-pass').value;
+      const again = $('reg-pass2').value;
+      if (!username || !password) { toast('请填写用户名与密码', 'err'); return; }
+      if (password.length < 8) { toast('密码至少 8 位', 'err'); return; }
+      if (password !== again) { toast('两次输入的密码不一致', 'err'); return; }
+      const btn = $('reg-go');
+      btn.disabled = true;
+      try {
+        const res = await api('/api/v1/auth/register', {
+          method: 'POST',
+          body: { username, password },
+          local401: true,
+        });
+        state.token = res.token;
+        state.user = res.user;
+        localStorage.setItem(TOKEN_KEY, res.token);
+        toast('注册成功', 'ok');
+        location.hash = '#/dashboard';
+        render();
+      } catch (err) {
+        toast(err.message, 'err');
+        btn.disabled = false;
+      }
+    };
+
+    $('reg-go').onclick = go;
+    $('reg-pass2').onkeydown = (e) => { if (e.key === 'Enter') go(); };
+    $('reg-user').focus();
   }
 
   async function doLogout() {
@@ -560,7 +637,9 @@
   }
 
   // 与后端 rscross_control::api::nodes::TRANSPORTS 保持一致。
-  const TRANSPORTS = ['tcp', 'udp', 'quic', 'kcp', 'ws', 'wss'];
+  // **不含 udp**：UDP 入口需要内核层面的端口转发，NAT 后基本不可用，
+  // 配上去只会得到「节点在线但隧道全不通」。后端白名单也会把它拒掉。
+  const TRANSPORTS = ['tcp', 'quic', 'kcp', 'ws', 'wss'];
   // 与后端 MAX_DESCRIPTION 保持一致。
   const MAX_DESC = 200;
 
@@ -573,17 +652,55 @@
     return '';
   }
 
+  // 「服务端地址」= 客户端要连的**控制台地址**，完整形态带 scheme：
+  //   ws://203.0.113.9:7800
+  //   wss://node1.example.com
+  //
+  // 历史上这里按「裸主机名 + 可选端口」校验，把带协议前缀的值一律判为错，
+  // 于是用户按界面提示填了正确的 ws://… 反而过不去 —— 规则与后端
+  // normalize_public_addr 打架。现在两端同源：必须是 ws:// 或 wss://。
   function checkAddr(v) {
-    if (!v) return '';   // 留空 = 自动推导，允许
-    if (v.indexOf('://') >= 0) return '只填 host 或 host:port，不要带 http:// 这样的协议前缀';
-    if (/[/?#]/.test(v)) return '只填 host 或 host:port，不要带路径或查询串';
-    if (/\s/.test(v)) return '不能包含空格';
-    // 端口：拆最后一个冒号（IPv6 的冒号在方括号内）
-    const m = /^(.*):([^:]*)$/.exec(v);
-    if (m) {
-      if (!m[1]) return '缺少主机部分';
-      if (!/^\d+$/.test(m[2])) return '端口必须是数字';
-      const p = Number(m[2]);
+    if (!v) return '';   // 留空 = 由客户端命令行 --console 决定，允许
+    if (/\s/.test(v)) return '服务端地址不能包含空格';
+
+    const m = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/(.*)$/.exec(v);
+    if (!m) return '服务端地址必须以 ws:// 或 wss:// 开头，例如 ws://203.0.113.9:7800';
+    const scheme = m[1].toLowerCase();
+    if (scheme !== 'ws' && scheme !== 'wss') {
+      return '服务端地址只支持 ws:// 或 wss://（当前是 ' + scheme + '://）';
+    }
+
+    const rest = m[2];
+    if (!rest) return '服务端地址缺少主机部分';
+    if (/[/?#]/.test(rest)) {
+      return '服务端地址不要带路径或查询串，只填 ws://主机:端口';
+    }
+
+    // 端口：IPv6 用方括号包裹，方括号里的冒号不是端口分隔符。
+    let host = rest;
+    let port = null;
+    if (rest[0] === '[') {
+      const end = rest.indexOf(']');
+      if (end < 0) return 'IPv6 地址缺少右方括号';
+      host = rest.slice(0, end + 1);
+      const after = rest.slice(end + 1);
+      if (after) {
+        if (after[0] !== ':') return '服务端地址格式不正确';
+        port = after.slice(1);
+      }
+    } else {
+      const idx = rest.lastIndexOf(':');
+      if (idx >= 0) {
+        host = rest.slice(0, idx);
+        port = rest.slice(idx + 1);
+      }
+    }
+
+    if (!host || host === '[]') return '服务端地址缺少主机部分';
+    if (port !== null) {
+      if (!port) return '端口不能留空';
+      if (!/^\d+$/.test(port)) return '端口必须是数字';
+      const p = Number(port);
       if (p < 1 || p > 65535) return '端口必须在 1-65535 之间';
     }
     return '';
@@ -596,7 +713,10 @@
     const vName = v.name || '';
     const vDesc = v.description || '';
     const vAddr = v.public_addr || '';
-    const vProto = (v.transport || 'tcp');
+    // 历史数据里可能存着已下线的协议（如 udp）：回退到默认值，
+    // 否则 <select> 里没有任何 <option> 匹配，浏览器会静默选中第一项，
+    // 用户一保存就把配置改成了别的协议。
+    const vProto = TRANSPORTS.indexOf(v.transport) >= 0 ? v.transport : 'tcp';
     const vRelay = v.allow_relay !== false;
 
     const html = '' +
@@ -637,7 +757,15 @@
       '</div></div>';
 
     document.body.insertAdjacentHTML('beforeend', html);
-    const close = () => { const m = $('modal'); if (m) m.remove(); };
+
+    // 创建 / 编辑成功后节点集合会变，列表需要重绘；但创建分支里弹窗上还挂着
+    // **一次性接入命令**（只显示这一次），直接重绘整页会把它连弹窗一起抹掉。
+    // 所以这里只打标记，等弹窗关闭时再刷新列表。
+    let dirty = false;
+    const close = () => {
+      const m = $('modal'); if (m) m.remove();
+      if (dirty) render();
+    };
     $('m-cancel').onclick = close;
     $('modal').onclick = (e) => { if (e.target.id === 'modal') close(); };
 
@@ -675,6 +803,7 @@
         if (editing) {
           await api('/api/v1/nodes/' + encodeURIComponent(node.id), { method: 'PATCH', body });
           toast('节点已保存', 'ok');
+          dirty = true;
           close();
         } else {
           const res = await api('/api/v1/nodes', { method: 'POST', body });
@@ -687,9 +816,9 @@
             '<div style="margin-top:8px">' + copyButton('n-cmd', '复制命令') + '</div>';
           bindCopyButtons();
           $('m-ok').disabled = true;
+          // 命令还在弹窗里，先别重绘；关掉弹窗时 close() 会补上刷新。
+          dirty = true;
         }
-        state.nodes = null;
-        render.bind(null);
       } catch (err) { toast(err.message, 'err'); }
     };
   }
@@ -720,6 +849,7 @@
             '<td class="nowrap">' + esc(relTime(c.last_seen_at)) + '</td>' +
             '<td>' + countOf(c.id) + '</td>' +
             '<td class="right row-actions">' +
+              '<button class="sm" data-client-reassign="' + esc(c.id) + '" data-name="' + esc(c.name) + '">改派</button>' +
               '<button class="sm" data-client-disable="' + esc(c.id) + '" data-disabled="' + (c.disabled ? '1' : '0') + '">' +
                 (c.disabled ? '启用' : '禁用') + '</button>' +
               '<button class="sm danger" data-client-del="' + esc(c.id) + '" data-name="' + esc(c.name) + '">删除</button>' +
@@ -739,6 +869,15 @@
     document.body.innerHTML = shell('clients', '客户端管理', body);
     bindShell();
     $('btn-new-client').onclick = () => openClientModal(nodes);
+
+    document.querySelectorAll('[data-client-reassign]').forEach((el) => {
+      el.onclick = () => {
+        const id = el.getAttribute('data-client-reassign');
+        const client = clients.find((c) => c.id === id);
+        if (!client) { toast('客户端信息已变化，请刷新后重试', 'err'); return; }
+        openReassignModal(client, nodes);
+      };
+    });
 
     document.querySelectorAll('[data-client-del]').forEach((el) => {
       el.onclick = async () => {
@@ -768,22 +907,35 @@
   }
 
   function openClientModal(nodes) {
-    const enabled = nodes.filter((n) => !n.disabled);
-    if (!enabled.length) {
-      toast('请先添加并启用一个服务端节点', 'err');
-      return;
-    }
+    const enabled = (nodes || []).filter((n) => !n.disabled);
+
+    // 签发客户端令牌**不依赖**控制台里是否已有服务端节点：
+    // 客户端先注册进来，等节点上线后再改派归属即可。
+    // 过去这里直接 `if (!enabled.length) return`，把「还没建节点」变成了硬前置，
+    // 与「节点与客户端相互独立」的设计相矛盾。
     const options = enabled.map((n) =>
       '<option value="' + esc(n.id) + '">' + esc(n.name) + '</option>').join('');
+
+    let nodeField;
+    if (!enabled.length) {
+      nodeField = '<input type="hidden" id="c-node" value="" />' +
+        '<div class="notice"><strong>当前没有可用的服务端节点。</strong>' +
+        '仍可签发令牌并注册客户端；在节点上线之前，该客户端不会承载任何隧道，' +
+        '之后可在客户端列表里改派归属节点。</div>';
+    } else if (enabled.length === 1) {
+      nodeField = '<input type="hidden" id="c-node" value="' + esc(enabled[0].id) + '" />' +
+        '<p class="muted" style="font-size:12.5px">归属节点：<b>' + esc(enabled[0].name) + '</b></p>';
+    } else {
+      nodeField = '<label class="field"><span>归属服务端节点</span>' +
+        '<select id="c-node"><option value="">暂不指定（之后可在列表里改派）</option>' +
+        options + '</select>' +
+        '<div class="hint">该客户端的反向隧道会连到这台节点。留空则先注册、不承载流量。</div></label>';
+    }
 
     const html = '' +
       '<div class="modal-mask" id="modal"><div class="modal">' +
         '<h3>签发客户端接入令牌</h3><div class="modal-body">' +
-          (enabled.length > 1
-            ? '<label class="field"><span>归属服务端节点</span><select id="c-node">' + options + '</select>' +
-              '<div class="hint">该客户端的反向隧道会连到这台节点。之后可在客户端列表里改派。</div></label>'
-            : '<input type="hidden" id="c-node" value="' + esc(enabled[0].id) + '" />' +
-              '<p class="muted" style="font-size:12.5px">归属节点：<b>' + esc(enabled[0].name) + '</b></p>') +
+          nodeField +
           '<label class="field"><span>客户端名</span><input id="c-name" placeholder="office-nas" />' +
             '<div class="hint">留空则注册时自动命名。</div></label>' +
           '<label class="field"><span>令牌有效期（分钟）</span><input id="c-ttl" value="30" /></label>' +
@@ -807,7 +959,8 @@
           method: 'POST',
           body: {
             name: $('c-name').value.trim() || null,
-            node_id: $('c-node').value,
+            // 空串表示「暂不指定归属节点」，后端按未指定处理。
+            node_id: $('c-node').value || null,
             ttl_minutes: ttl,
           },
         });
@@ -818,6 +971,46 @@
             esc(fmtTime(res.expires_at)) + '。</p>' +
           '<div style="margin-top:8px">' + copyButton('c-cmd', '复制命令') + '</div>';
         bindCopyButtons();
+      } catch (err) { toast(err.message, 'err'); }
+    };
+  }
+
+  // 改派归属节点。与「签发令牌」分离：令牌是一次性的，而归属可以随时调整，
+  // 客户端下一次心跳就会拿到新的数据面坐标（无需重启客户端）。
+  function openReassignModal(client, nodes) {
+    const enabled = (nodes || []).filter((n) => !n.disabled);
+    const opts = ['<option value="">不指定（暂不承载隧道）</option>']
+      .concat(enabled.map((n) =>
+        '<option value="' + esc(n.id) + '"' + (n.id === client.node_id ? ' selected' : '') + '>' +
+          esc(n.name) + '</option>'))
+      .join('');
+
+    const html = '' +
+      '<div class="modal-mask" id="modal"><div class="modal">' +
+        '<h3>改派客户端「' + esc(client.name) + '」</h3><div class="modal-body">' +
+          '<label class="field"><span>归属服务端节点</span><select id="r-node">' + opts + '</select>' +
+            '<div class="hint">该客户端的反向隧道会连到这台节点；选择「不指定」则停掉其隧道。</div></label>' +
+        '</div>' +
+        '<div class="modal-foot">' +
+          '<button id="m-cancel">关闭</button>' +
+          '<button class="primary" id="m-ok">保存</button>' +
+        '</div>' +
+      '</div></div>';
+
+    document.body.insertAdjacentHTML('beforeend', html);
+    const close = () => { const m = $('modal'); if (m) m.remove(); };
+    $('m-cancel').onclick = close;
+    $('modal').onclick = (e) => { if (e.target.id === 'modal') close(); };
+
+    $('m-ok').onclick = async () => {
+      try {
+        await api('/api/v1/clients/' + encodeURIComponent(client.id), {
+          method: 'PATCH',
+          body: { node_id: $('r-node').value },
+        });
+        toast('归属节点已更新', 'ok');
+        close();
+        render();
       } catch (err) { toast(err.message, 'err'); }
     };
   }
@@ -1203,11 +1396,14 @@
   // ------------------------------------------------------------ 配置
 
   async function renderSettings() {
-    const [cfg, audit] = await Promise.all([
-      api('/api/v1/config'),
-      api('/api/v1/audit?limit=50'),
-    ]);
-    const c = cfg.config;
+    const isAdmin = !!(state.user && state.user.role === 'admin');
+
+    // 只读角色取不到 /api/v1/config（需要管理员），所以按角色决定要不要拉 ——
+    // 否则整页会因为一个 403 变成「出错了」，连改密码都用不了。
+    const audit = await api('/api/v1/audit?limit=50');
+    const cfg = isAdmin ? await api('/api/v1/config') : null;
+    const users = isAdmin ? await api('/api/v1/users') : [];
+    const c = cfg ? cfg.config : null;
 
     const auditRows = audit.length
       ? audit.map((a) => '<tr>' +
@@ -1218,28 +1414,88 @@
         '</tr>').join('')
       : '<tr><td colspan="4"><div class="empty">暂无审计记录</div></td></tr>';
 
-    const body = '' +
-      '<div class="card"><div class="card-head"><h2>控制台配置</h2><div class="spacer"></div>' +
-        '<span class="muted" style="font-size:12px">' + esc(cfg.config_path) + '</span>' +
+    const configCard = c
+      ? '<div class="card"><div class="card-head"><h2>控制台配置</h2><div class="spacer"></div>' +
+          '<span class="muted" style="font-size:12px">' + esc(cfg.config_path) + '</span>' +
+        '</div><div class="card-body">' +
+          (cfg.readonly ? '<p class="muted">配置已被锁定（admin.allow_config_edit = false）。</p>' : '') +
+          '<div class="grid cols-3">' +
+            field('s-name', '控制台名', c.console.name, cfg.readonly) +
+            field('s-bind', '监听地址', c.console.bind, cfg.readonly) +
+            field('s-public', '对外地址', c.console.public_url || '', cfg.readonly, 'https://panel.example.com') +
+            field('s-hb', '心跳间隔（秒）', c.console.heartbeat_secs, cfg.readonly) +
+            field('s-offline', '离线判定（秒）', c.console.offline_after_secs, cfg.readonly) +
+            field('s-range', '端口池', c.ingress.port_range, cfg.readonly) +
+            field('s-domain', '默认域名', c.ingress.default_domain || '', cfg.readonly, 't.example.com') +
+            field('s-nodes', '最大节点数（0=不限）', c.limits.max_nodes, cfg.readonly) +
+            field('s-clients', '最大客户端数（0=不限）', c.limits.max_clients, cfg.readonly) +
+          '</div>' +
+          '<label class="field"><span>开放性</span>' +
+            '<label class="switch"><input type="checkbox" id="s-register"' +
+              (c.admin.allow_registration ? ' checked' : '') + (cfg.readonly ? ' disabled' : '') + ' />' +
+              '<span>允许访客自助注册（新账号为只读角色）</span></label>' +
+            '<div class="hint">默认关闭。控制台能看到全部客户端与隧道拓扑，' +
+              '对外开放注册前请确认它只能被可信网络访问。</div></label>' +
+          '<div class="toolbar" style="margin-top:6px">' +
+            '<button class="primary" id="s-save"' + (cfg.readonly ? ' disabled' : '') + '>保存配置</button>' +
+            '<span class="muted" style="font-size:12px">监听地址类变更需要重启进程生效。</span>' +
+          '</div>' +
+        '</div></div>'
+      : '<div class="notice">当前账号是只读角色（viewer）：可以查看节点 / 客户端 / 隧道与统计，' +
+          '但不能修改配置、资源，也看不到访问密钥与节点令牌。</div>';
+
+    const accountCard = '' +
+      '<div class="card"><div class="card-head"><h2>账号安全</h2><div class="spacer"></div>' +
+        '<span class="muted" style="font-size:12px">当前账号：' +
+          esc(state.user ? state.user.username : '') + ' · 角色 ' +
+          esc(state.user ? state.user.role : '') + '</span>' +
       '</div><div class="card-body">' +
-        (cfg.readonly ? '<p class="muted">配置已被锁定（admin.allow_config_edit = false）。</p>' : '') +
         '<div class="grid cols-3">' +
-          field('s-name', '控制台名', c.console.name, cfg.readonly) +
-          field('s-bind', '监听地址', c.console.bind, cfg.readonly) +
-          field('s-public', '对外地址', c.console.public_url || '', cfg.readonly, 'https://panel.example.com') +
-          field('s-hb', '心跳间隔（秒）', c.console.heartbeat_secs, cfg.readonly) +
-          field('s-offline', '离线判定（秒）', c.console.offline_after_secs, cfg.readonly) +
-          field('s-range', '端口池', c.ingress.port_range, cfg.readonly) +
-          field('s-domain', '默认域名', c.ingress.default_domain || '', cfg.readonly, 't.example.com') +
-          field('s-nodes', '最大节点数（0=不限）', c.limits.max_nodes, cfg.readonly) +
-          field('s-clients', '最大客户端数（0=不限）', c.limits.max_clients, cfg.readonly) +
+          '<label class="field"><span>当前密码</span>' +
+            '<input id="pw-cur" type="password" autocomplete="current-password" /></label>' +
+          '<label class="field"><span>新密码（至少 8 位）</span>' +
+            '<input id="pw-new" type="password" autocomplete="new-password" /></label>' +
+          '<label class="field"><span>确认新密码</span>' +
+            '<input id="pw-new2" type="password" autocomplete="new-password" /></label>' +
         '</div>' +
         '<div class="toolbar" style="margin-top:6px">' +
-          '<button class="primary" id="s-save"' + (cfg.readonly ? ' disabled' : '') + '>保存配置</button>' +
-          '<span class="muted" style="font-size:12px">监听地址类变更需要重启进程生效。</span>' +
+          '<button class="primary" id="pw-save">修改密码</button>' +
+          '<span class="muted" style="font-size:12px">修改后其它设备上的登录态仍然有效，' +
+            '需要时可在用户管理里重置。</span>' +
         '</div>' +
-      '</div></div>' +
+      '</div></div>';
 
+    const userRows = users.length
+      ? users.map((u) => '<tr>' +
+          '<td><strong>' + esc(u.username) + '</strong>' +
+            (state.user && u.id === state.user.id ? ' <span class="muted">(当前)</span>' : '') + '</td>' +
+          '<td>' + (u.role === 'admin' ? '<span class="tag ok">管理员</span>'
+            : '<span class="tag info">只读</span>') + '</td>' +
+          '<td>' + (u.disabled ? '<span class="tag bad">已禁用</span>' : '<span class="tag ok">启用</span>') + '</td>' +
+          '<td class="mono nowrap">' + esc(fmtTime(u.created_at)) + '</td>' +
+          '<td class="nowrap">' + esc(relTime(u.last_login_at)) + '</td>' +
+          '<td class="right row-actions">' +
+            '<button class="sm" data-user-role="' + esc(u.id) + '" data-role="' + esc(u.role) + '">' +
+              (u.role === 'admin' ? '降为只读' : '提为管理员') + '</button>' +
+            '<button class="sm" data-user-pw="' + esc(u.id) + '" data-name="' + esc(u.username) + '">重置密码</button>' +
+            '<button class="sm" data-user-disable="' + esc(u.id) + '" data-disabled="' + (u.disabled ? '1' : '0') + '">' +
+              (u.disabled ? '启用' : '禁用') + '</button>' +
+            '<button class="sm danger" data-user-del="' + esc(u.id) + '" data-name="' + esc(u.username) + '">删除</button>' +
+          '</td>' +
+        '</tr>').join('')
+      : '<tr><td colspan="6"><div class="empty">暂无用户</div></td></tr>';
+
+    const usersCard = isAdmin
+      ? '<div class="card"><div class="card-head"><h2>用户管理（' + users.length + '）</h2>' +
+          '<div class="spacer"></div>' +
+          '<button class="primary sm" id="user-new">新建用户</button>' +
+        '</div><div class="card-body tight"><table>' +
+          '<thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>创建时间</th>' +
+          '<th>最近登录</th><th></th></tr></thead><tbody>' + userRows + '</tbody></table>' +
+        '</div></div>'
+      : '';
+
+    const body = configCard + accountCard + usersCard +
       '<div class="card"><div class="card-head"><h2>审计记录</h2></div>' +
         '<div class="card-body tight"><table>' +
           '<thead><tr><th style="width:170px">时间</th><th>动作</th><th>对象</th><th>来源 IP</th></tr></thead>' +
@@ -1261,6 +1517,7 @@
         next.ingress.default_domain = $('s-domain').value.trim() || null;
         next.limits.max_nodes = parseInt($('s-nodes').value, 10) || 0;
         next.limits.max_clients = parseInt($('s-clients').value, 10) || 0;
+        next.admin.allow_registration = $('s-register').checked;
 
         try {
           await api('/api/v1/config', { method: 'PUT', body: next });
@@ -1269,6 +1526,151 @@
         } catch (err) { toast(err.message, 'err'); }
       };
     }
+
+    $('pw-save').onclick = async () => {
+      const current = $('pw-cur').value;
+      const next = $('pw-new').value;
+      const again = $('pw-new2').value;
+      if (!current || !next) { toast('请填写当前密码与新密码', 'err'); return; }
+      if (next.length < 8) { toast('新密码至少 8 位', 'err'); return; }
+      if (next !== again) { toast('两次输入的新密码不一致', 'err'); return; }
+      try {
+        await api('/api/v1/auth/password', {
+          method: 'POST',
+          body: { current_password: current, new_password: next },
+          // 401 在这里是「当前密码不正确」，不是会话失效。
+          local401: true,
+        });
+        toast('密码已修改', 'ok');
+        $('pw-cur').value = ''; $('pw-new').value = ''; $('pw-new2').value = '';
+      } catch (err) { toast(err.message, 'err'); }
+    };
+
+    const newUser = $('user-new');
+    if (newUser) newUser.onclick = () => openUserModal();
+
+    document.querySelectorAll('[data-user-role]').forEach((el) => {
+      el.onclick = async () => {
+        const role = el.getAttribute('data-role') === 'admin' ? 'viewer' : 'admin';
+        try {
+          await api('/api/v1/users/' + el.getAttribute('data-user-role'), {
+            method: 'PATCH', body: { role },
+          });
+          toast('角色已更新', 'ok');
+          render();
+        } catch (err) { toast(err.message, 'err'); }
+      };
+    });
+
+    document.querySelectorAll('[data-user-disable]').forEach((el) => {
+      el.onclick = async () => {
+        const disabled = el.getAttribute('data-disabled') === '1';
+        try {
+          await api('/api/v1/users/' + el.getAttribute('data-user-disable'), {
+            method: 'PATCH', body: { disabled: !disabled },
+          });
+          toast(disabled ? '用户已启用' : '用户已禁用', 'ok');
+          render();
+        } catch (err) { toast(err.message, 'err'); }
+      };
+    });
+
+    document.querySelectorAll('[data-user-pw]').forEach((el) => {
+      el.onclick = () => openResetPasswordModal(el.getAttribute('data-user-pw'), el.getAttribute('data-name'));
+    });
+
+    document.querySelectorAll('[data-user-del]').forEach((el) => {
+      el.onclick = async () => {
+        const name = el.getAttribute('data-name');
+        if (!confirm('确认删除用户「' + name + '」？其登录会话会立即失效。')) return;
+        try {
+          await api('/api/v1/users/' + el.getAttribute('data-user-del'), { method: 'DELETE' });
+          toast('用户已删除', 'ok');
+          render();
+        } catch (err) { toast(err.message, 'err'); }
+      };
+    });
+  }
+
+  // 新建用户（管理员）。角色默认只读 —— 提权必须是显式动作。
+  function openUserModal() {
+    const html = '' +
+      '<div class="modal-mask" id="modal"><div class="modal">' +
+        '<h3>新建用户</h3><div class="modal-body">' +
+          '<label class="field"><span>用户名</span>' +
+            '<input id="u-name" placeholder="alice" />' +
+            '<div class="hint">仅字母、数字、-、_、.。最多 64 个字符。</div></label>' +
+          '<label class="field"><span>初始密码（至少 8 位）</span>' +
+            '<input id="u-pass" type="password" autocomplete="new-password" /></label>' +
+          '<label class="field"><span>角色</span>' +
+            '<select id="u-role">' +
+              '<option value="viewer">只读（viewer）</option>' +
+              '<option value="admin">管理员（admin）</option>' +
+            '</select>' +
+            '<div class="hint">只读角色可以查看资源与统计，不能做任何修改。</div></label>' +
+        '</div>' +
+        '<div class="modal-foot">' +
+          '<button id="m-cancel">关闭</button>' +
+          '<button class="primary" id="m-ok">创建</button>' +
+        '</div>' +
+      '</div></div>';
+
+    document.body.insertAdjacentHTML('beforeend', html);
+    const close = () => { const m = $('modal'); if (m) m.remove(); };
+    $('m-cancel').onclick = close;
+    $('modal').onclick = (e) => { if (e.target.id === 'modal') close(); };
+
+    $('m-ok').onclick = async () => {
+      const username = $('u-name').value.trim();
+      const password = $('u-pass').value;
+      if (!username || !password) { toast('请填写用户名与密码', 'err'); return; }
+      if (password.length < 8) { toast('密码至少 8 位', 'err'); return; }
+      try {
+        await api('/api/v1/users', {
+          method: 'POST',
+          body: { username, password, role: $('u-role').value },
+        });
+        toast('用户已创建', 'ok');
+        close();
+        render();
+      } catch (err) { toast(err.message, 'err'); }
+    };
+    $('u-name').focus();
+  }
+
+  // 重置他人密码（管理员）。重置后该用户的旧会话立即失效。
+  function openResetPasswordModal(id, name) {
+    const html = '' +
+      '<div class="modal-mask" id="modal"><div class="modal">' +
+        '<h3>重置「' + esc(name) + '」的密码</h3><div class="modal-body">' +
+          '<label class="field"><span>新密码（至少 8 位）</span>' +
+            '<input id="rp-pass" type="password" autocomplete="new-password" /></label>' +
+          '<p class="muted" style="font-size:12px">该用户的所有登录会话会立即失效，需用新密码重新登录。</p>' +
+        '</div>' +
+        '<div class="modal-foot">' +
+          '<button id="m-cancel">关闭</button>' +
+          '<button class="primary" id="m-ok">重置</button>' +
+        '</div>' +
+      '</div></div>';
+
+    document.body.insertAdjacentHTML('beforeend', html);
+    const close = () => { const m = $('modal'); if (m) m.remove(); };
+    $('m-cancel').onclick = close;
+    $('modal').onclick = (e) => { if (e.target.id === 'modal') close(); };
+
+    $('m-ok').onclick = async () => {
+      const password = $('rp-pass').value;
+      if (password.length < 8) { toast('密码至少 8 位', 'err'); return; }
+      try {
+        await api('/api/v1/users/' + encodeURIComponent(id), {
+          method: 'PATCH', body: { password },
+        });
+        toast('密码已重置', 'ok');
+        close();
+        render();
+      } catch (err) { toast(err.message, 'err'); }
+    };
+    $('rp-pass').focus();
   }
 
   function field(id, label, value, readonly, placeholder) {
@@ -1317,13 +1719,14 @@
 
   window.addEventListener('hashchange', render);
 
-  // 版本与形态用于页脚/仪表盘展示；失败不影响使用。
+  // 版本、形态与「是否开放自助注册」用于页面提示；失败不影响使用。
   fetch('/api/v1/health')
     .then((r) => (r.ok ? r.json() : null))
     .then((d) => {
       if (d) {
         state.version = d.version || '';
         state.embedded = !!d.embedded;
+        state.registrationOpen = !!d.registration_open;
       }
     })
     .catch(() => {})

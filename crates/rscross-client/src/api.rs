@@ -35,7 +35,11 @@ pub struct EnrollResponse {
     #[serde(default)]
     pub public_url: Option<String>,
     /// 归属的服务端节点（数据面坐标）。
-    pub node: NodeEndpoint,
+    ///
+    /// 控制台里还没有可用节点时会是 `null`：此时客户端照常保持心跳，
+    /// 但不建立任何隧道，直到被改派为止。
+    #[serde(default)]
+    pub node: Option<NodeEndpoint>,
     /// 初始隧道列表。
     #[serde(default)]
     pub tunnels: Vec<DesiredTunnel>,

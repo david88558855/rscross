@@ -55,6 +55,7 @@
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 部署形态、技术选型、目录与模块划分、**并发模型 / 错误处理 / 日志方案**、已知边界 |
 | [docs/CONSOLE.md](docs/CONSOLE.md) | 控制台**功能清单与页面结构**、两种形态的操作流程、API 契约 |
+| [docs/CONSOLE-PROTOCOL.md](docs/CONSOLE-PROTOCOL.md) | `--console` 四种写法、**控制面 WebSocket 帧协议**、自建节点配置项 |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | 分阶段实现计划与**逐条验收标准** |
 | [docs/BUILD.md](docs/BUILD.md) | musl 静态编译、**依赖裁剪方案**、交叉编译配置、**CI 方案**与发版流程 |
 
@@ -111,6 +112,39 @@
 
 > 客户端命令里**不含节点地址**：归属由令牌决定，之后还能在控制台改派。
 > 因此把客户端迁到另一台节点不需要动客户端机器上的任何文件。
+
+### `--console` 的四种写法
+
+| 写法 | 行为 |
+|---|---|
+| `ws://…` / `wss://…` | **不做任何解析**，直接连接（路径与查询串原样保留） |
+| `http://…` / `https://…` | 作为发现入口：请求它，跟随 `307`/`308` 得到真实地址 |
+| `txt://example.com` | 查该域名的 **TXT 记录**，内容须为 `ws://` / `wss://` 地址 |
+
+前三种（`ws`/`wss`/`txt`）走**控制面 WebSocket**（主协议，一条连接上并发心跳与日志上报）；
+`http(s)` 保留为 REST 兼容路径。日志会明确输出**最终实际连接的地址**：
+
+```
+控制台地址已解析  spec=http://c.example.com:7700 scheme=Https hops=1
+                  discovered=/api/v1/control/ws
+控制面 WebSocket 已建立  url=wss://c.example.com/api/v1/control/ws
+```
+
+排障时先看这三行：`spec` 是你写的，`discovered` 是发现结果，`ws_url` 是真正连的。
+详见 [docs/CONSOLE-PROTOCOL.md](docs/CONSOLE-PROTOCOL.md)。
+
+### 新增自建节点
+
+控制台「添加自建节点」可填五项：**名称 / 介绍 / 服务端地址 / 传输协议 / P2P 中继开关**。
+
+其中**「服务端地址」与「对外主机」是两件事**，不能混：
+
+- **对外主机** = DNS 解析用（用户在外面访问时解析到哪）；
+- **服务端地址** = 客户端连接用（内网客户端拿它连那条反向隧道）。
+
+分开的原因很具体：内嵌形态下节点拿不到自己的公网出口 IP，自动推导会回落到
+`127.0.0.1`，客户端照着连就连到自己本机去了 —— 隧道看起来「建立了」，
+流量却哪儿也不去，日志上还完全看不出来。
 
 ## 四类隧道怎么选
 

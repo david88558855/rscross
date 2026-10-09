@@ -64,7 +64,7 @@ pub struct NodeRecord {
     /// 对外可见的介绍（新建自建节点时填写，纯展示）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// 该节点承载流量时使用的传输协议（`tcp` / `udp` / `quic` / `kcp` / `ws` / `wss`）。
+    /// 该节点承载流量时使用的传输协议（`tcp` / `quic` / `kcp` / `ws` / `wss`）。
     pub transport: String,
     /// P2P 直连失败时是否允许回退到该节点中继（默认开启）。
     pub allow_relay: bool,
@@ -97,31 +97,15 @@ pub struct NodeRecord {
 }
 
 impl NodeRecord {
-    /// 客户端接入该节点时使用的地址。
+    /// 客户端接入该节点时使用的**反向隧道控制面**地址（`host:port`）。
     ///
-    /// 优先级：`public_addr`（管理员显式配置的服务端地址）>
-    /// `public_host` > 控制台观测到的 `public_ip` > `127.0.0.1`。
+    /// 来源：`public_host`（内嵌形态自动填）> 控制台观测到的 `public_ip` > `127.0.0.1`。
     /// 端口优先用节点上报值，其次回落到默认端口。
     ///
-    /// `public_addr` 里可以自带端口；带了就用它带的 —— 服务端监听端口
-    /// 常常不是默认值（同一个节点上跑着别的服务），强制覆盖成上报值会让
-    /// 管理员配的地址失效。
+    /// **刻意不用 `public_addr`**：那一列存的是控制面地址（`ws://host:port`），
+    /// 与本方法要的东西既协议不同、端口也不同（7800 vs 7835）。
+    /// 混用的话客户端会拿控制台的地址去连反向隧道 —— 能连上才怪。
     pub fn tunnel_server(&self) -> String {
-        if let Some(addr) = self
-            .public_addr
-            .as_deref()
-            .map(str::trim)
-            .filter(|a| !a.is_empty())
-        {
-            if addr.contains(':') && !addr.ends_with(':') {
-                return addr.to_string();
-            }
-            let port = self
-                .tunnel_port_as_u16()
-                .unwrap_or(rscross_common::DEFAULT_TUNNEL_PORT);
-            return format!("{addr}:{port}");
-        }
-
         let host = self
             .public_host
             .as_deref()

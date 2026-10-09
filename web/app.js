@@ -443,8 +443,10 @@
               (n.allow_relay === false ? '<div class="muted" style="font-size:12px">P2P 中继已关</div>' : '') +
               '</td>' +
             '<td>' + statusTag(n.status) + '</td>' +
-            '<td class="mono">' + esc(n.public_host || n.public_ip || '—') + '</td>' +
-            '<td class="mono" title="' + esc(n.public_addr || '') + '">' + esc(n.public_addr || '自动') + '</td>' +
+            '<td class="mono" title="' + esc(n.public_addr || '') + '">' +
+              esc(n.public_addr || '跟随 --console') + '</td>' +
+            '<td class="mono" title="' + esc(n.public_ip || '') + '">' +
+              esc(n.public_ip || '—') + '</td>' +
             '<td class="mono">' + esc((n.transport || 'tcp').toUpperCase()) + '</td>' +
             '<td class="mono">' + esc(n.tunnel_port != null ? ':' + n.tunnel_port : '—') + '</td>' +
             '<td class="mono">' + esc((n.os || '') + ' ' + (n.arch || '')) + '</td>' +
@@ -471,7 +473,7 @@
           (state.embedded ? ' disabled title="内嵌形态下节点由服务端进程自身注册"' : '') +
           '>添加节点</button>' +
       '</div><div class="card-body tight"><table>' +
-        '<thead><tr><th>名称</th><th>状态</th><th>对外主机</th><th>服务端地址</th>' +
+        '<thead><tr><th>名称</th><th>状态</th><th>服务端地址</th><th>出口 IP</th>' +
         '<th>协议</th><th>隧道端口</th><th>平台</th>' +
         '<th>版本</th><th>EndpointId</th><th>最近心跳</th><th></th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table></div></div>' +
@@ -593,7 +595,6 @@
     const v = node || {};
     const vName = v.name || '';
     const vDesc = v.description || '';
-    const vHost = v.public_host || '';
     const vAddr = v.public_addr || '';
     const vProto = (v.transport || 'tcp');
     const vRelay = v.allow_relay !== false;
@@ -610,15 +611,12 @@
             '<input id="n-desc" maxlength="' + MAX_DESC + '" placeholder="香港出口 · 带宽 20Mbps" value="' + esc(vDesc) + '" />' +
             '<div class="hint"><span id="n-desc-count">' + vDesc.length + '</span>/' + MAX_DESC +
               '。仅展示，方便区分多台节点；不影响连接。</div></label>' +
-          '<label class="field"><span>对外主机 / IP</span>' +
-            '<input id="n-host" placeholder="203.0.113.9 或 node1.example.com" value="' + esc(vHost) + '" />' +
-            '<div class="hint">对外怎么访问（DNS 解析用）。留空则用控制台观测到的出口 IP。</div></label>' +
           '<label class="field"><span>服务端地址</span>' +
-            '<input id="n-addr" placeholder="10.0.0.5:17835 或 node1.example.com" value="' + esc(vAddr) + '" />' +
-            '<div class="hint"><strong>客户端据此地址连接该服务端</strong>，只填 host 或 host:port。' +
-              '与上面的「对外主机」不同：内嵌形态下节点拿不到自己的公网出口 IP，' +
-              '自动推导会回落到 127.0.0.1，客户端照着连就连到本机去了。' +
-              '留空则自动推导。</div></label>' +
+            '<input id="n-addr" placeholder="ws://203.0.113.9:7800" value="' + esc(vAddr) + '" />' +
+            '<div class="hint"><strong>客户端据此地址连接控制台</strong>，' +
+              '须以 <code>ws://</code> 或 <code>wss://</code> 开头，含主机与端口。' +
+              '内嵌控制台默认 <code>7800</code>，独立控制台 <code>7700</code>。' +
+              '留空则由客户端使用命令行 <code>--console</code> 传入的地址。</div></label>' +
           '<label class="field"><span>传输协议</span>' +
             '<select id="n-transport">' +
               TRANSPORTS.map((t) => '<option value="' + t + '"' + (t === vProto ? ' selected' : '') + '>' + t + '</option>').join('') +
@@ -667,7 +665,6 @@
 
       const body = {
         description: desc || null,
-        public_host: $('n-host').value.trim() || null,
         public_addr: addr || null,
         transport: $('n-transport').value,
         allow_relay: $('n-relay').checked,

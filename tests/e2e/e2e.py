@@ -1628,8 +1628,7 @@ def scenario_node_extras(dist: Path, root: Path) -> None:
         {
             "name": "self-built-1",
             "description": "香港出口 · 20Mbps",
-            "public_host": "node1.example.com",
-            "public_addr": "10.0.0.5:19999",
+            "public_addr": "ws://203.0.113.9:7800",
             "transport": "wss",
             "allow_relay": False,
         },
@@ -1642,7 +1641,7 @@ def scenario_node_extras(dist: Path, root: Path) -> None:
 
     node = created.get("node") or {}
     check_eq(f"{label}: 介绍已保存", "香港出口 · 20Mbps", node.get("description"))
-    check_eq(f"{label}: 服务端地址已保存", "10.0.0.5:19999", node.get("public_addr"))
+    check_eq(f"{label}: 服务端地址已保存", "ws://203.0.113.9:7800", node.get("public_addr"))
     check_eq(f"{label}: 传输协议已保存", "wss", node.get("transport"))
     check_eq(f"{label}: P2P 中继开关已保存", False, bool(node.get("allow_relay")))
 
@@ -1665,13 +1664,48 @@ def scenario_node_extras(dist: Path, root: Path) -> None:
         f"status={status} body={err}",
     )
 
+    # udp 已从可选列表移除（NAT 后不可用，配上去只会得到「节点在线但隧道不通」）
+    status, err = http_json(
+        "POST", base + "/api/v1/nodes",
+        {"name": "self-built-udp", "transport": "udp"}, token=token,
+    )
+    check(
+        f"{label}: udp 不再是可选传输协议",
+        status == 400 and "udp" in json.dumps(err, ensure_ascii=False).lower(),
+        f"status={status} body={err}",
+    )
+
+    # 服务端地址必须是 ws:// 或 wss://
+    for bad, why in [
+        ("http://203.0.113.9:7800", "http 前缀"),
+        ("203.0.113.9:7800", "缺 scheme"),
+        ("ws://203.0.113.9:0", "端口为 0"),
+        ("ws://203.0.113.9:70000", "端口越界"),
+    ]:
+        status, err = http_json(
+            "POST", base + "/api/v1/nodes",
+            {"name": "self-built-bad", "public_addr": bad}, token=token,
+        )
+        check(
+            f"{label}: 服务端地址拒绝{why}",
+            status == 400,
+            f"status={status} body={err}",
+        )
+
     # 服务端地址优先于对外主机下发 —— 这才是「客户端据此连接」的实际含义
     node_id = node.get("id")
     status, listed = http_json("GET", base + f"/api/v1/nodes/{node_id}", token=token)
     endpoint = (listed or {}).get("endpoint") or {}
     check_eq(
         f"{label}: 下发给客户端的服务端地址就是配置的那个",
-        "10.0.0.5:19999", endpoint.get("public_addr"),
+        "ws://203.0.113.9:7800", endpoint.get("public_addr"),
+    )
+    # 关键边界：控制台地址绝不能被当成反向隧道地址下发 ——
+    # 协议与端口都不同（7800 vs 7835），混用客户端必然连不上。
+    check(
+        f"{label}: 反向隧道地址不含控制台端口",
+        "7800" not in (endpoint.get("tunnel_server") or ""),
+        f"tunnel_server={endpoint.get('tunnel_server')!r}",
     )
     check_eq(f"{label}: 传输协议一并下发", "wss", endpoint.get("transport"))
 

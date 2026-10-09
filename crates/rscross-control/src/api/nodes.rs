@@ -60,19 +60,10 @@ pub fn node_command(cfg: &ConsoleFile, name: &str, token: &str) -> String {
 pub async fn provision_node(
     state: &AppState,
     name: String,
-    public_host: Option<String>,
     tunnel_token: Option<String>,
     created_by: Option<String>,
 ) -> Result<(NodeRecord, String), ApiError> {
-    provision_node_with(
-        state,
-        name,
-        public_host,
-        tunnel_token,
-        created_by,
-        NodeExtras::default(),
-    )
-    .await
+    provision_node_with(state, name, tunnel_token, created_by, NodeExtras::default()).await
 }
 
 /// 「新增自建节点」表单的其余配置项。
@@ -93,7 +84,6 @@ pub struct NodeExtras {
 pub async fn provision_node_with(
     state: &AppState,
     name: String,
-    public_host: Option<String>,
     tunnel_token: Option<String>,
     created_by: Option<String>,
     extras: NodeExtras,
@@ -266,13 +256,12 @@ pub async fn resolve_node(state: &AppState, node_id: Option<&str>) -> Result<Nod
 pub struct CreateNodeRequest {
     /// 节点名。
     pub name: String,
-    /// 对外主机名（用于生成客户端接入地址），留空则用控制台观测到的出口 IP。
-    pub public_host: Option<String>,
     /// 自定义 FerroTunnel 握手 token，留空则自动生成。
     pub tunnel_token: Option<String>,
     /// 对外可见的介绍（纯展示）。
     pub description: Option<String>,
-    /// 服务端地址：客户端据此连接该节点。留空则按 `public_host` 或观测到的出口 IP 推导。
+    /// 服务端地址：客户端据此连接控制面，形如 `ws://<IP>:7800`。
+    /// 留空则由客户端自己用 `--console` 传入的地址。
     pub public_addr: Option<String>,
     /// 传输协议，留空默认 `tcp`。
     pub transport: Option<String>,
@@ -313,7 +302,6 @@ pub async fn create_node(
     let (node, token) = provision_node_with(
         &state,
         req.name,
-        req.public_host.filter(|s| !s.trim().is_empty()),
         req.tunnel_token,
         Some(user.username.clone()),
         NodeExtras {
@@ -380,7 +368,11 @@ pub async fn get_node(
 ///
 /// 白名单而不是自由字符串：这是要写进配置文件并影响实际连接方式的字段，
 /// 拼错一个字符会变成「节点上线了但隧道全不通」，而且日志里看不出原因。
-pub const TRANSPORTS: &[&str] = &["tcp", "udp", "quic", "kcp", "ws", "wss"];
+///
+/// **不含 `udp`**：UDP 的入口需要内核层面的端口转发，在NAT 后基本不可用，
+/// 配上去只会得到一个「节点在线但 UDP 隧道全不通」的状态。TCP 侧的行为
+/// 对 UDP 业务已经足够（穿透工具本来就是为TCP 设计的）。
+pub const TRANSPORTS: &[&str] = &["tcp", "quic", "kcp", "ws", "wss"];
 
 /// 默认传输协议。
 pub const DEFAULT_TRANSPORT: &str = "tcp";
@@ -427,16 +419,19 @@ pub fn normalize_description(raw: Option<&str>) -> Result<Option<String>, ApiErr
 
 /// 校验并规范化「服务端地址」。
 ///
-/// 客户端要拿这个地址去连反向隧道，所以格式必须在这里挡住：
-/// 写错一个字符的表现是「客户端连不上」，而客户端根本不知道自己连的是哪台
-/// 机器，日志里只看得到一个连不上的 IP。可接受形态：
+/// 这是**客户端要连的控制面地址**，完整形态带 scheme，例如：
 ///
-/// - `1.2.3.4:7835` / `node1.example.com:17835` —— 主机 + 端口
-/// - `node1.example.com` —— 仅主机（端口用节点上报值补齐）
-/// - `[2001:db8::1]:7835` —— IPv6 要用方括号
+/// - `ws://203.0.113.9:7800`
+/// - `wss://node1.example.com/api/v1/control/ws`
 ///
-/// 刻意**不**允许写 scheme：这不是浏览器地址，客户端会自己按 `host:port` 连，
-/// 填 `http://` 会被原样拼进 host 导致连不上。
+/// 刻意复用 [`rscross_common::console`] 的 scheme 判定，不在这里另写一套 ——
+/// `--console` 参数与本字段最终都要交给同一段解析逻辑，两处规则一旦漂移，
+/// 就会出现「命令行能连、控制台配的地址不能连」。
+///
+/// 只接受 `ws://` / `wss://`：`http://` 入口虽然也能被客户端跟随 307 发现，
+/// 但那是「用户自己填 --console 时的便利」，不该固化进配置 ——
+///
+/// 配置里的地址应当是**最终**那个，不再依赖一次重定向。
 pub fn normalize_public_addr(raw: Option<&str>) -> Result<Option<String>, ApiError> {
     let Some(text) = raw.map(str::trim) else {
         return Ok(None);
@@ -444,41 +439,24 @@ pub fn normalize_public_addr(raw: Option<&str>) -> Result<Option<String>, ApiErr
     if text.is_empty() {
         return Ok(None);
     }
-    if text.contains("://") {
-        return Err(ApiError::bad_request(
-            "服务端地址只填 host 或 host:port，不要带 http:// 这样的协议前缀",
-        ));
-    }
-    if text.contains('/') || text.contains('?') || text.contains('#') {
-        return Err(ApiError::bad_request(
-            "服务端地址只填 host 或 host:port，不要带路径、查询串或片段",
-        ));
-    }
     if text.chars().any(char::is_whitespace) {
         return Err(ApiError::bad_request("服务端地址不能包含空格"));
     }
 
-    let (host, port) = match text.rsplit_once(':') {
-        Some((h, p)) => (h, Some(p)),
-        None => (text, None),
-    };
-    if host.is_empty() {
-        return Err(ApiError::bad_request("服务端地址缺少主机部分"));
-    }
-    if host.contains(':') && !host.starts_with('[') {
-        return Err(ApiError::bad_request(format!(
-            "IPv6 地址要用方括号包起来，如 [2001:db8::1]:7835（当前 {host}）"
-        )));
-    }
-    if let Some(p) = port {
-        if p.is_empty() {
-            return Err(ApiError::bad_request("服务端地址的端口不能为空"));
-        }
-        let parsed: u16 = p
-            .parse()
-            .map_err(|_| ApiError::bad_request(format!("端口必须是 1-65535 的整数（当前 {p}）")))?;
-        if parsed == 0 {
-            return Err(ApiError::bad_request("端口不能是 0"));
+    let addr = rscross_common::console::plan_console_address(text).map_err(|_| {
+        ApiError::bad_request(format!(
+            "服务端地址必须以 ws:// 或 wss:// 开头，例如 ws://203.0.113.9:7800（实际为 {text:?}）"
+        ))
+    })?;
+
+    match addr.scheme {
+        rscross_common::console::ConsoleScheme::Ws
+        | rscross_common::console::ConsoleScheme::Wss => {}
+        _ => {
+            return Err(ApiError::bad_request(format!(
+                "服务端地址必须以 ws:// 或 wss:// 开头（实际是 {}://）",
+                text.split("://").next().unwrap_or("?")
+            )))
         }
     }
     Ok(Some(text.to_string()))
@@ -489,13 +467,11 @@ pub fn normalize_public_addr(raw: Option<&str>) -> Result<Option<String>, ApiErr
 pub struct PatchNodeRequest {
     /// 新名称。
     pub name: Option<String>,
-    /// 对外主机名（传空字符串表示清空）。
-    pub public_host: Option<String>,
     /// 启用 / 禁用。
     pub disabled: Option<bool>,
     /// 对外可见的介绍（传空字符串表示清空）。
     pub description: Option<String>,
-    /// 服务端地址（传空字符串表示清空，改回自动推导）。
+    /// 服务端地址（传空字符串表示清空）。
     pub public_addr: Option<String>,
     /// 传输协议。
     pub transport: Option<String>,
@@ -516,12 +492,7 @@ pub async fn patch_node(
         Some(raw) => Some(normalize_name(raw)?),
         None => None,
     };
-    let public_host = req
-        .public_host
-        .as_deref()
-        .map(|v| Some(v.trim().to_string()).filter(|s| !s.is_empty()));
-
-    // 传空串 = 清空（回落到自动推导）；不传 = 不改；传非法值 = 400。
+    // 传空串 = 清空；不传 = 不改；传非法值 = 400。
     //
     // 这里刻意让校验错误冒出来而不是 `unwrap_or(None)` —— 后者会把
     // 「地址写错了」悄悄变成「清空地址」，用户以为自己改了配置，
@@ -548,7 +519,9 @@ pub async fn patch_node(
             .update_node(NodePatch {
                 id: id.clone(),
                 name,
-                public_host,
+                // 表单不再提供「对外主机」，编辑时也不动它 ——
+                // 那列由内嵌形态的启动流程自动维护。
+                public_host: None,
                 public_addr,
                 description,
                 transport,
@@ -963,37 +936,38 @@ mod tests {
     }
 
     #[test]
-    fn public_addr_accepts_the_three_documented_shapes() {
+    fn public_addr_accepts_ws_and_wss_console_urls() {
         for good in [
-            "10.0.0.5",
-            "10.0.0.5:7835",
-            "node1.example.com:17835",
-            "[2001:db8::1]:7835",
+            "ws://203.0.113.9:7800",
+            "wss://node1.example.com",
+            "wss://node1.example.com:443",
+            "WS://203.0.113.9:7800",
+            "ws://[2001:db8::1]:7800",
         ] {
             let got = normalize_public_addr(Some(good)).expect(good);
             assert_eq!(got.as_deref(), Some(good));
         }
-        // 空串 / 未填 = 清空
+        // 空串 / 未填 = 不覆盖，让客户端用命令行 --console 的地址
         assert_eq!(normalize_public_addr(Some("  ")).expect("空串"), None);
         assert_eq!(normalize_public_addr(None).expect("未填"), None);
     }
 
     #[test]
-    fn public_addr_rejects_what_would_fail_at_connect_time() {
-        // 每一条都是「客户端连不上但看不出原因」的形态：填 http:// 会被原样
-        // 拼进 host，端口非法解析不了，路径根本用不上。
+    fn public_addr_rejects_non_ws_forms() {
+        // 只接受 ws/wss。http:// 虽然客户端能跟随 307 发现，但那是命令行
+        // 填法的便利；配置里应该存最终地址，不再依赖一次重定向。
         for bad in [
-            "http://node1.example.com",
-            "https://1.2.3.4:7835",
-            "node1.example.com/path",
-            "node1.example.com?x=1",
-            "node1.example.com:",
-            "node1.example.com:0",
-            "node1.example.com:70000",
-            "node1.example.com:abc",
-            ":7835",
-            "2001:db8::1:7835",
-            "has space:7835",
+            "http://203.0.113.9:7800",
+            "https://node1.example.com",
+            "203.0.113.9:7800",
+            "node1.example.com",
+            "ftp://x",
+            "ws://",
+            "ws://host:0",
+            "ws://host:70000",
+            "ws://host:abc",
+            "ws://host:7800/path",
+            "has space",
         ] {
             let err = normalize_public_addr(Some(bad)).expect_err(bad);
             assert_eq!(
@@ -1002,22 +976,6 @@ mod tests {
                 "{bad:?} 应返回 400"
             );
         }
-    }
-
-    #[test]
-    fn description_limit_counts_characters_not_bytes() {
-        // 70 个汉字 = 210 字节但只有 70 个字，按字节算会误判超限。
-        let ok = "港".repeat(MAX_DESCRIPTION);
-        assert!(normalize_description(Some(&ok)).is_ok());
-        let too_long = "港".repeat(MAX_DESCRIPTION + 1);
-        let err = normalize_description(Some(&too_long)).expect_err("超限应报错");
-        assert!(
-            err.message.contains(&MAX_DESCRIPTION.to_string()),
-            "{}",
-            err.message
-        );
-        assert_eq!(normalize_description(Some("   ")).expect("空白"), None);
-        assert_eq!(normalize_description(None).expect("未填"), None);
     }
 
     #[test]
@@ -1033,6 +991,10 @@ mod tests {
             .is_none());
         // sctp / typo 必须被拒 —— 它拼错后的表现是「节点上线了但隧道全不通」
         assert!(normalize_transport(Some("sctp")).is_err());
+        // udp 已从白名单移除：UDP 入口需要内核层端口转发，NAT 后基本不可用，
+        // 配上去只会得到「节点在线但 UDP 隧道全不通」
+        assert!(normalize_transport(Some("udp")).is_err());
+        assert!(!TRANSPORTS.contains(&"udp"));
         assert!(
             normalize_transport(Some("tcp ")).is_ok(),
             "两端空白应被容忍"

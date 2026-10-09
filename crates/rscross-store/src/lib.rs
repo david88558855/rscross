@@ -1805,14 +1805,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_addr_wins_over_auto_derived_host() {
-        // 这条是「新增自建节点」里服务端地址的实际生效点：客户端拿到的
-        // tunnel_server 必须就是管理员填的那个，不能被自动推导覆盖。
+    async fn console_addr_does_not_leak_into_the_reverse_tunnel_address() {
+        // public_addr 存的是**控制台**地址（ws://host:7800），
+        // tunnel_server() 要的是反向隧道控制面（host:7835）。
+        // 两者协议与端口都不同 —— 混用会让客户端拿 7800 去连 7835 的服务，
+        // 能连上才怪。这条用例就是钉住这个边界。
         let store = Store::open_in_memory().expect("open");
         let id = uuid::Uuid::new_v4().to_string();
-        let mut rec = node_rec("addr");
+        let mut rec = node_rec("console-addr");
         rec.id = id.clone();
-        rec.tunnel_port = Some(17835);
+        rec.tunnel_port = Some(7835);
         store.insert_node(rec).await.expect("insert");
 
         store
@@ -1820,54 +1822,45 @@ mod tests {
                 id: id.clone(),
                 name: None,
                 public_host: None,
-                public_addr: Some(Some("10.0.0.5:9999".to_string())),
-                description: None,
-                transport: None,
-                allow_relay: None,
-            })
-            .await
-            .expect("update");
-        let got = store.find_node(&id).await.expect("find").expect("some");
-        assert_eq!(got.tunnel_server(), "10.0.0.5:9999");
-
-        // 只填主机不填端口时，用节点上报的隧道端口补齐。
-        store
-            .update_node(NodePatch {
-                id: id.clone(),
-                name: None,
-                public_host: None,
-                public_addr: Some(Some("10.0.0.5".to_string())),
-                description: None,
-                transport: None,
-                allow_relay: None,
-            })
-            .await
-            .expect("update");
-        let got = store.find_node(&id).await.expect("find").expect("some");
-        assert_eq!(got.tunnel_server(), "10.0.0.5:17835");
-
-        // 介绍与传输协议 / 中继开关也要能改（这几个字段曾经漏在 SET 之外，
-        // 接口返回 200 但改动没落库 —— 单测只测 public_addr 抓不到）。
-        store
-            .update_node(NodePatch {
-                id: id.clone(),
-                name: None,
-                public_host: None,
-                public_addr: Some(Some("10.0.0.5".to_string())),
+                public_addr: Some(Some("ws://203.0.113.9:7800".to_string())),
                 description: Some(Some("香港出口".to_string())),
                 transport: Some("wss".to_string()),
                 allow_relay: Some(false),
             })
             .await
             .expect("update");
+
         let got = store.find_node(&id).await.expect("find").expect("some");
-        assert_eq!(got.tunnel_server(), "10.0.0.5:17835");
+        assert_eq!(got.public_addr.as_deref(), Some("ws://203.0.113.9:7800"));
         assert_eq!(got.description.as_deref(), Some("香港出口"));
         assert_eq!(got.transport, "wss");
         assert!(!got.allow_relay);
 
-        // 三态：Some(None) = 清空，None = 不改。
-        // 这里是本用例最关键的一条 —— 用 COALESCE 的话清空会静默失效。
+        // 关键：控制台地址里带了 7800，但它绝不能出现在反向隧道地址里。
+        // 没有 public_host 也没有 public_ip 时回落到127.0.0.1。
+        assert_eq!(
+            got.tunnel_server(),
+            "127.0.0.1:7835",
+            "控制面地址不应影响反向隧道地址"
+        );
+
+        // 配了 public_host 时用它（内嵌形态启动流程会自动填这一列）。
+        store
+            .update_node(NodePatch {
+                id: id.clone(),
+                name: None,
+                public_host: Some(Some("203.0.113.9".to_string())),
+                public_addr: None,
+                description: None,
+                transport: None,
+                allow_relay: None,
+            })
+            .await
+            .expect("update");
+        let got = store.find_node(&id).await.expect("find").expect("some");
+        assert_eq!(got.tunnel_server(), "203.0.113.9:7835");
+
+        // 三态：None = 不改，Some(None) = 清空。
         store
             .update_node(NodePatch {
                 id: id.clone(),
@@ -1882,38 +1875,13 @@ mod tests {
             .expect("update");
         let got = store.find_node(&id).await.expect("find").expect("some");
         assert_eq!(
-            got.tunnel_server(),
-            "10.0.0.5:17835",
+            got.public_addr.as_deref(),
+            Some("ws://203.0.113.9:7800"),
             "public_addr 传 None 表示不改，不该被清掉"
         );
-        assert_eq!(
-            got.description.as_deref(),
-            Some("香港出口"),
-            "未传的字段不该变"
-        );
+        assert_eq!(got.description.as_deref(), Some("香港出口"), "未传的字段不该变");
         assert_eq!(got.transport, "kcp", "只改 transport，另两个不该动");
         assert!(!got.allow_relay, "未传的 allow_relay 不该变");
-
-        // 清空后回退到自动推导。
-        store
-            .update_node(NodePatch {
-                id: id.clone(),
-                name: None,
-                public_host: None,
-                public_addr: Some(None),
-                description: Some(None),
-                transport: None,
-                allow_relay: None,
-            })
-            .await
-            .expect("update");
-        let got = store.find_node(&id).await.expect("find").expect("some");
-        assert!(
-            !got.tunnel_server().starts_with("10.0.0.5"),
-            "Some(None) 应清空并回落到自动推导，实际 {}",
-            got.tunnel_server()
-        );
-        assert_eq!(got.description, None, "Some(None) 应清空介绍");
     }
 
     #[tokio::test]

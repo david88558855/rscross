@@ -146,7 +146,15 @@ jobs:
           # 顶层目录名即 $name，与 Linux 侧的 tar.gz 结构保持一致
           Compress-Archive -Path $stage -DestinationPath "dist/$name.zip" -Force
           $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
+          # 校验和文件必须写 **LF** 行尾。
+          #
+          # `"..." | Out-File` 在 Windows 上写出来是 CRLF，于是 Linux / macOS
+          # 侧 `sha256sum -c x.zip.sha256` 会报
+          #   sha256sum: 'x.zip'$'\r': No such file or directory
+          #   FAILED open or read
+          # —— 哈希值本身是对的，坑只在行尾（v0.1.5 实测踩到）。
+          # 三平台产物的校验和格式必须一致，所以这里显式指定。
+          Set-Content -NoNewline -Encoding ascii "dist/$name.zip.sha256" "$hash  $name.zip`n"
           Get-ChildItem dist | Select-Object Name, Length | Format-Table
 
       - name: 冒烟（产物来自本次构建，非开发目录）
@@ -182,8 +190,30 @@ jobs:
         run: |
           set -euo pipefail
           REF="${{ github.event.inputs.tag || github.ref_name }}"
-          git tag -l --format='%(contents:body)' "$REF" > notes.md 2>/dev/null || true
+
+          # 不要直接写 `git tag -l --format='%(contents:body)' "$REF"`。
+          #
+          # actions/checkout 在 checkout 阶段会额外跑一次
+          #   git fetch --no-tags origin "+<commit-sha>:refs/tags/$REF"
+          # 把本地那个**注解 tag 覆盖成指向 commit 的轻量引用**，于是
+          # %(contents:body) 解析到的是**提交信息**，发布说明里会混进一段
+          # 与本次发布无关的 commit body。v0.1.5 就这么翻过一次车。
+          #
+          # 这里按 refspec 重新拉一次注解对象，落到独立 ref 上：既拿到真正的
+          # tag 正文，也不与 checkout 留下的引用互相覆盖。
+          git fetch --force --no-tags --quiet origin \
+            "+refs/tags/$REF:refs/tags/rscross-notes-src"
+          objtype="$(git for-each-ref --format='%(objecttype)' refs/tags/rscross-notes-src)"
+          if [ "$objtype" != "tag" ]; then
+            echo "::error::$REF 在本地不是注解 tag（objecttype=$objtype）—— 发布说明会取到 commit 信息而不是 tag 正文，已中止"
+            exit 1
+          fi
+          git for-each-ref --format='%(contents:body)' refs/tags/rscross-notes-src > notes.md
+
+          # 只有标题、没有正文的 tag 是允许的（`git tag -a vX -m "..."`），
+          # 但要说清楚，别让人以为正文丢了。
           if [ ! -s notes.md ]; then
+            echo "::warning::tag $REF 没有注解正文，发布说明将只有产物清单"
             echo "rscross $REF" > notes.md
           fi
           {

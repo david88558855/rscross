@@ -249,10 +249,10 @@ pub fn normalize_console_target(candidate: &str) -> Result<String> {
     if candidate.is_empty() {
         return Err(Error::config("发现到的控制台地址为空"));
     }
-    if candidate.strip_prefix("ws://")  {
+    if candidate.starts_with("ws://") {
         return Ok(candidate.to_string());
     }
-    if candidate.strip_prefix("wss://")  {
+    if candidate.starts_with("wss://") {
         return Ok(candidate.to_string());
     }
     if candidate.starts_with("http://") || candidate.starts_with("https://") {

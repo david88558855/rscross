@@ -54,6 +54,20 @@ pub struct NodeRecord {
     pub tunnel_token: String,
     /// 对外主机名（管理员可覆盖）。
     pub public_host: Option<String>,
+    /// 控制台显式配置的**服务端地址**：客户端据此连接服务端。
+    ///
+    /// 优先于自动推导出的 `tunnel_server`。需要它的原因：内嵌形态下节点
+    /// 拿不到自己的公网出口 IP，自动推导会回落到 `127.0.0.1`，
+    /// 客户端照着连就连到本机去了 —— 日志上完全看不出来。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_addr: Option<String>,
+    /// 对外可见的介绍（新建自建节点时填写，纯展示）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 该节点承载流量时使用的传输协议（`tcp` / `udp` / `quic` / `kcp` / `ws` / `wss`）。
+    pub transport: String,
+    /// P2P 直连失败时是否允许回退到该节点中继（默认开启）。
+    pub allow_relay: bool,
     /// 反向隧道控制面监听端口（节点上报）。
     pub tunnel_port: Option<i64>,
     /// 公网入口监听端口（节点上报）。

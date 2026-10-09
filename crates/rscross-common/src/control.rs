@@ -29,7 +29,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ClientLogEntry, ClientRuntime, DesiredTunnel, NodeEndpoint, NodeRuntime};
+use crate::console::ConsoleAddress;
+use crate::{
+    ClientLogEntry, ClientRuntime, DesiredTunnel, NodeEndpoint, NodeRuntime, NodeTunnelPlan,
+};
+
+/// 重导出，便于调用方只引一个模块。
+pub use crate::console::{ConsolePlan, ConsoleScheme};
 
 /// 控制面协议版本。本端只与同版本通信，不一致直接报错。
 pub const CONTROL_VERSION: u32 = 1;

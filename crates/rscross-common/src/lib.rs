@@ -550,6 +550,30 @@ pub struct NodeEndpoint {
     /// 节点 Iroh 寻址信息（JSON），用于直连该节点。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_addr: Option<String>,
+    /// 控制台显式配置的**服务端地址**（形如 `1.2.3.4:7835` 或 `node.example.com）。
+    ///
+    /// 优先于 `tunnel_server` 的自动推导。之所以需要它：内嵌形态下节点
+    /// 自己拿不到公网出口 IP，自动推导会回落到 `127.0.0.1`，客户端照着连就
+    /// 连到本机去了 —— 这类故障在日志上完全看不出来。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_addr: Option<String>,
+    /// 该节点承载流量时使用的传输协议（`tcp` / `udp` / `quic` / `kcp` / `ws` / `wss`）。
+    #[serde(default)]
+    pub transport: String,
+}
+
+/// 客户端实际用来连接服务端的地址。
+///
+/// 单独抽出来是因为「自动推导」与「管理员显式配置」两条来源必须收在一个地方，
+/// 否则调用方会各自实现一遍优先级，迟早不一致。
+impl NodeEndpoint {
+    /// 客户端连服务端时用的地址：显式配置优先，其次自动推导。
+    pub fn connect_addr(&self) -> &str {
+        match self.public_addr.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            Some(v) => v,
+            None => self.tunnel_server.as_str(),
+        }
+    }
 }
 
 /// 控制面下发给客户端的隧道定义。
@@ -597,6 +621,28 @@ pub struct DesiredTunnel {
 /// serde 默认值：允许中继回退（宁可通而不快，也不要直接不通）。
 fn default_true() -> bool {
     true
+}
+
+/// 节点侧承载的一条隧道。
+///
+/// 节点不参与业务语义，它只需要知道「这条隧道的流量往哪个客户端投递、
+/// 用哪个路由键」，以及（对私有 / P2P）访问端凭密钥查询时能拿到客户端坐标。
+/// 隧道定义与下发给客户端的**完全一致**，两侧路由键算法同源 —— 否则会出现
+/// 「隧道建立了但流量投递不到」。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeTunnelPlan {
+    /// 隧道定义。
+    pub tunnel: DesiredTunnel,
+    /// 归属客户端 ID。
+    pub client_id: String,
+    /// 归属客户端名（日志用）。
+    pub client_name: String,
+    /// 归属客户端的 Iroh 坐标（JSON）。
+    ///
+    /// 客户端还没上报时为 `None`：此时节点无法主动投递（端口转发会拒绝连接、
+    /// 访问端只能走中继），节点会跳过并说明原因，而不是假装隧道可用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_endpoint: Option<String>,
 }
 
 /// 客户端上报给控制台的日志条目。

@@ -303,8 +303,9 @@ impl Store {
                 "INSERT INTO nodes
                  (id, name, status, node_token_hash, tunnel_token, public_host, tunnel_port,
                   ingress_port, version, os, arch, endpoint_id, endpoint_addr, public_ip,
-                  last_seen_at, last_error, created_at, updated_at, disabled)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                  last_seen_at, last_error, created_at, updated_at, disabled,
+                  public_addr, description, transport, allow_relay)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
                 params![
                     rec.id,
                     rec.name,
@@ -325,6 +326,10 @@ impl Store {
                     rec.created_at,
                     rec.updated_at,
                     rec.disabled as i64,
+                    rec.public_addr,
+                    rec.description,
+                    rec.transport,
+                    rec.allow_relay as i64,
                 ],
             )
             .map_err(Error::store)?;
@@ -1279,6 +1284,14 @@ pub struct NodePatch {
     pub name: Option<String>,
     /// 对外主机名（`Some(None)` 表示清空）。
     pub public_host: Option<Option<String>>,
+    /// 控制台显式配置的服务端地址（客户端据此连接服务端）。
+    pub public_addr: Option<Option<String>>,
+    /// 对外可见的介绍。
+    pub description: Option<Option<String>>,
+    /// 传输协议（`tcp` / `udp` / `quic` / `kcp` / `ws` / `wss`）。
+    pub transport: Option<String>,
+    /// 是否允许 P2P 直连失败后回退到中继。
+    pub allow_relay: Option<bool>,
 }
 
 /// 客户端心跳时更新的运行时字段（None 表示不覆盖）。
@@ -1385,6 +1398,10 @@ fn map_node(row: &Row<'_>) -> rusqlite::Result<NodeRecord> {
         created_at: row.get(16)?,
         updated_at: row.get(17)?,
         disabled: row.get::<_, i64>(18)? != 0,
+        public_addr: row.get(19)?,
+        description: row.get(20)?,
+        transport: row.get(21)?,
+        allow_relay: row.get::<_, i64>(22)? != 0,
     })
 }
 
@@ -1414,7 +1431,7 @@ fn map_client(row: &Row<'_>) -> rusqlite::Result<ClientRecord> {
 /// SQLite 的 `ALTER TABLE ... ADD COLUMN` 没有 `IF NOT EXISTS`，重复执行会报
 /// 「duplicate column name」，所以先读 `pragma table_info` 再决定是否执行。
 fn add_missing_columns(conn: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 3] = [
+    const ADDITIONS: [(&str, &str, &str); 7] = [
         (
             "kind",
             "tunnels",
@@ -1429,6 +1446,27 @@ fn add_missing_columns(conn: &Connection) -> Result<()> {
             "allow_relay",
             "tunnels",
             "ALTER TABLE tunnels ADD COLUMN allow_relay INTEGER NOT NULL DEFAULT 1",
+        ),
+        // 「新增自建节点」表单：介绍 / 服务端地址 / 传输协议 / P2P 中继开关
+        (
+            "description",
+            "nodes",
+            "ALTER TABLE nodes ADD COLUMN description TEXT",
+        ),
+        (
+            "public_addr",
+            "nodes",
+            "ALTER TABLE nodes ADD COLUMN public_addr TEXT",
+        ),
+        (
+            "transport",
+            "nodes",
+            "ALTER TABLE nodes ADD COLUMN transport TEXT NOT NULL DEFAULT 'tcp'",
+        ),
+        (
+            "allow_relay",
+            "nodes",
+            "ALTER TABLE nodes ADD COLUMN allow_relay INTEGER NOT NULL DEFAULT 1",
         ),
     ];
 
@@ -1479,7 +1517,7 @@ fn map_tunnel(row: &Row<'_>) -> rusqlite::Result<TunnelRecord> {
 }
 
 const SCHEMA: &str = r#"
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 
 CREATE TABLE IF NOT EXISTS users (
   id            TEXT PRIMARY KEY,
@@ -1520,10 +1558,17 @@ CREATE TABLE IF NOT EXISTS nodes (
   last_error       TEXT,
   created_at       TEXT NOT NULL,
   updated_at       TEXT NOT NULL,
-  disabled         INTEGER NOT NULL DEFAULT 0
+  disabled         INTEGER NOT NULL DEFAULT 0,
+  -- 以下为「新增自建节点」表单引入的字段（schema v3）
+  public_addr      TEXT,
+  description      TEXT,
+  transport        TEXT NOT NULL DEFAULT 'tcp',
+  allow_relay      INTEGER NOT NULL DEFAULT 1
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_token ON nodes(node_token_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_public_addr
+    ON nodes(public_addr) WHERE public_addr IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS clients (
   id               TEXT PRIMARY KEY,

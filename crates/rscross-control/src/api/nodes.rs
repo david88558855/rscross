@@ -10,7 +10,7 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use rscross_auth::{new_node_token, token_hash};
-use rscross_common::{DesiredTunnel, NodeEndpoint, NodeRuntime};
+use rscross_common::{DesiredTunnel, NodeEndpoint, NodeRuntime, NodeTunnelPlan};
 use rscross_config::ConsoleFile;
 use rscross_store::{NodePatch, NodeRecord, NodeRuntimePatch};
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use crate::api::{header_token, map_store_conflict, normalize_name, NODE_HEADER};
 use crate::error::ApiError;
 use crate::state::AppState;
+
+/// 重导出：节点隧道计划属于网络传输 DTO，定义在 common，这里保持历史路径可用。
+pub use rscross_common::NodeTunnelPlan;
 
 // ============================================================ 节点供给
 
@@ -475,27 +478,6 @@ pub struct NodeHeartbeatRequest {
 }
 
 /// 节点侧要承载的一条隧道。
-///
-/// 节点不参与业务语义，它只需要知道「这条隧道的流量往哪个客户端投递、
-/// 用哪个路由键」，以及（对私有 / P2P）访问端凭密钥查询时能拿到客户端坐标。
-/// 隧道定义与下发给客户端的**完全一致**，两侧路由键算法同源 —— 否则会出现
-/// 「隧道建立了但流量投递不到」。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeTunnelPlan {
-    /// 隧道定义。
-    pub tunnel: DesiredTunnel,
-    /// 归属客户端 ID。
-    pub client_id: String,
-    /// 归属客户端名（日志用）。
-    pub client_name: String,
-    /// 归属客户端的 Iroh 坐标（JSON）。
-    ///
-    /// 客户端还没上报时为 `None`：此时节点无法主动投递（端口转发会拒绝连接、
-    /// 访问端只能走中继），节点会跳过并说明原因，而不是假装隧道可用。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_endpoint: Option<String>,
-}
-
 /// 节点心跳响应。
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeHeartbeatResponse {

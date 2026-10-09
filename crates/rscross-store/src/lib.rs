@@ -947,9 +947,7 @@ impl Store {
                      ORDER BY created_at DESC",
                 )
                 .map_err(Error::store)?;
-            let rows = stmt
-                .query_map([], map_enroll_token)
-                .map_err(Error::store)?;
+            let rows = stmt.query_map([], map_enroll_token).map_err(Error::store)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(Error::store)
         })

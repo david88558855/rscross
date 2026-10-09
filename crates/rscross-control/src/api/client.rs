@@ -1025,7 +1025,10 @@ mod tests {
         let cfg = ConsoleFile::default();
         let cmd = build_enroll_command(&cfg, None, "rse_abc");
         assert!(!cmd.contains("--name"), "未命名时不该出现 --name：{cmd}");
-        assert!(!cmd.contains('<') && !cmd.contains('>'), "命令里不该有尖括号：{cmd}");
+        assert!(
+            !cmd.contains('<') && !cmd.contains('>'),
+            "命令里不该有尖括号：{cmd}"
+        );
         assert!(cmd.contains("--enroll-token rse_abc"));
     }
 }

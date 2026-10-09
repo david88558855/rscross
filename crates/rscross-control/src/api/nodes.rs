@@ -461,7 +461,43 @@ pub fn normalize_public_addr(raw: Option<&str>) -> Result<Option<String>, ApiErr
             )))
         }
     }
+
+    // plan_console_address 只管 scheme 与主机，端口要另查 ——
+    // 它对 `--console` 是有意的（那里端口可以缺省，走默认），
+    // 但配置里的地址必须是完整可用的。
+    if let Some(port) = url_port(&addr.ws_url) {
+        if port == 0 || port > 65535 {
+            return Err(ApiError::bad_request(format!(
+                "端口必须在 1-65535 之间（当前 {port}）"
+            )));
+        }
+    }
     Ok(Some(text.to_string()))
+}
+
+/// 从 ws/wss URL 里取端口。
+///
+/// 裸 IPv6（`ws://[::1]:7800`）不能靠「最后一个冒号」判断 ——
+/// 方括号里的冒号会让人把 `1]:7800` 当端口。剥掉方括号内容再找。
+fn url_port(url: &str) -> Option<u32> {
+    let rest = url.split("://").nth(1)?;
+    // 去掉路径 / 查询 / 片段
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = if let Some(end) = authority.strip_prefix('[') {
+        // [2001:db8::1]:7800 → 保留方括号后的部分
+        match end.find(']') {
+            Some(i) => &end[i + 1..],
+            None => authority,
+        }
+    } else {
+        authority
+    };
+    let colon = host_port.rfind(':')?;
+    let digits = &host_port[colon + 1..];
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 /// 修改节点请求。
@@ -951,6 +987,19 @@ mod tests {
         // 空串 / 未填 = 不覆盖，让客户端用命令行 --console 的地址
         assert_eq!(normalize_public_addr(Some("  ")).expect("空串"), None);
         assert_eq!(normalize_public_addr(None).expect("未填"), None);
+    }
+
+    #[test]
+    fn url_port_handles_ipv6_and_paths() {
+        // 裸 IPv6 的冒号不能被当成端口分隔符
+        assert_eq!(url_port("ws://[2001:db8::1]:7800"), Some(7800));
+        assert_eq!(url_port("ws://[::1]"), None);
+        assert_eq!(url_port("ws://203.0.113.9:7800"), Some(7800));
+        assert_eq!(url_port("wss://host.example.com/api/v1/control/ws"), None);
+        assert_eq!(url_port("ws://host.example.com:7800/ws"), Some(7800));
+        assert_eq!(url_port("ws://host.example.com"), None);
+        // 非数字端口（畸形）返回 None，交给上层按「无端口」处理
+        assert_eq!(url_port("ws://host:abc"), None);
     }
 
     #[test]

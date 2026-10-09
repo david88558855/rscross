@@ -92,8 +92,16 @@ async fn probe_redirect(addr: &ConsoleAddress) -> Result<(String, usize, String)
         .build()
         .map_err(Error::transport)?;
 
-    let response = client.get(addr.spec.trim()).send().await.map_err(|err| {
-        Error::transport(format!(
+    let response = client
+        .get(addr.spec.trim())
+        // 必须显式声明不要 HTML，否则控制台的根路径会返回页面而不是
+        // 307 到WebSocket 端点 —— 判据见 rscross-control 的 console::fallback：
+        // 只有「明确声明不要 HTML」的请求才拿重定向。
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|err| {
+            Error::transport(format!(
             "探测控制台入口 {} 失败：{err}（若该地址只接受 WebSocket，\
                  请直接用 ws:// 或 wss:// 填写）",
             addr.spec

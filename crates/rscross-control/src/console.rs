@@ -87,11 +87,19 @@ pub async fn fallback(uri: axum::http::Uri, headers: axum::http::HeaderMap) -> R
     //
     // 分不清两者的话只能二选一：全给 307 会让浏览器用户一脸懵地跳到
     // WS 端点然后连接失败；全给页面则 http:// 入口没法用。
-    let wants_html = headers
-        .get(axum::http::header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.contains("text/html"))
-        .unwrap_or(false);
+    // 只有**明确声明不要 HTML** 的请求才走 307。
+    //
+    // 判据刻意严格：`Accept: */*` 也算「要 HTML」。命令行工具、浏览器书签、
+    // 健康检查全都发 `*/*` —— 把它们送去 WebSocket 端点会得到一个
+    // 莫名其妙的 400（那里不是 HTTP 服务）。Windows 冒烟测试就是这么炸的：
+    // 首页断言拿到 Bad Request。
+    //
+    // 反过来，客户端探测不发 Accept 时会落到 HTML 分支，拿不到 307 ——
+    // 所以 discover.rs 那边显式带了 Accept: application/json。
+    let wants_html = match headers.get(axum::http::header::ACCEPT).and_then(|v| v.to_str().ok()) {
+        None => true,
+        Some(accept) => accept.contains("text/html") || !accept.trim().is_empty(),
+    };
     if path == "/" && !wants_html {
         return (
             StatusCode::TEMPORARY_REDIRECT,
@@ -251,9 +259,9 @@ mod tests {
         headers_with_accept("text/html,application/xhtml+xml")
     }
 
-    /// 客户端式请求（不发 text/html）。
+    /// 客户端式请求（显式声明不要 HTML —— 与 discover.rs 的探测请求一致）。
     fn client_headers() -> axum::http::HeaderMap {
-        headers_with_accept("*/*")
+        headers_with_accept("application/json")
     }
 
     #[tokio::test]
@@ -287,6 +295,19 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default();
         assert_eq!(location, rscross_common::console::CONTROL_WS_PATH);
+    }
+
+    #[tokio::test]
+    async fn accept_wildcard_still_serves_the_page() {
+        // 命令行工具、浏览器书签、健康检查全都发 `Accept: */*`。
+        // 把它们送去 WebSocket 端点会拿到一个「Bad Request」—— 那里不是
+        // HTTP 服务。Windows 冒烟测试的首页断言就是这么炸的。
+        let resp = fallback(
+            axum::http::Uri::from_static("/"),
+            headers_with_accept("*/*"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

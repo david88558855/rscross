@@ -6,6 +6,7 @@ pub mod auth;
 pub mod client;
 pub mod misc;
 pub mod nodes;
+pub mod ws;
 
 use axum::routing::{get, patch, post};
 use axum::Router;
@@ -30,6 +31,11 @@ pub const AGENT_HEADER: &str = "x-rscross-agent";
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/health", get(misc::health))
+        // 控制面主协议（WebSocket）：客户端与服务端节点都走这里
+        .route(
+            rscross_common::console::CONTROL_WS_PATH,
+            get(ws::control_ws),
+        )
         // 控制台认证
         .route("/api/v1/auth/login", post(auth::login))
         .route("/api/v1/auth/logout", post(auth::logout))

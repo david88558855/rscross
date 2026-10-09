@@ -18,6 +18,8 @@ default = []
 http-client = ["dep:reqwest"]
 
 [dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+tokio-tungstenite = "0.30"
 rscross-common = { workspace = true, features = ["runtime"] }
 rscross-config = { workspace = true }
 rscross-store = { workspace = true }

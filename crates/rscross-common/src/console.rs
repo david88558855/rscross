@@ -68,7 +68,7 @@ impl ConsoleScheme {
     ///
     /// 匹配顺序刻意从长到短：`https://` 不会被 `http://` 误吞，
     /// `wss://` 也不会被 `ws://` 误吞。
-    pub fn split(spec: &str) -> Result<(Self, &str), Error> {
+    pub fn split(spec: &str) -> Result<(Self, &str)> {
         let spec = spec.trim();
         let candidates: [(&str, ConsoleScheme); 5] = [
             ("https://", ConsoleScheme::Https),
@@ -207,6 +207,9 @@ pub fn plan_console_address(spec: &str) -> Result<ConsoleAddress> {
                 scheme,
                 authority: authority.to_string(),
                 ws_url: fallback.trim_end_matches('/').to_string(),
+                // 还没探测；真正探测到 307 之后调用方才把它改成实际跳数。
+                hops: 0,
+                discovered: None,
             })
         }
         ConsoleScheme::Txt => Ok(ConsoleAddress {
@@ -241,7 +244,7 @@ pub fn http_to_ws(spec: &str) -> String {
 /// 只接受 `ws://` / `wss://`；`http(s)://` 会按同一个映射规则转换；
 /// 空串或其它写法一律报错 —— 因为 `txt://` 是管理员在 DNS 里手填的，
 /// 写错了就该在日志里说清楚，而不是让客户端拿着一个畸形地址去连。
-pub fn normalize_console_target(candidate: &str) -> Result<String, Error> {
+pub fn normalize_console_target(candidate: &str) -> Result<String> {
     let candidate = candidate.trim();
     if candidate.is_empty() {
         return Err(Error::config("发现到的控制台地址为空"));

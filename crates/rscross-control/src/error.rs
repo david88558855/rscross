@@ -3,6 +3,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use rscross_common::control::ControlResponse;
 use rscross_common::Error;
 use serde::Serialize;
 
@@ -64,6 +65,21 @@ impl ApiError {
             "internal_error",
             message,
         )
+    }
+}
+
+impl ApiError {
+    /// 转成控制面 WebSocket 的失败帧。
+    ///
+    /// 刻意复用 HTTP 侧的 `code`（而不是另编一套）：同一类错误在两条路径上
+    /// 必须能被客户端用同一段逻辑识别与处理，否则排障时会看到「同样的错误，
+    /// REST 是一种提示、WS 是另一种提示」。
+    pub fn into_control_response(self, id: u64) -> ControlResponse {
+        ControlResponse::Error {
+            id,
+            code: self.code.to_string(),
+            message: self.message,
+        }
     }
 }
 

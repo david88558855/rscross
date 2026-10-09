@@ -87,11 +87,25 @@ pub struct ClientLogEntry {
 }
 
 /// `POST /api/v1/agent/enroll`
+///
+/// HTTP 入口。业务逻辑在 [`enroll_inner`]，WebSocket 帧路径复用同一份 ——
+/// 两边行为一旦分叉，就会出现「REST 能注册、WS 注册不了」这种极难定位的问题。
 pub async fn enroll(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<EnrollRequest>,
 ) -> Result<Json<EnrollResponse>, ApiError> {
+    let resp = enroll_inner(&state, req, peer.ip()).await?;
+    Ok(Json(resp))
+}
+
+/// 客户端注册的真正实现。`peer_ip` 是控制台观测到的对端地址。
+pub(crate) async fn enroll_inner(
+    state: &AppState,
+    req: EnrollRequest,
+    peer_ip: std::net::IpAddr,
+) -> Result<EnrollResponse, ApiError> {
+    let peer = peer_ip;
     let cfg = state.config_snapshot().await;
     let raw_token = req.token.as_deref().unwrap_or("").trim().to_string();
 
@@ -130,7 +144,7 @@ pub async fn enroll(
     }
 
     // 归属节点：令牌里指定的优先，否则在「只有一个节点」时自动选中。
-    let node = resolve_node(&state, enroll.as_ref().and_then(|e| e.node_id.as_deref())).await?;
+    let node = resolve_node(state, enroll.as_ref().and_then(|e| e.node_id.as_deref())).await?;
 
     let desired_name = enroll
         .as_ref()
@@ -138,7 +152,7 @@ pub async fn enroll(
         .or_else(|| req.name.clone())
         .unwrap_or_else(|| format!("client-{}", short_id()));
 
-    let name = unique_client_name(&state, desired_name).await?;
+    let name = unique_client_name(state, desired_name).await?;
     let agent_token = new_agent_token();
     let client_id = uuid::Uuid::new_v4().to_string();
     let now = rscross_common::time::now_rfc3339();
@@ -212,7 +226,18 @@ pub async fn heartbeat(
     headers: HeaderMap,
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<Json<HeartbeatResponse>, ApiError> {
-    let (cfg, client) = authenticate_agent(&state, &headers).await?;
+    let resp = heartbeat_inner(&state, &headers, req, peer.ip()).await?;
+    Ok(Json(resp))
+}
+
+/// 客户端心跳的真正实现（HTTP 与 WS 共用）。
+pub(crate) async fn heartbeat_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    req: HeartbeatRequest,
+    peer_ip: std::net::IpAddr,
+) -> Result<HeartbeatResponse, ApiError> {
+    let (cfg, client) = authenticate_agent(state, headers).await?;
 
     state
         .store
@@ -287,7 +312,17 @@ pub async fn push_logs(
     headers: HeaderMap,
     Json(entries): Json<Vec<ClientLogEntry>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (_cfg, client) = authenticate_agent(&state, &headers).await?;
+    let accepted = push_logs_inner(&state, &headers, entries).await?;
+    Ok(Json(serde_json::json!({ "accepted": accepted })))
+}
+
+/// 日志上报的真正实现（HTTP 与 WS 共用），返回实际入库条数。
+pub(crate) async fn push_logs_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    entries: Vec<ClientLogEntry>,
+) -> Result<usize, ApiError> {
+    let (_cfg, client) = authenticate_agent(state, headers).await?;
     let mut accepted = 0usize;
 
     for entry in entries.into_iter().take(500) {
@@ -323,7 +358,7 @@ pub async fn push_logs(
         accepted += 1;
     }
 
-    Ok(Json(serde_json::json!({ "accepted": accepted })))
+    Ok(accepted)
 }
 
 /// 客户端鉴权。

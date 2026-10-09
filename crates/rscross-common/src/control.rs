@@ -258,32 +258,39 @@ pub enum ControlResponse {
         /// 本节点要承载的隧道编排。
         tunnels: Vec<NodeTunnelPlan>,
     },
-    /// 服务端节点自身记录。
-    NodeInfo {
+    /// 日志上报应答。
+    LogsAccepted {
         /// 请求序号。
         id: u64,
-        /// 节点 ID。
-        node_id: String,
-        /// 节点名。
-        name: String,
-        /// 状态。
-        status: String,
-        /// 对外主机。
-        public_host: Option<String>,
-        /// 反向隧道控制面端口。
-        tunnel_port: Option<i64>,
-        /// 公网入口端口。
-        ingress_port: Option<i64>,
-        /// 是否禁用。
-        disabled: bool,
-        /// 对外可见的介绍（新建自建节点时填写）。
-        description: Option<String>,
-        /// 该节点承载流量时使用的传输协议。
-        transport: String,
-        /// 是否允许 P2P 直连失败后回退到中继。
-        allow_relay: Option<bool>,
-        /// 客户端连接该服务端时使用的地址（由控制台下发）。
-        public_addr: Option<String>,
+        /// 实际入库的条数（上限 500，超出部分被丢弃）。
+        accepted: usize,
+    },
+    /// 成功应答（无额外载荷时用这个）。
+    Ok {
+        /// 请求序号。
+        id: u64,
+    },
+    /// 失败。
+    ///
+    /// `id` 为 0 表示这条错误不对应任何请求（连接级问题，比如版本协商失败）。
+    Error {
+        /// 请求序号。
+        id: u64,
+        /// 机器可读的错误码。
+        code: String,
+        /// 人类可读的说明。
+        message: String,
+    },
+    /// 服务端节点自身记录。
+    ///
+    /// 用 `serde_json::Value` 而不是具体的 `NodeRecord`：`NodeRecord` 属于
+    /// store crate（含仅内部可见的 `node_token_hash`），不能出现在传输协议里 ——
+    /// 那会让协议依赖持久化层，schema 一改协议就跟着变。
+    NodeSelf {
+        /// 请求序号。
+        id: u64,
+        /// 节点记录（已剔除内部字段）。
+        node: serde_json::Value,
     },
 }
 

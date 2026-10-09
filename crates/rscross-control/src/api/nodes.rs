@@ -498,13 +498,34 @@ pub struct NodeHeartbeatResponse {
 }
 
 /// `POST /api/v1/node/enroll`
+///
+/// HTTP 入口。业务逻辑在 [`node_enroll_inner`]，WebSocket 帧路径复用同一份。
 pub async fn node_enroll(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<NodeEnrollRequest>,
 ) -> Result<Json<NodeEnrollResponse>, ApiError> {
+    let resp = node_enroll_inner(
+        &state,
+        &req.token,
+        req.name.clone(),
+        req.runtime.clone(),
+        peer.ip(),
+    )
+    .await?;
+    Ok(Json(resp))
+}
+
+/// 节点注册的真正实现（HTTP 与 WS 共用）。
+pub(crate) async fn node_enroll_inner(
+    state: &AppState,
+    token: &str,
+    name: Option<String>,
+    runtime: NodeRuntime,
+    peer_ip: std::net::IpAddr,
+) -> Result<NodeEnrollResponse, ApiError> {
     let cfg = state.config_snapshot().await;
-    let token = req.token.trim();
+    let token = token.trim();
     if token.is_empty() {
         return Err(ApiError::unauthorized("缺少节点令牌"));
     }
@@ -521,23 +542,23 @@ pub async fn node_enroll(
     }
 
     // 注册即视为首个心跳，顺带把版本/平台/EndpointId 落库。
-    apply_node_heartbeat(&state, &node.id, &req.runtime, Some(peer.ip().to_string())).await?;
+    apply_node_heartbeat(state, &node.id, &req.runtime, Some(peer_ip.to_string())).await?;
 
     tracing::info!(
         node = %node.name,
         id = %node.id,
-        peer = %peer,
-        reported = req.name.as_deref().unwrap_or("-"),
+        peer = %peer_ip,
+        reported = name.as_deref().unwrap_or("-"),
         "服务端节点已注册"
     );
 
-    Ok(Json(NodeEnrollResponse {
+    Ok(NodeEnrollResponse {
         node_id: node.id,
         name: node.name,
         tunnel_token: node.tunnel_token,
         heartbeat_secs: cfg.console.heartbeat_secs,
         public_url: cfg.console.public_url.clone(),
-    }))
+    })
 }
 
 /// `POST /api/v1/node/heartbeat`
@@ -547,10 +568,19 @@ pub async fn node_heartbeat(
     headers: HeaderMap,
     Json(req): Json<NodeHeartbeatRequest>,
 ) -> Result<Json<NodeHeartbeatResponse>, ApiError> {
-    let node = authenticate_node(&state, &headers).await?;
-    Ok(Json(
-        apply_node_heartbeat(&state, &node.id, &req.runtime, Some(peer.ip().to_string())).await?,
-    ))
+    let resp = node_heartbeat_inner(&state, &headers, req.runtime, peer.ip()).await?;
+    Ok(Json(resp))
+}
+
+/// 节点心跳的真正实现（HTTP 与 WS 共用）。
+pub(crate) async fn node_heartbeat_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    runtime: NodeRuntime,
+    peer_ip: std::net::IpAddr,
+) -> Result<NodeHeartbeatResponse, ApiError> {
+    let node = authenticate_node(state, headers).await?;
+    apply_node_heartbeat(state, &node.id, &runtime, Some(peer_ip.to_string())).await
 }
 
 /// `GET /api/v1/node/self`
@@ -558,8 +588,16 @@ pub async fn node_self(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<NodeRecord>, ApiError> {
-    let node = authenticate_node(&state, &headers).await?;
+    let node = node_self_inner(&state, &headers).await?;
     Ok(Json(node))
+}
+
+/// 节点查询自身记录（HTTP 与 WS 共用）。
+pub(crate) async fn node_self_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<NodeRecord, ApiError> {
+    authenticate_node(state, headers).await
 }
 
 /// 节点鉴权（HTTP 路径）。内嵌模式不走这里。

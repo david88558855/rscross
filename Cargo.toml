@@ -56,7 +56,9 @@ toml = "0.8"
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 # DNS 发现（`txt://域名` → 查 TXT 记录 → 得到 ws/wss 地址）。
-hickory-resolver = "0.26"
+# system-config：读系统 DNS（/etc/resolv.conf 或 Windows 注册表）。
+# 企业网络里的 split-horizon DNS 只能靠它解析，自建 nameserver 会绕过。
+hickory-resolver = { version = "0.26", features = ["system-config", "tokio"] }
 
 # --- 存储 / 鉴权 ---
 rusqlite = { version = "0.40", features = ["bundled"] }

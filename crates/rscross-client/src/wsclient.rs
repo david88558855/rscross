@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite;
 use rscross_common::control::{
     ControlRequest, ControlResponse, Role, CONTROL_VERSION, MAX_HEARTBEAT_SECS, MIN_HEARTBEAT_SECS,
 };
@@ -130,8 +131,10 @@ impl ControlSocket {
                         }
                     }
                     None => {
-                        if event_tx.send(resp).is_closed() {
-                            break;
+                        // 没人接下行帧（调用方没在读事件）时只记日志，
+                        // 不能因此断开连接 —— 心跳还指着它。
+                        if event_tx.send(resp).is_err() {
+                            tracing::debug!("控制面下行帧无人接收，丢弃");
                         }
                     }
                 }

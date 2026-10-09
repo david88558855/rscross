@@ -76,8 +76,6 @@ pub struct Args {
     pub no_p2p: bool,
 }
 
-/// 子命令。
-#[derive(Debug, clap::Subcommand)]
 /// 控制面传输方式。
 ///
 /// 由 `--console` 的 scheme 决定，不额外配置 —— 让「写什么地址」唯一决定
@@ -90,6 +88,8 @@ enum ControlTransport {
     Http,
 }
 
+/// 子命令。
+#[derive(Debug, clap::Subcommand)]
 pub enum Command {
     /// 访问端：凭访问密钥在本机建立到内网服务的入口（私有 / P2P 隧道）。
     ///

@@ -137,36 +137,32 @@ async fn probe_redirect(addr: &ConsoleAddress) -> Result<(String, usize, String)
 /// 写成了 `wss://example.com` 却漏了端口、或者写成 `https://`，
 /// 只说「没找到」的话用户得自己再查一遍 DNS。
 async fn lookup_txt(domain: &str) -> Result<String> {
-    use hickory_resolver::TokioAsyncResolver;
-
-    let resolver = TokioAsyncResolver::builder()
-        .timeout_config(hickory_resolver::config::ResolverConfig::default())
-        .build()
-        .map_err(|err| Error::config(format!("初始化 DNS 解析器失败：{err}")))?;
-
-    let lookup = tokio::time::timeout(
-        DNS_TIMEOUT,
-        resolver.txt_lookup(domain.to_string()),
-    )
-    .await
-    .map_err(|_| {
-        Error::config(format!(
-            "查询 {domain} 的 TXT 记录超时（{DNS_TIMEOUT:?}）——\
-             请确认该域名已配置 TXT 记录，且当前网络允许 DNS 查询"
-        ))
-    })?
-    .map_err(|err| {
-        Error::config(format!(
-            "查询 {domain} 的 TXT 记录失败：{err}——\
-             请确认控制台管理员已在该域名下添加 TXT 记录"
-        ))
+    // `builder_tokio()` 读系统 DNS 配置（Unix 用 /etc/resolv.conf，Windows 用注册表）——
+    // 企业网络里的 split-horizon DNS 只能靠系统配置解析，自建 nameserver 会绕过它。
+    let resolver = hickory_resolver::TokioResolver::builder_tokio().map_err(|err| {
+        Error::config(format!("初始化 DNS 解析器失败：{err}"))
     })?;
+
+    let lookup = tokio::time::timeout(DNS_TIMEOUT, resolver.txt_lookup(domain))
+        .await
+        .map_err(|_| {
+            Error::config(format!(
+                "查询 {domain} 的 TXT 记录超时（{DNS_TIMEOUT:?}）——\
+                 请确认该域名已配置 TXT 记录，且当前网络允许 DNS 查询"
+            ))
+        })?
+        .map_err(|err| {
+            Error::config(format!(
+                "查询 {domain} 的 TXT 记录失败：{err}——\
+                 请确认控制台管理员已在该域名下添加 TXT 记录"
+            ))
+        })?;
 
     let records: Vec<String> = lookup.iter().map(|r| r.to_string()).collect();
     if records.is_empty() {
         return Err(Error::config(format!(
             "域名 {domain} 没有 TXT 记录。\
-             记录内容须形如 wss://console.example.com:{CONTROL_WS_PATH}"
+             记录内容须形如 wss://console.example.com{CONTROL_WS_PATH}"
         )));
     }
 
@@ -177,13 +173,13 @@ async fn lookup_txt(domain: &str) -> Result<String> {
             if !rejected.is_empty() {
                 tracing::debug!(domain, skipped = ?rejected, "TXT 记录中前几条不可用，已采用可用的一条");
             }
-            return Ok(record.clone());
+            return Ok(record.to_owned());
         }
         rejected.push(record.clone());
     }
     Err(Error::config(format!(
-        "域名 {domain} 的 {n} 条 TXT 记录都不是合法的 ws:// 或 wss:// 地址：{rejected:?}",
-        n = records.len()
+        "域名 {domain} 的 {} 条 TXT 记录都不是合法的 ws:// 或 wss:// 地址：{rejected:?}",
+        records.len()
     )))
 }
 

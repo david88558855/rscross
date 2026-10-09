@@ -184,14 +184,23 @@ pub fn init_logging(section: &LogSection, bus: LogBus) {
                 tracing_subscriber::fmt::layer()
                     .json()
                     .with_target(true)
-                    .with_current_span(false),
+                    .with_current_span(false)
+                    // JSON 是给机器读的，上色只会破坏可解析性（且转义码会
+                    // 混进字段值里），所以这里无条件关掉、不看终端。
+                    .with_ansi(false),
             )
             .with(bus_layer)
             .init();
     } else {
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().with_target(true))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(true)
+                    // 只在真实终端上色；重定向到文件 / systemd / docker logs 时
+                    // 保持纯文本，否则 grep 到的行里会夹着转义码。
+                    .with_ansi(rscross_common::logging::ansi_enabled()),
+            )
             .with(bus_layer)
             .init();
     }

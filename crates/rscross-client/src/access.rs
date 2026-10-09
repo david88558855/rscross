@@ -215,6 +215,8 @@ fn init_tracing(args: &AccessArgs) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        // 访问端常被脚本调用，输出要能直接进日志文件 / 管道。
+        .with_ansi(rscross_common::logging::ansi_enabled())
         .try_init();
 }
 

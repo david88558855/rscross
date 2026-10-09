@@ -25,6 +25,7 @@ import os
 import re
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -2251,6 +2252,216 @@ ring_capacity = 500
     console.stop()
 
 
+def scenario_schema_upgrade(dist: Path, work: Path) -> None:
+    """v3 -> v4 数据库升级：老库补列、老令牌回填 id、老节点给出可据以行动的报错。
+
+    为什么要单独一个场景：其余场景用的全都是**全新库**，`migrate()` 里
+    `add_missing_columns` 与「回填老令牌 id」那两条路径根本不会被执行到 ——
+    可它恰恰是老用户升级时唯一会走的路，出问题的表现又是「一读节点就
+    no such column」这种整页崩掉。
+
+    做法：先用真实二进制生成一个新库，再手工把库「降级」回 v3 的样子
+    （DROP 掉 v4 新增的 4 列 + `PRAGMA user_version = 3`），然后重启看迁移。
+    这样比手写 INSERT 更贴近实际：那些行是**旧版本自己写进去的**。
+    """
+    label = "库升级 v3→v4"
+    print("\n" + "-" * 72, flush=True)
+    print(f"场景：{label} —— 老库补列 / 老令牌回填 id / 老节点报错可行动", flush=True)
+    print("-" * 72, flush=True)
+
+    if sqlite3.sqlite_version_info < (3, 35, 0):
+        # DROP COLUMN 是 3.35 才有的。跑不动就明说，而不是静默少测一块。
+        print(f"    跳过：本机 SQLite {sqlite3.sqlite_version} 不支持 DROP COLUMN", flush=True)
+        return
+
+    root = work / "schema-upgrade"
+    root.mkdir(parents=True, exist_ok=True)
+    password = "e2e-upgrade-123"
+    port = free_port()
+    cfg_path = root / "console.toml"
+    db_path = root / "console.db"
+    # 复用共享的配置生成器：它写的是 `[log] level = "info"`，
+    # 也就是「重定向到文件时日志不该带颜色」这条断言所处的档位。
+    write_console_config(cfg_path, bind_port=port, db_path=db_path, password=password)
+    base = f"http://127.0.0.1:{port}"
+
+    # ------------------------------------------------ ① 先造一个 v4 新库
+    console = Proc(
+        f"{label}/console",
+        bin_path(dist, "rscross-console"),
+        ["--config", str(cfg_path), "--bind", f"127.0.0.1:{port}"],
+        root / "console.log",
+    )
+    if not check(f"{label}: 控制台启动（先造一个新库）", wait_console_ready(base, console), base):
+        console.stop()
+        return
+
+    token = login(base, password)
+    if not check(f"{label}: 管理员可登录", bool(token), base):
+        console.stop()
+        return
+
+    status, created = http_json("POST", base + "/api/v1/nodes", {"name": "legacy-node"}, token=token)
+    node_id = ((created or {}).get("node") or {}).get("id")
+    if not check(f"{label}: 建一台将来会变成「老节点」的节点", bool(node_id), str(created)[:200]):
+        console.stop()
+        return
+    # 新库里命令原文是有的。这条是后面那个 400 的**对照**：证明 400 不是
+    # 因为这个接口本来就不好使，而是真的因为库里没留下明文。
+    status, cmd = http_json("GET", base + f"/api/v1/nodes/{node_id}/command", token=token)
+    check(
+        f"{label}: 新库里的节点能取回命令（对照）",
+        status == 200 and bool((cmd or {}).get("command")),
+        f"status={status}",
+    )
+
+    status, issued = http_json(
+        "POST", base + "/api/v1/clients", {"name": "legacy-client"}, token=token
+    )
+    check(
+        f"{label}: 签发一条将来会变成「老令牌」的令牌",
+        status == 200 and bool((issued or {}).get("enroll_token")),
+        f"status={status} body={issued}",
+    )
+
+    # 顺手把「日志颜色」也钉在这里。子进程的 stdout 是文件、不是终端，
+    # 所以日志里一旦出现 \x1b[..m 就说明上色没做终端判断 —— 那种日志
+    # grep 不到东西，排查时看起来像「这条日志根本没打」。
+    fresh_log = console.log()
+    check(
+        f"{label}: 重定向到文件时日志不带 ANSI 转义码",
+        # 同时要求日志非空：空日志里当然"没有转义码"，那是假通过。
+        bool(fresh_log.strip()) and "\x1b[" not in fresh_log,
+        "日志里出现了 \\x1b[，会干扰 grep 与日志采集",
+    )
+
+    console.stop()
+
+    # ------------------------------------------------ ② 手工降级回 v3
+    conn = sqlite3.connect(db_path)
+    for sql in (
+        "ALTER TABLE nodes DROP COLUMN node_token_plain",
+        "ALTER TABLE nodes DROP COLUMN port_range",
+        "ALTER TABLE enroll_tokens DROP COLUMN token_plain",
+        "ALTER TABLE enroll_tokens DROP COLUMN id",
+        "PRAGMA user_version = 3",
+    ):
+        conn.execute(sql)
+    conn.commit()
+    node_cols = [row[1] for row in conn.execute("PRAGMA table_info(nodes)")]
+    token_cols = [row[1] for row in conn.execute("PRAGMA table_info(enroll_tokens)")]
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    check(
+        f"{label}: 已把库降级成 v3（nodes 无 v4 两列）",
+        "port_range" not in node_cols and "node_token_plain" not in node_cols,
+        str(node_cols),
+    )
+    check(
+        f"{label}: 已把库降级成 v3（enroll_tokens 无 v4 两列）",
+        "id" not in token_cols and "token_plain" not in token_cols,
+        str(token_cols),
+    )
+    check_eq(f"{label}: 降级后 user_version", 3, version)
+
+    # ------------------------------------------------ ③ 重启 -> 观察升级
+    # 换一个端口重启：同一个端口刚释放，Windows 上可能还在 TIME_WAIT 里。
+    port2 = free_port()
+    base2 = f"http://127.0.0.1:{port2}"
+    console = Proc(
+        f"{label}/console-upgraded",
+        bin_path(dist, "rscross-console"),
+        ["--config", str(cfg_path), "--bind", f"127.0.0.1:{port2}"],
+        root / "console-after.log",
+    )
+    if not check(
+        f"{label}: 老库上重启成功（迁移没把服务弄挂）", wait_console_ready(base2, console), base2
+    ):
+        console.stop()
+        return
+
+    after_log = console.log()
+    # 补列是 INFO；这条既证明迁移真的执行了，也顺带证明日志是纯文本可 grep 的。
+    added = after_log.count("已为既有数据库补充新增列")
+    check(f"{label}: 迁移日志记录了补列（4 列各一条）", added >= 4, f"出现 {added} 次")
+    check(
+        f"{label}: 升级后的日志同样不带 ANSI 转义码",
+        bool(after_log.strip()) and "\x1b[" not in after_log,
+        "日志里出现了 \\x1b[",
+    )
+
+    conn = sqlite3.connect(db_path)
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    node_cols = [row[1] for row in conn.execute("PRAGMA table_info(nodes)")]
+    token_cols = [row[1] for row in conn.execute("PRAGMA table_info(enroll_tokens)")]
+    legacy_id = conn.execute(
+        "SELECT id FROM enroll_tokens WHERE client_name = 'legacy-client'"
+    ).fetchone()
+    node_plain = conn.execute(
+        "SELECT node_token_plain FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()
+    conn.close()
+
+    check_eq(f"{label}: 迁移后 user_version", 4, version)
+    check(
+        f"{label}: 迁移后 nodes 补回了 v4 两列",
+        "port_range" in node_cols and "node_token_plain" in node_cols,
+        str(node_cols),
+    )
+    check(
+        f"{label}: 迁移后 enroll_tokens 补回了 v4 两列",
+        "id" in token_cols and "token_plain" in token_cols,
+        str(token_cols),
+    )
+    # 不回填的话，那条老令牌在界面上会是个永远点不动的灰条，用户只能删库重来。
+    check(
+        f"{label}: 老令牌被回填了 id",
+        bool(legacy_id and legacy_id[0]) and len(legacy_id[0]) == 32,
+        f"id={legacy_id[0] if legacy_id else None}",
+    )
+    check(
+        f"{label}: 老节点在库里没有命令原文",
+        node_plain is not None and node_plain[0] is None,
+        f"node_token_plain={node_plain[0] if node_plain else None}",
+    )
+
+    # ------------------------------------------------ ④ 老数据在接口上的表现
+    token = login(base2, password)
+    status, body = http_json("GET", base2 + f"/api/v1/nodes/{node_id}/command", token=token)
+    message = (body or {}).get("message", "") if isinstance(body, dict) else str(body)
+    check_eq(f"{label}: 老节点取回命令返回 400", 400, status)
+    # 回一条空命令等于让用户复制出个半截指令；这里必须是「知道下一步做什么」的报错。
+    check(f"{label}: 400 的文案指明下一步用「轮换令牌」", "轮换" in message, message)
+
+    status, pending = http_json("GET", base2 + "/api/v1/enroll-tokens", token=token)
+    hit = [t for t in (pending or []) if t.get("client_name") == "legacy-client"]
+    if check(f"{label}: 老令牌出现在待接入列表", len(hit) == 1, str(pending)[:240]):
+        check(f"{label}: 老令牌 id 非空（界面才能对它操作）", bool(hit[0].get("id")))
+        check(
+            f"{label}: 老令牌 command 为 null（界面据此不显示「复制命令」）",
+            hit[0].get("command") is None,
+            f"command={hit[0].get('command')!r}",
+        )
+        status, _ = http_json(
+            "DELETE", base2 + f"/api/v1/enroll-tokens/{hit[0]['id']}", token=token
+        )
+        check_eq(f"{label}: 回填出来的 id 真的能撤销", 200, status)
+
+    # 迁移不该把新功能弄坏：升级完再建一个节点，命令照样取得回来。
+    status, fresh = http_json(
+        "POST", base2 + "/api/v1/nodes", {"name": "post-migration"}, token=token
+    )
+    fresh_id = ((fresh or {}).get("node") or {}).get("id")
+    status, cmd = http_json("GET", base2 + f"/api/v1/nodes/{fresh_id}/command", token=token)
+    check(
+        f"{label}: 迁移后新建节点仍能取回命令",
+        status == 200 and bool((cmd or {}).get("command")),
+        f"status={status}",
+    )
+
+    console.stop()
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print("用法: python3 tests/e2e/e2e.py <二进制目录>", file=sys.stderr)
@@ -2330,6 +2541,7 @@ def main() -> int:
         scenario_default_port(dist, work)
         scenario_console_addr(dist, work)
         scenario_accounts_and_orphan_client(dist, work)
+        scenario_schema_upgrade(dist, work)
     except Exception as err:  # noqa: BLE001 - e2e 必须给出可诊断的失败，而不是裸 traceback
         check("e2e 脚本执行未抛异常", False, f"{type(err).__name__}: {err}")
         import traceback

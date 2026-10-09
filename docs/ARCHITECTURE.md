@@ -263,6 +263,13 @@ rscross-common::Error          # 全工程唯一错误类型（thiserror）
 
 - 级别语义：`ERROR` = 需人工介入；`WARN` = 已自动降级/重试；
   `INFO` = 状态变更（注册、隧道建立、配置更新）；`DEBUG` = 每次心跳、每条流。
+- **颜色只在真实终端上开**：`fmt::layer().with_ansi(...)` 一律传
+  `rscross_common::logging::ansi_enabled()`（stdout 是终端、且未设置 `NO_COLOR`）；
+  `json` 格式无条件关掉。`tracing_subscriber` 的默认行为是**无条件上色**，
+  于是重定向到文件、systemd/journald、`docker logs` 这些场景里日志会混进
+  `\x1b[..m` —— 而且字段名、`=`、取值是**各自分开包**的，所以
+  `grep schema_version=4` 这种最普通的排查动作会直接匹配不到，
+  看起来像"这条日志根本没打"。`tests/e2e/e2e.py` 的场景 6 有回归守卫。
 - **敏感值绝不进日志**：初始管理员密码只走 `eprintln!`（标准错误），
   **不经过 tracing**，因此不会进入环形缓冲或数据库 —— 否则任何已登录用户都能从
   「日志」页读到它。数据库里的 token 只存 SHA-256 摘要。

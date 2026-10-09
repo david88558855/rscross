@@ -16,6 +16,26 @@ pub mod signal;
 pub mod console;
 pub mod control;
 
+/// 日志输出相关的小工具（不引入 tracing 依赖，只给出「要不要上色」这一位判断）。
+pub mod logging {
+    /// 日志是否该带 ANSI 颜色：**只在真实终端上开**。
+    ///
+    /// `tracing_subscriber` 的默认行为是无条件上色，于是
+    /// `rscross-server > server.log`、systemd/journald、`docker logs`、CI 采集
+    /// 这些场景里，日志会混进 `\x1b[..m`。更麻烦的是当前版本会把**字段名、
+    /// `=`、取值各自分开包**，写成
+    /// `… 迁移完成 \x1b[3mschema_version\x1b[0m\x1b[2m=\x1b[0m4`，
+    /// 于是 `grep schema_version=4` 这种最普通的排查动作会直接匹配不到
+    /// —— 转义码正好夹在中间，看起来像"这条日志根本没打"。
+    ///
+    /// 判断一次 stdout 是不是终端就能挡掉这些场景，同时保留交互式使用时
+    /// 的颜色。`NO_COLOR` 是业界通行的约定，这里一并尊重。
+    pub fn ansi_enabled() -> bool {
+        use std::io::IsTerminal;
+        std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+    }
+}
+
 /// 全工程统一 `Result`。
 pub type Result<T> = std::result::Result<T, Error>;
 

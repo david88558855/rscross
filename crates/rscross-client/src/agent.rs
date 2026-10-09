@@ -835,13 +835,24 @@ fn init_tracing(cfg: &rscross_config::LogSection, sink: Arc<LogSink>) {
     if cfg.format == "json" {
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().json().with_target(true))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_target(true)
+                    // JSON 是给机器读的，上色会破坏可解析性：无条件关掉。
+                    .with_ansi(false),
+            )
             .with(sink_layer)
             .init();
     } else {
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().with_target(true))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(true)
+                    // 只在真实终端上色，重定向到文件时不混入转义码。
+                    .with_ansi(rscross_common::logging::ansi_enabled()),
+            )
             .with(sink_layer)
             .init();
     }

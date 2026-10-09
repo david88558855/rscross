@@ -1610,7 +1610,12 @@ def scenario_node_extras(dist: Path, root: Path) -> None:
     # 两条路都断言，否则很容易为了修一条把另一条弄坏。
     status, _ = raw_request("GET", base + "/", accept="text/html")
     check_eq(f"{label}: 浏览器访问根路径仍是控制台页面", 200, status)
-    status, headers = raw_request("GET", base + "/", accept="*/*")
+    # `*/*` 也必须是页面 —— 命令行工具、浏览器书签、健康检查都发这个。
+    # 之前把它们弹去 WS 端点，Windows 冒烟测试的首页断言直接拿到 400。
+    status, _ = raw_request("GET", base + "/", accept="*/*")
+    check_eq(f"{label}: Accept 通配符仍返回页面", 200, status)
+    # 只有明确声明不要 HTML 才拿 307（与 discover.rs 的探测请求一致）
+    status, headers = raw_request("GET", base + "/", accept="application/json")
     check_eq(f"{label}: 客户端访问根路径得307（发现入口）", 307, status)
     check(
         f"{label}: 307 的 Location 指向控制面 WS 端点",

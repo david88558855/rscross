@@ -1879,7 +1879,11 @@ mod tests {
             Some("ws://203.0.113.9:7800"),
             "public_addr 传 None 表示不改，不该被清掉"
         );
-        assert_eq!(got.description.as_deref(), Some("香港出口"), "未传的字段不该变");
+        assert_eq!(
+            got.description.as_deref(),
+            Some("香港出口"),
+            "未传的字段不该变"
+        );
         assert_eq!(got.transport, "kcp", "只改 transport，另两个不该动");
         assert!(!got.allow_relay, "未传的 allow_relay 不该变");
     }

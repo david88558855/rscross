@@ -1029,7 +1029,10 @@ mod tests {
         assert_eq!(url_port("ws://[2001:db8::1]:7800"), Ok(Some(7800)));
         assert_eq!(url_port("ws://[::1]"), Ok(None));
         assert_eq!(url_port("ws://203.0.113.9:7800"), Ok(Some(7800)));
-        assert_eq!(url_port("wss://host.example.com/api/v1/control/ws"), Ok(None));
+        assert_eq!(
+            url_port("wss://host.example.com/api/v1/control/ws"),
+            Ok(None)
+        );
         assert_eq!(url_port("ws://host.example.com:7800/ws"), Ok(Some(7800)));
         assert_eq!(url_port("ws://host.example.com"), Ok(None));
         // 写了冒号但不是数字 → Err（拼错了，不是「没填」）

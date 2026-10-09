@@ -102,11 +102,11 @@ async fn probe_redirect(addr: &ConsoleAddress) -> Result<(String, usize, String)
         .await
         .map_err(|err| {
             Error::transport(format!(
-            "探测控制台入口 {} 失败：{err}（若该地址只接受 WebSocket，\
+                "探测控制台入口 {} 失败：{err}（若该地址只接受 WebSocket，\
                  请直接用 ws:// 或 wss:// 填写）",
-            addr.spec
-        ))
-    })?;
+                addr.spec
+            ))
+        })?;
 
     let status = response.status();
     if !matches!(status.as_u16(), 307 | 308) {

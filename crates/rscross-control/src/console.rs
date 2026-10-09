@@ -107,13 +107,18 @@ pub async fn fallback(uri: axum::http::Uri, headers: axum::http::HeaderMap) -> R
         Some(accept) => {
             accept.is_empty()
                 || accept == "*/*"
-                || accept.split(',').any(|part| part.trim().starts_with("text/html"))
+                || accept
+                    .split(',')
+                    .any(|part| part.trim().starts_with("text/html"))
         }
     };
     if path == "/" && !wants_html {
         return (
             StatusCode::TEMPORARY_REDIRECT,
-            [(axum::http::header::LOCATION, rscross_common::console::CONTROL_WS_PATH)],
+            [(
+                axum::http::header::LOCATION,
+                rscross_common::console::CONTROL_WS_PATH,
+            )],
         )
             .into_response();
     }
@@ -276,11 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn root_serves_spa_index_html() {
-        let resp = fallback(
-            axum::http::Uri::from_static("/"),
-            browser_headers(),
-        )
-        .await;
+        let resp = fallback(axum::http::Uri::from_static("/"), browser_headers()).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = content_type_of(&resp).await;
         assert!(
@@ -305,7 +306,10 @@ mod tests {
             // 客户端探测：明确声明要 JSON → 307
             ("application/json", StatusCode::TEMPORARY_REDIRECT),
             // 只列 JSON 不列通配，也要307
-            ("application/json, text/plain", StatusCode::TEMPORARY_REDIRECT),
+            (
+                "application/json, text/plain",
+                StatusCode::TEMPORARY_REDIRECT,
+            ),
         ];
         for (accept, want) in cases {
             let resp = fallback(
@@ -313,11 +317,7 @@ mod tests {
                 headers_with_accept(accept),
             )
             .await;
-            assert_eq!(
-                resp.status(),
-                *want,
-                "Accept: {accept:?} 应得到 {want:?}"
-            );
+            assert_eq!(resp.status(), *want, "Accept: {accept:?} 应得到 {want:?}");
         }
     }
 
@@ -352,7 +352,11 @@ mod tests {
     async fn missing_accept_header_still_serves_the_page() {
         // 没发 Accept 的请求按「什么都想要」处理，返回页面而不是把它弹去
         // WebSocket 端点 —— 后者会让 curl / 浏览器书签这类访问一脸懵。
-        let resp = fallback(axum::http::Uri::from_static("/"), axum::http::HeaderMap::new()).await;
+        let resp = fallback(
+            axum::http::Uri::from_static("/"),
+            axum::http::HeaderMap::new(),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -373,7 +377,11 @@ mod tests {
 
     #[tokio::test]
     async fn missing_static_asset_is_404_not_masked_as_html() {
-        let resp = fallback(axum::http::Uri::from_static("/not-here.js"), client_headers()).await;
+        let resp = fallback(
+            axum::http::Uri::from_static("/not-here.js"),
+            client_headers(),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let ct = content_type_of(&resp).await;
         assert!(
@@ -385,7 +393,11 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_api_path_returns_json_404() {
-        let resp = fallback(axum::http::Uri::from_static("/api/v1/nope"), client_headers()).await;
+        let resp = fallback(
+            axum::http::Uri::from_static("/api/v1/nope"),
+            client_headers(),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = text_of(resp).await;
         let value: serde_json::Value = serde_json::from_str(&body).expect("应为 JSON");

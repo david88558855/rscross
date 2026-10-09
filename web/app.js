@@ -103,7 +103,9 @@
   function fmtTime(raw) {
     if (!raw) return '—';
     const d = new Date(raw);
-    if (isNaN(d.getTime())) return esc(raw);
+    // 原样返回、不在这里转义：调用方统一套 `esc()`。在内部转义会让外层再转一次，
+    // 于是 `a&b` 显示成 `a&amp;amp;b`。
+    if (isNaN(d.getTime())) return String(raw);
     const pad = (x) => String(x).padStart(2, '0');
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
       ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
@@ -297,9 +299,13 @@
       el.onclick = () => {
         const src = $(el.getAttribute('data-copy'));
         if (!src) return;
-        navigator.clipboard.writeText(src.textContent)
-          .then(() => toast('已复制', 'ok'))
-          .catch(() => toast('复制失败，请手动选择', 'err'));
+        // 必须走 `copyText`（内含 isSecureContext 判定 + execCommand 兜底），
+        // 不要直接调 `navigator.clipboard`：控制台常跑在 http://<ip>:7800，
+        // 非安全上下文下 `navigator.clipboard` 是 `undefined`，访问 `writeText`
+        // 会**同步**抛 TypeError，`.catch()` 根本挂不上 —— 用户点「复制命令」
+        // 毫无反应，既不成功也不报错。同文件里 `copyText` 的注释已经写明这一点，
+        // 两套复制实现分头演进就会漏掉其中一套。
+        copyText(src.textContent, '已复制');
       };
     });
   }
@@ -707,6 +713,12 @@
         port = after.slice(1);
       }
     } else {
+      // 未加方括号的 IPv6（`::1`、`2001:db8::1`）不能按「最后一个冒号」拆端口：
+      // `ws://::1` 会被拆成 host=`:`、port=`1`，两段看着都合法，于是这个畸形
+      // 地址被放行、一直下发到客户端才连不上。IPv6 必须写成 `[::1]:7800`。
+      if ((rest.match(/:/g) || []).length > 1) {
+        return 'IPv6 地址必须用方括号包裹，例如 [::1]:7800';
+      }
       const idx = rest.lastIndexOf(':');
       if (idx >= 0) {
         host = rest.slice(0, idx);
@@ -1390,7 +1402,21 @@
       }
       if (meta.key === 'port') {
         const raw = $('t-port').value.trim();
-        if (raw) body.remote_port = parseInt(raw, 10);
+        if (raw) {
+          // 必须严格是十进制整数。`parseInt('abc')` 得 NaN，而 `JSON.stringify`
+          // 会把 NaN 序列化成 `null` —— 后端把 `null` 理解成「留空则自动分配」，
+          // 于是用户明明填错了端口，却悄无声息地拿到一个自动分配的端口。
+          if (!/^\d+$/.test(raw)) {
+            toast('公网端口必须是数字（留空则由系统自动分配）', 'err');
+            return;
+          }
+          const n = Number(raw);
+          if (n < 1 || n > 65535) {
+            toast('公网端口必须在 1-65535 之间', 'err');
+            return;
+          }
+          body.remote_port = n;
+        }
       }
       if (meta.key === 'p2p') {
         body.allow_relay = $('t-relay').value === '1';
@@ -1468,7 +1494,10 @@
               '<option value="DEBUG">DEBUG</option>' +
             '</select>' +
             '<input id="log-q" placeholder="关键字，如 隧道 / 客户端名" style="min-width:220px" />' +
-            '<button class="sm" id="log-auto">暂停</button>' +
+            // 文案要跟随 state.logsAuto 还原：这个状态是跨页面保留的，
+            // 写死成「暂停」的话，用户暂停后切走再切回来会看到「暂停」而实际
+            // 仍在暂停、定时器不刷新 —— 界面状态与真实状态正好相反。
+            '<button class="sm" id="log-auto">' + (state.logsAuto ? '暂停' : '继续') + '</button>' +
           '</div>' +
         '</div>' +
         '<div class="card-body tight"><div id="log-body"><div class="empty">加载中…</div></div></div>' +

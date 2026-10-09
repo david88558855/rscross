@@ -462,6 +462,34 @@ def check_web_console(label: str, base: str) -> None:
     web("客户端列表的空态占位真正接入表格",
         "'<tbody>' + tbody" in js,
         "app.js 计算了空态占位却没渲染它")
+    # 「复制命令」在真机上必须真的能复制：bindCopyButtons 曾经直接调
+    # navigator.clipboard —— 控制台常跑在 http://<ip>:7800（非安全上下文），
+    # 那里 navigator.clipboard 是 undefined，访问 writeText 会**同步**抛
+    # TypeError，`.catch()` 根本挂不上，表现为点了毫无反应、既不成功也不报错。
+    # 同文件里的 copyText 才是带 isSecureContext + execCommand 兜底的实现。
+    copy_fn = re.search(r"function bindCopyButtons\(\)\s*\{.*?\n  \}", js, re.S)
+    copy_body = copy_fn.group(0) if copy_fn else ""
+    web("复制按钮复用带安全上下文兜底的 copyText",
+        "copyText(" in copy_body and "navigator.clipboard.writeText" not in copy_body,
+        f"bindCopyButtons 未走 copyText / 仍直接调剪贴板 API：{copy_body[:200]!r}")
+    web("复制实现保留非安全上下文的 execCommand 兜底",
+        "window.isSecureContext" in js and "execCommand('copy')" in js,
+        "app.js 缺少 execCommand 兜底，http 下复制会静默失败")
+    # 端口转发表单：remote_port 必须严格校验。parseInt('abc') 得 NaN，
+    # 而 JSON.stringify 会把 NaN 写成 null，后端把 null 当「留空则自动分配」——
+    # 用户填错了端口却静悄悄拿到一个自动分配的端口。
+    web("公网端口输入做严格数字校验",
+        "/^\\d+$/.test(raw)" in js,
+        "app.js 未对 remote_port 做严格数字校验（NaN 会被序列化成 null）")
+    # 日志页「暂停 / 继续」文案要按 state.logsAuto 还原，否则暂停后切页再切回来
+    # 按钮显示「暂停」而实际仍在暂停 —— 界面状态与真实状态正好相反。
+    web("日志页暂停按钮文案跟随状态还原",
+        "state.logsAuto ? '暂停' : '继续'" in js,
+        "app.js 的日志暂停按钮文案没有按 state.logsAuto 还原")
+    # 未加方括号的 IPv6 会被「最后一个冒号」拆成 host/port 两段而误判通过。
+    web("未加方括号的 IPv6 地址被拦下",
+        "IPv6 地址必须用方括号包裹" in js,
+        "app.js 未拦截未加方括号的 IPv6 地址")
 
     status, headers, css = http_raw(base + "/app.css")
     ct = headers.get("content-type", "")
@@ -2154,6 +2182,191 @@ ring_capacity = 500
             status == 400,
             f"status={status} body={err}",
         )
+
+    # ------------------------------------ 隧道 PATCH 三态 / 跨客户端端口 / 凭据掩码
+    #
+    # 这一段守三类曾经真实存在的缺陷：
+    #   1. `update_tunnel` 的 remote_port / host / path_prefix / access_key 是三态
+    #      `Option<Option<T>>`，SQL 写成 `col = ?n` 时外层 None 会被绑成 NULL，
+    #      于是「只改 enabled」的 PATCH（界面上就是「启用 / 停用」按钮）会把端口、
+    #      Host、访问密钥一起清空 —— 接口返回 200，界面还提示「隧道已停用」。
+    #   2. 端口占用只在「本客户端」范围内判重，而同节点上所有客户端的端口转发
+    #      隧道都由该节点统一监听、端口池也按节点配 —— 两个客户端会各自从池首
+    #      分配、拿到同一个端口。
+    #   3. 只读角色能从「顺手内嵌了别的资源」的响应里读到明文凭据
+    #      （节点详情带隧道 access_key、客户端详情带节点 tunnel_token）。
+    status, pnode = http_json(
+        "POST", base + "/api/v1/nodes",
+        {"name": "patch-node", "port_range": "47000-47010"}, token=token,
+    )
+    pnode_id = ((pnode or {}).get("node") or {}).get("id")
+    if not check(f"{label}: 可创建带端口池的节点（PATCH 断言的前提）",
+                 bool(pnode_id), str(pnode)[:200]):
+        client.stop()
+        console.stop()
+        return
+
+    # 跨客户端端口判重需要两个**真实注册过**的客户端：ClientRecord 只在
+    # agent 注册时产生，光签发令牌是造不出来的。
+    #
+    # 先按「未指定归属」注册、再改派（而不是签发时就绑节点）：这条路径与上面
+    # `orphan` 客户端完全一致，不受「节点进程是否存在」影响。
+    status, peer_issued = http_json(
+        "POST", base + "/api/v1/clients", {"name": "peer", "ttl_minutes": 10}, token=token
+    )
+    peer_cfg = root / "peer.toml"
+    write_client_config(peer_cfg, name="peer", console_port=port, state_dir=root / "peer-state")
+    peer_proc = Proc(
+        f"{label}/peer",
+        bin_path(dist, "rscross-client"),
+        ["--config", str(peer_cfg), "--enroll-token", (peer_issued or {}).get("enroll_token")],
+        root / "peer.log",
+    )
+    ok, peer = wait_client_online(base, token, "peer")
+    if not check(f"{label}: 第二个客户端注册为 online（用于同节点端口判重）", ok, str(peer)):
+        peer_proc.stop()
+        client.stop()
+        console.stop()
+        return
+    status, _ = http_json(
+        "PATCH", base + f"/api/v1/clients/{peer['id']}", {"node_id": pnode_id}, token=token
+    )
+    check_eq(f"{label}: 第二个客户端可改派到目标节点", 200, status)
+
+    # 把先注册的那个客户端也挂到同一节点上，两者共享一个端口池。
+    status, _ = http_json(
+        "PATCH", base + f"/api/v1/clients/{found['id']}", {"node_id": pnode_id}, token=token
+    )
+    check_eq(f"{label}: 第一个客户端也可改派到同一节点", 200, status)
+
+    status, tun_a = http_json(
+        "POST", base + f"/api/v1/clients/{found['id']}/tunnels",
+        {"name": "shared-port", "kind": "port", "proto": "tcp",
+         "local_addr": "127.0.0.1:8080"}, token=token,
+    )
+    status_b, tun_b = http_json(
+        "POST", base + f"/api/v1/clients/{peer['id']}/tunnels",
+        {"name": "shared-port", "kind": "port", "proto": "tcp",
+         "local_addr": "127.0.0.1:8081"}, token=token,
+    )
+    port_a = (tun_a or {}).get("remote_port")
+    port_b = (tun_b or {}).get("remote_port")
+    check(
+        f"{label}: 同节点两个客户端自动分配到的公网端口不重复",
+        isinstance(port_a, int) and isinstance(port_b, int) and port_a != port_b,
+        f"status={status}/{status_b} port_a={port_a!r} port_b={port_b!r}",
+    )
+    check(
+        f"{label}: 两个端口都落在该节点的端口池内",
+        all(isinstance(p, int) and 47000 <= p <= 47010 for p in (port_a, port_b)),
+        f"port_a={port_a!r} port_b={port_b!r}",
+    )
+
+    # --- 三态语义：只发 enabled 的 PATCH 不能动其它字段
+    status, patched = http_json(
+        "PATCH", base + f"/api/v1/tunnels/{tun_a['id']}", {"enabled": False}, token=token
+    )
+    check_eq(f"{label}: 可停用隧道", 200, status)
+    check_eq(
+        f"{label}: 只发 enabled 的 PATCH 不会清掉公网端口", port_a, (patched or {}).get("remote_port")
+    )
+    check(
+        f"{label}: 停用后隧道仍是原分类、仍属原客户端",
+        (patched or {}).get("kind") == "port" and (patched or {}).get("client_id") == found["id"],
+        str(patched)[:240],
+    )
+    status, _ = http_json(
+        "PATCH", base + f"/api/v1/tunnels/{tun_a['id']}", {"enabled": True}, token=token
+    )
+
+    status, dtun = http_json(
+        "POST", base + f"/api/v1/clients/{found['id']}/tunnels",
+        {"name": "keep-host", "kind": "domain", "proto": "http",
+         "local_addr": "127.0.0.1:8082", "host": "keep.local", "path_prefix": "/keep"},
+        token=token,
+    )
+    check_eq(f"{label}: 可创建带 Host 的域名隧道", "keep.local", (dtun or {}).get("host"))
+    status, patched = http_json(
+        "PATCH", base + f"/api/v1/tunnels/{dtun['id']}", {"enabled": False}, token=token
+    )
+    check(
+        f"{label}: 切换开关不会清掉域名隧道的 Host 与路径前缀",
+        (patched or {}).get("host") == "keep.local" and (patched or {}).get("path_prefix") == "/keep",
+        str(patched)[:240],
+    )
+
+    # --- 修改路径同样受端口池约束（否则「先建合规、再 PATCH 成池外端口」就绕过去了）
+    status, err = http_json(
+        "PATCH", base + f"/api/v1/tunnels/{tun_a['id']}", {"remote_port": 80}, token=token
+    )
+    check(f"{label}: PATCH 到池外的端口被拒", status == 400, f"status={status} body={err}")
+    status, err = http_json(
+        "PATCH", base + f"/api/v1/tunnels/{tun_a['id']}", {"remote_port": port_b}, token=token
+    )
+    check(
+        f"{label}: PATCH 到同节点已被占用的端口被拒",
+        status == 409,
+        f"status={status} body={err}",
+    )
+    status, moved = http_json(
+        "PATCH", base + f"/api/v1/tunnels/{tun_a['id']}", {"remote_port": 47009}, token=token
+    )
+    check_eq(f"{label}: PATCH 到池内空闲端口生效", 47009, (moved or {}).get("remote_port"))
+
+    # --- 内嵌资源的凭据掩码
+    status, priv = http_json(
+        "POST", base + f"/api/v1/clients/{found['id']}/tunnels",
+        {"name": "priv-mask", "kind": "private", "proto": "tcp",
+         "local_addr": "127.0.0.1:8083"}, token=token,
+    )
+    check(
+        f"{label}: 管理员创建私有隧道能拿到明文访问密钥",
+        status == 200 and bool((priv or {}).get("access_key")),
+        f"status={status} body={priv}",
+    )
+    status, detail = http_json("GET", base + f"/api/v1/nodes/{pnode_id}", token=bob_token)
+    node_tunnels = (detail or {}).get("tunnels") or []
+    keys = [t.get("access_key") for t in node_tunnels]
+    check(
+        f"{label}: 节点详情确实内嵌了带密钥的隧道（掩码断言的前提）",
+        len(node_tunnels) >= 1 and any(k is not None for k in keys),
+        f"status={status} keys={keys}",
+    )
+    check(
+        f"{label}: 只读角色在节点详情里只见掩码，拿不到隧道访问密钥",
+        all(k in (None, "****") for k in keys),
+        f"keys={keys}",
+    )
+
+    status, detail = http_json("GET", base + f"/api/v1/clients/{found['id']}", token=bob_token)
+    check_eq(
+        f"{label}: 只读角色在客户端详情里拿不到归属节点的隧道令牌",
+        "****",
+        ((detail or {}).get("node") or {}).get("tunnel_token"),
+    )
+    status, detail = http_json("GET", base + f"/api/v1/clients/{found['id']}", token=token)
+    node_view = (detail or {}).get("node") or {}
+    check(
+        f"{label}: 管理员在客户端详情里能看到真实隧道令牌（对照）",
+        bool(node_view.get("tunnel_token")) and node_view.get("tunnel_token") != "****",
+        str(node_view)[:200],
+    )
+
+    # --- 控制台对外地址填错 scheme 会被烙进接入命令，保存时就该拦下
+    status, cfg_body = http_json("GET", base + "/api/v1/config", token=token)
+    conf = ((cfg_body or {}).get("config") or {})
+    conf.setdefault("console", {})["public_url"] = "panel.example.com"
+    status, err = http_json("PUT", base + "/api/v1/config", conf, token=token)
+    check(
+        f"{label}: 对外地址缺少 scheme 时保存被拒（否则接入命令注定连不上）",
+        status == 400,
+        f"status={status} body={err}",
+    )
+    conf["console"]["public_url"] = "https://panel.example.com"
+    status, _ = http_json("PUT", base + "/api/v1/config", conf, token=token)
+    check_eq(f"{label}: 合法的对外地址可以保存", 200, status)
+
+    peer_proc.stop()
 
     # ---------------------------------------------------------- ④ 改密
     status, _ = http_json(

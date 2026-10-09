@@ -11,21 +11,11 @@ use rscross_config::{parse_port_range, ConsoleFile};
 use rscross_store::{ClientRecord, EnrollTokenRecord, TunnelPatch, TunnelRecord};
 use serde::{Deserialize, Serialize};
 
-use crate::api::misc::TOKEN_MASK;
+use crate::api::misc::{mask_node_secrets, mask_tunnel_secrets};
 use crate::api::nodes::{console_url_of, resolve_node, resolve_node_optional};
 use crate::api::{map_store_conflict, normalize_name, parse_proto, ROLE_ADMIN};
 use crate::error::ApiError;
 use crate::state::AppState;
-
-/// 掩掉非管理员不该看到的隧道访问密钥。
-///
-/// 访问密钥等价于「进入该内网服务的凭据」，且 `/api/v1/access/resolve`
-/// 免鉴权 —— 只读角色能看到隧道存在，但不该拿到能直接用的钥匙。
-fn mask_tunnel_secrets(tunnel: &mut TunnelRecord) {
-    if tunnel.access_key.is_some() {
-        tunnel.access_key = Some(TOKEN_MASK.to_string());
-    }
-}
 
 // ------------------------------------------------------------------ 客户端
 
@@ -99,7 +89,7 @@ pub async fn get_client(
             mask_tunnel_secrets(tunnel);
         }
     }
-    let node = match client.node_id.as_deref() {
+    let mut node = match client.node_id.as_deref() {
         Some(node_id) => state
             .store
             .find_node(node_id)
@@ -107,6 +97,13 @@ pub async fn get_client(
             .map_err(ApiError::from)?,
         None => None,
     };
+    // 内嵌的归属节点同样要掩码：`NodeRecord::tunnel_token` 是数据面握手凭据，
+    // 只读角色不该从「客户端详情」这条路径绕过去拿到它。
+    if user.role != ROLE_ADMIN {
+        if let Some(node) = node.as_mut() {
+            mask_node_secrets(node);
+        }
+    }
     Ok(Json(serde_json::json!({
         "client": client,
         "node": node,
@@ -597,20 +594,29 @@ pub async fn create_tunnel(
             (None, Some(host), None)
         }
         TunnelKind::Port => {
+            // 占用判定要看**同节点下所有客户端**的隧道，而不是只看这个客户端
+            // 自己的：公网端口是节点级资源，同一台节点上所有客户端的端口转发
+            // 隧道都由该节点统一监听，端口池也按节点配。只按客户端去重的话，
+            // 同节点上的两个客户端会各自从池首开始分配、双双拿到同一个端口 ——
+            // 直到两台机器都开监听了，才在节点日志里报「端口已占用」，
+            // 而控制台上一切正常。
+            let pool_peers = state
+                .store
+                .list_tunnels_sharing_pool(client.node_id.as_deref())
+                .await
+                .map_err(ApiError::from)?;
             // 端口池按「该客户端所属节点」取，而不是一律用全局配置。
-            let (lo, hi) = resolve_port_pool(&state, client.node_id.as_deref(), &cfg).await?;
             let port = match req.remote_port {
                 Some(p) => p,
-                None => allocate_port(lo, hi, &existing)?,
+                None => {
+                    let (lo, hi) =
+                        resolve_port_pool(&state, client.node_id.as_deref(), &cfg).await?;
+                    allocate_port(lo, hi, &pool_peers)?
+                }
             };
-            if port < i64::from(lo) || port > i64::from(hi) {
-                return Err(ApiError::bad_request(format!(
-                    "remote_port 必须落在 {lo}-{hi} 区间内（该客户端所属节点的端口池）"
-                )));
-            }
-            if existing.iter().any(|t| t.remote_port == Some(port)) {
-                return Err(ApiError::conflict(format!("公网端口已被占用: {port}")));
-            }
+            // 显式指定的端口走同一套校验（区间 + 占用），避免「自动分配受管、
+            // 手填端口不受管」这种一半严格一半松的规则。
+            check_port_available(&state, &cfg, client.node_id.as_deref(), port, None).await?;
             (Some(port), None, None)
         }
         TunnelKind::Private | TunnelKind::P2p => {
@@ -656,14 +662,14 @@ pub async fn create_tunnel(
         access_key,
         allow_relay,
         enabled: req.enabled.unwrap_or(true),
-        rate_limit_kbps: req
-            .rate_limit_kbps
-            .unwrap_or(i64::from(cfg.limits.default_rate_limit_kbps))
-            .max(0),
-        conn_limit: req
-            .conn_limit
-            .unwrap_or(i64::from(cfg.limits.default_conn_limit))
-            .max(0),
+        rate_limit_kbps: clamp_limit(
+            req.rate_limit_kbps
+                .unwrap_or(i64::from(cfg.limits.default_rate_limit_kbps)),
+        ),
+        conn_limit: clamp_limit(
+            req.conn_limit
+                .unwrap_or(i64::from(cfg.limits.default_conn_limit)),
+        ),
         created_at: now.clone(),
         updated_at: now,
     };
@@ -725,6 +731,45 @@ pub async fn patch_tunnel(
             .map_err(|e| ApiError::bad_request(format!("local_addr 非法: {e}")))?;
     }
 
+    // 修改路径必须做与创建路径**同源**的校验。
+    //
+    // 过去 `patch_tunnel` 对 `remote_port` / `host` 一个字段都不校验，于是
+    // 「先建一条合规的隧道，再 PATCH 成池外的 80 端口」就绕过了创建时的全部
+    // 约束（区间、占用、分类兼容）。只在一个入口做的校验等于没有做。
+    let cfg = state.config_snapshot().await;
+    let kind = TunnelKind::parse(&existing.kind).unwrap_or_default();
+
+    if let Some(port) = req.remote_port {
+        if !kind.exposes_public_port() {
+            return Err(ApiError::bad_request(format!(
+                "{} 不分配公网端口，请去掉 remote_port",
+                kind.label()
+            )));
+        }
+        // 端口池按节点算，所以归属节点要从隧道所属客户端上取。
+        let node_id = state
+            .store
+            .find_client(&existing.client_id)
+            .await
+            .map_err(ApiError::from)?
+            .and_then(|c| c.node_id);
+        check_port_available(&state, &cfg, node_id.as_deref(), port, Some(&id)).await?;
+    }
+
+    // 只有「真的填了非空 host」才校验，空串按未填处理 —— 与创建路径的
+    // `filter(|s| !s.trim().is_empty())` 保持一致。
+    let wants_host = req
+        .host
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if wants_host && !matches!(kind, TunnelKind::Domain) {
+        return Err(ApiError::bad_request(format!(
+            "{} 不走 Host 路由，请去掉 host",
+            kind.label()
+        )));
+    }
+
     let patch = TunnelPatch {
         id: id.clone(),
         name: match req.name.as_deref() {
@@ -741,8 +786,8 @@ pub async fn patch_tunnel(
         access_key: None,
         allow_relay: req.allow_relay,
         enabled: req.enabled,
-        rate_limit_kbps: req.rate_limit_kbps.map(|v| v.max(0)),
-        conn_limit: req.conn_limit.map(|v| v.max(0)),
+        rate_limit_kbps: req.rate_limit_kbps.map(clamp_limit),
+        conn_limit: req.conn_limit.map(clamp_limit),
     };
 
     state
@@ -855,14 +900,28 @@ pub async fn rotate_access_key(
     Ok(Json(updated))
 }
 
+/// 把限速 / 连接数限值夹到 `u32` 能表示的范围内，并拒绝负数。
+///
+/// 下发隧道时用的是 `u32::try_from(x).unwrap_or(0)`（见 `desired_tunnels`），
+/// 而 `0` 在这两个字段的语义里是**不限**。于是「填一个超过 u32 的限速值」
+/// 会悄悄变成「完全不限速」—— 失败方向是放宽权限，正好搞反。
+/// 在这里夹住，保证「值越大限制越松」止步于 u32 的最大值。
+fn clamp_limit(v: i64) -> i64 {
+    v.clamp(0, i64::from(u32::MAX))
+}
+
 /// 从给定端口池里挑一个尚未被占用的端口。
 ///
 /// 端口池由调用方传入（见 `resolve_port_pool`），不在这里读全局配置 ——
 /// 否则「节点单独配了端口池」这件事会在自动分配这条路径上被静默忽略，
 /// 用户只会看到端口落在自己没放行的区间里。
-fn allocate_port(lo: u16, hi: u16, existing: &[TunnelRecord]) -> Result<i64, ApiError> {
+///
+/// `pool_peers` 必须是**与目标端口池同域**的隧道集合（同节点下所有客户端的
+/// 隧道，见 `list_tunnels_sharing_pool`），不能只传当前客户端那几条 ——
+/// 否则同一节点上的两个客户端会各自从池首开始分配，拿到同一个端口。
+fn allocate_port(lo: u16, hi: u16, pool_peers: &[TunnelRecord]) -> Result<i64, ApiError> {
     let used: std::collections::HashSet<i64> =
-        existing.iter().filter_map(|t| t.remote_port).collect();
+        pool_peers.iter().filter_map(|t| t.remote_port).collect();
     for port in lo..=hi {
         let as_i64 = i64::from(port);
         if !used.contains(&as_i64) {
@@ -872,6 +931,41 @@ fn allocate_port(lo: u16, hi: u16, existing: &[TunnelRecord]) -> Result<i64, Api
     Err(ApiError::conflict(format!(
         "端口池 {lo}-{hi} 已耗尽，请扩大该节点的端口池（未单独设置时改全局 ingress.port_range）"
     )))
+}
+
+/// 校验一个**显式指定**的公网端口：既要在端口池区间内，也不能与同域内
+/// 其它客户端的隧道冲突。
+///
+/// 创建与修改两条路径共用这一份实现，是为了避免「创建时校验、之后 PATCH 一次
+/// 就绕过」—— 只在单个入口做校验的规则等于没有规则。
+///
+/// `ignore_tunnel_id` 供修改场景使用：判占用时要把**自己**排除掉，
+/// 否则「把端口从 A「改成」A」这种无变化的提交会被自己挡住。
+async fn check_port_available(
+    state: &AppState,
+    cfg: &ConsoleFile,
+    node_id: Option<&str>,
+    port: i64,
+    ignore_tunnel_id: Option<&str>,
+) -> Result<(), ApiError> {
+    let (lo, hi) = resolve_port_pool(state, node_id, cfg).await?;
+    if port < i64::from(lo) || port > i64::from(hi) {
+        return Err(ApiError::bad_request(format!(
+            "remote_port 必须落在 {lo}-{hi} 区间内（该客户端所属节点的端口池）"
+        )));
+    }
+    let peers = state
+        .store
+        .list_tunnels_sharing_pool(node_id)
+        .await
+        .map_err(ApiError::from)?;
+    if peers
+        .iter()
+        .any(|t| t.remote_port == Some(port) && Some(t.id.as_str()) != ignore_tunnel_id)
+    {
+        return Err(ApiError::conflict(format!("公网端口已被占用: {port}")));
+    }
+    Ok(())
 }
 
 /// 决定某个客户端可用的公网端口池。
@@ -1002,6 +1096,23 @@ mod tests {
             },
         ];
         assert!(allocate_port(45000, 45001, &full).is_err());
+    }
+
+    #[test]
+    fn limit_values_are_clamped_into_u32() {
+        // 超过 u32 的限值过去会下发成 `u32::try_from(x).unwrap_or(0)` → 0，
+        // 而 0 的语义是「不限」：把限速填得更「大」反而变成完全不限速，
+        // 失败方向正好是放宽权限。这里把它夹在 u32 上界。
+        assert_eq!(clamp_limit(-1), 0, "负数按 0（不限）处理");
+        assert_eq!(clamp_limit(0), 0);
+        assert_eq!(clamp_limit(1024), 1024);
+        assert_eq!(clamp_limit(i64::from(u32::MAX)), i64::from(u32::MAX));
+        assert_eq!(
+            clamp_limit(i64::from(u32::MAX) + 1),
+            i64::from(u32::MAX),
+            "刚越界就要夹住，不能回落到 0"
+        );
+        assert_eq!(clamp_limit(i64::MAX), i64::from(u32::MAX));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use rscross_store::{ClientRecord, ClientRuntimePatch, EnrollTokenRecord};
 use serde::{Deserialize, Serialize};
 
 use crate::api::nodes::{node_endpoint, resolve_node_optional};
-use crate::api::{desired_tunnels, header_token, AGENT_HEADER};
+use crate::api::{desired_tunnels, header_token, normalize_name, AGENT_HEADER};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -158,6 +158,9 @@ pub(crate) async fn enroll_inner(
         .as_ref()
         .and_then(|e| e.client_name.clone())
         .or_else(|| req.name.clone())
+        // 空白名字按「没填」处理，交给下面的自动命名：否则 `name: "  "` 会被
+        // 规范化成 400，把一次正常注册变成用户看不懂的失败。
+        .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| format!("client-{}", short_id()));
 
     let name = unique_client_name(state, desired_name).await?;
@@ -392,7 +395,15 @@ pub async fn authenticate_agent(
     Ok((cfg, client))
 }
 
+/// 给客户端定名：先规范化，再保证唯一。
+///
+/// 规范化这一步**不能只在管理端做**。客户端自注册（`allow_self_enroll`）时
+/// `name` 完全由对端给出，跳过 `normalize_name` 就等于绕过了 64 字符上限与
+/// 字符集白名单 —— 库里会躺着超长或带控制字符的名字，而它们会出现在列表、
+/// 日志和接入命令里。管理端（`create_client`）与节点侧（`unique_node_name`）
+/// 都走规范化，这条路径没有理由例外。
 async fn unique_client_name(state: &AppState, desired: String) -> Result<String, ApiError> {
+    let desired = normalize_name(&desired)?;
     let existing: std::collections::HashSet<String> = state
         .store
         .list_clients()

@@ -15,7 +15,7 @@ use rscross_config::ConsoleFile;
 use rscross_store::{NodePatch, NodeRecord, NodeRuntimePatch};
 use serde::{Deserialize, Serialize};
 
-use crate::api::misc::TOKEN_MASK;
+use crate::api::misc::{mask_node_secrets, mask_tunnel_secrets, TOKEN_MASK};
 use crate::api::{header_token, map_store_conflict, normalize_name, NODE_HEADER, ROLE_ADMIN};
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -30,7 +30,20 @@ pub fn console_url_of(cfg: &ConsoleFile) -> String {
     if let Some(url) = cfg.console.public_url.as_deref() {
         let trimmed = url.trim().trim_end_matches('/');
         if !trimmed.is_empty() {
-            return trimmed.to_string();
+            // 这个值会被原样拼进 `--console <值>`。历史遗留的坏值（例如漏了
+            // scheme 的 `panel.example.com`）不能直接吐出去 —— 那会生成一条
+            // 注定连不上的命令，而报错只出现在目标机器上，控制台这边毫无征兆。
+            // 保存路径已经会挡下新的坏值（见 `put_config`），这条兜底是给
+            // 升级前就存在的数据用的：退回到按 `console.bind` 推导的地址，
+            // 至少让命令是可执行的，并留下一行日志说明发生了什么。
+            match rscross_common::console::plan_console_address(trimmed) {
+                Ok(_) => return trimmed.to_string(),
+                Err(err) => tracing::warn!(
+                    public_url = trimmed,
+                    error = %err,
+                    "console.public_url 无法解析，接入命令改用按 console.bind 推导的地址"
+                ),
+            }
         }
     }
     match cfg.console.bind.parse::<SocketAddr>() {
@@ -297,19 +310,6 @@ pub async fn resolve_node_optional(
     Ok(first)
 }
 
-/// 掩掉非管理员不该看到的节点密钥。
-///
-/// `tunnel_token` 是数据面（FerroTunnel）的握手凭据，拿到它就能直连节点的
-/// 隧道端口。只读角色能看到拓扑，但不该拿到能用的凭据。
-fn mask_node_secrets(node: &mut NodeRecord) {
-    // `node_token_plain` 不在这里处理：它带 `#[serde(skip_serializing)]`，
-    // 从类型层面就不会出现在任何列表/详情响应里 —— 只经
-    // `GET /api/v1/nodes/{id}/command` 按需返回，且那个接口本身就要求管理员。
-    if !node.tunnel_token.is_empty() {
-        node.tunnel_token = TOKEN_MASK.to_string();
-    }
-}
-
 // ============================================================ 管理侧 API
 
 /// 创建节点请求。
@@ -462,7 +462,7 @@ pub async fn get_node(
         .list_clients_of_node(&id)
         .await
         .map_err(ApiError::from)?;
-    let tunnels = state
+    let mut tunnels = state
         .store
         .list_tunnels_of_node(&id)
         .await
@@ -472,6 +472,13 @@ pub async fn get_node(
         mask_node_secrets(&mut node);
         if !endpoint.tunnel_token.is_empty() {
             endpoint.tunnel_token = TOKEN_MASK.to_string();
+        }
+        // `clients` 里没有明文凭据（`ClientRecord::agent_token_hash` 带
+        // `skip_serializing`），但内嵌的 `tunnels` 有 `access_key` ——
+        // 「响应里顺手带上别的资源」正是最容易漏掩码的地方，这里补上，
+        // 否则只读角色能顺着节点详情读到隧道访问密钥。
+        for tunnel in tunnels.iter_mut() {
+            mask_tunnel_secrets(tunnel);
         }
     }
     Ok(Json(serde_json::json!({

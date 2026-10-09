@@ -1153,29 +1153,89 @@ impl Store {
         .await
     }
 
+    /// 列出与「归属某个节点（或尚未归属任何节点）的客户端」相关的全部隧道。
+    ///
+    /// 为什么需要它：公网端口是**节点级**资源 —— 同一台节点上所有客户端的端口
+    /// 转发隧道都由该节点统一监听，端口池也是按节点配的（见
+    /// `resolve_port_pool`）。所以「这个端口还能不能用」必须看**同节点下所有
+    /// 客户端**的隧道。只看自己那几条的话，同节点上的两个客户端会各自从池首
+    /// 开始分配，双双拿到同一个端口，直到两台机器都开监听才在节点日志里报错。
+    ///
+    /// `node_id` 为 `None` 时归为「尚未归属」这一组：它们都回落全局
+    /// `ingress.port_range`，事先错开可以避免将来被改派到同一节点时才暴露冲突。
+    ///
+    /// 用 `IS ?1` 而不是 `= ?1`：`IS` 是 SQLite 的空值安全比较，绑定 NULL 时
+    /// 正好匹配 `node_id IS NULL` 的行，这样两种情况能共用一条语句。
+    pub async fn list_tunnels_sharing_pool(
+        &self,
+        node_id: Option<&str>,
+    ) -> Result<Vec<TunnelRecord>> {
+        let node_id = node_id.map(str::to_string);
+        self.blocking(move |c| {
+            let mut stmt = c
+                .prepare(&format!(
+                    "{TUNNEL_SELECT} WHERE client_id IN
+                       (SELECT id FROM clients WHERE node_id IS ?1)
+                     ORDER BY created_at DESC"
+                ))
+                .map_err(Error::store)?;
+            let rows = stmt
+                .query_map(params![node_id], map_tunnel)
+                .map_err(Error::store)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Error::store)
+        })
+        .await
+    }
+
     /// 更新一条隧道的可变字段。
     pub async fn update_tunnel(&self, patch: TunnelPatch) -> Result<()> {
         let now = rscross_common::time::now_rfc3339();
         self.blocking(move |c| {
+            // `remote_port` / `host` / `path_prefix` / `access_key` 在 `TunnelPatch`
+            // 里是**三态** `Option<Option<T>>`：
+            //   None      = 不改这个字段
+            //   Some(v)   = 改成 v
+            //   Some(None)= 清空
+            // 这里必须用 `CASE WHEN ?n THEN ?m ELSE col END`，不能用 `col = ?n`：
+            // rusqlite 把外层 `None` 和 `Some(None)` **都绑成 SQL NULL**，直接赋值会让
+            // 「不改」退化成「清空」。最典型的翻车路径是前端隧道列表的「启用 / 停用」
+            // 按钮 —— 它只发 `{"enabled": false}`，于是切一次开关就把端口转发的公网
+            // 端口、域名隧道的 Host、私有隧道的访问密钥一起抹成 NULL，而接口返回 200、
+            // 界面上还提示「隧道已停用」。单层 Option 的字段（name / proto /
+            // local_addr / allow_relay / enabled / 两个限值）用 COALESCE 即可。
+            //
+            // 每个可改字段都必须出现在这里：`TunnelPatch` 加了字段而忘了加进 SET，
+            // 接口会返回 200、记录也读得出来，但改动根本没落库。
             let n = c
                 .execute(
-                    "UPDATE tunnels SET name = COALESCE(?2, name), proto = COALESCE(?3, proto),
-                        local_addr = COALESCE(?4, local_addr), remote_port = ?5,
-                        host = ?6, path_prefix = ?7, access_key = ?8,
-                        allow_relay = COALESCE(?9, allow_relay),
-                        enabled = COALESCE(?10, enabled),
-                        rate_limit_kbps = COALESCE(?11, rate_limit_kbps),
-                        conn_limit = COALESCE(?12, conn_limit), updated_at = ?13
+                    "UPDATE tunnels SET
+                        name = COALESCE(?2, name),
+                        proto = COALESCE(?3, proto),
+                        local_addr = COALESCE(?4, local_addr),
+                        remote_port = CASE WHEN ?5 THEN ?6 ELSE remote_port END,
+                        host = CASE WHEN ?7 THEN ?8 ELSE host END,
+                        path_prefix = CASE WHEN ?9 THEN ?10 ELSE path_prefix END,
+                        access_key = CASE WHEN ?11 THEN ?12 ELSE access_key END,
+                        allow_relay = COALESCE(?13, allow_relay),
+                        enabled = COALESCE(?14, enabled),
+                        rate_limit_kbps = COALESCE(?15, rate_limit_kbps),
+                        conn_limit = COALESCE(?16, conn_limit),
+                        updated_at = ?17
                      WHERE id = ?1",
                     params![
                         patch.id,
                         patch.name,
                         patch.proto,
                         patch.local_addr,
-                        patch.remote_port,
-                        patch.host,
-                        patch.path_prefix,
-                        patch.access_key,
+                        patch.remote_port.is_some(),
+                        patch.remote_port.flatten(),
+                        patch.host.is_some(),
+                        patch.host.flatten(),
+                        patch.path_prefix.is_some(),
+                        patch.path_prefix.flatten(),
+                        patch.access_key.is_some(),
+                        patch.access_key.flatten(),
                         patch.allow_relay.map(|b| b as i64),
                         patch.enabled.map(|b| b as i64),
                         patch.rate_limit_kbps,
@@ -1974,6 +2034,29 @@ mod tests {
         }
     }
 
+    /// 造一条隧道记录。`host` 一律填上，方便测试里验证「不该被清空」。
+    fn tunnel_rec(client_id: &str, name: &str, remote_port: Option<i64>) -> TunnelRecord {
+        let now = rscross_common::time::now_rfc3339();
+        TunnelRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            client_id: client_id.to_string(),
+            name: name.to_string(),
+            kind: if remote_port.is_some() { "port" } else { "domain" }.to_string(),
+            proto: "tcp".to_string(),
+            local_addr: "127.0.0.1:8080".to_string(),
+            remote_port,
+            host: Some(format!("{name}.example.com")),
+            path_prefix: None,
+            access_key: None,
+            allow_relay: true,
+            enabled: true,
+            rate_limit_kbps: 0,
+            conn_limit: 0,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
     #[tokio::test]
     async fn node_lifecycle_and_heartbeat() {
         let store = Store::open_in_memory().expect("open");
@@ -2529,6 +2612,131 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn update_tunnel_only_touches_the_fields_it_is_given() {
+        // 回归：`TunnelPatch` 的 remote_port / host / path_prefix / access_key 是
+        // **三态** `Option<Option<T>>`，SQL 里若图省事写成 `col = ?n`，rusqlite 会把
+        // 外层 `None` 与 `Some(None)` 一并绑成 NULL，「不改」就退化成「清空」。
+        // 真实现场是前端隧道列表的「启用 / 停用」按钮：它只发 `{"enabled":false}`，
+        // 于是切一次开关就把公网端口、域名 Host、访问密钥全部抹掉。
+        let store = Store::open_in_memory().expect("open");
+        let client = client_rec("c1", None);
+        let client_id = client.id.clone();
+        store.insert_client(client).await.expect("client");
+
+        let mut tunnel = tunnel_rec(&client_id, "web", Some(45000));
+        tunnel.path_prefix = Some("/app".to_string());
+        tunnel.access_key = Some("ak-secret".to_string());
+        let id = tunnel.id.clone();
+        store.insert_tunnel(tunnel).await.expect("tunnel");
+
+        // 只改 enabled —— 其余字段必须原封不动。
+        store
+            .update_tunnel(TunnelPatch {
+                id: id.clone(),
+                enabled: Some(false),
+                ..Default::default()
+            })
+            .await
+            .expect("patch enabled");
+        let after = store.find_tunnel(&id).await.expect("find").expect("some");
+        assert!(!after.enabled);
+        assert_eq!(after.remote_port, Some(45000), "切开关不该清空公网端口");
+        assert_eq!(
+            after.host.as_deref(),
+            Some("web.example.com"),
+            "切开关不该清空 Host"
+        );
+        assert_eq!(
+            after.path_prefix.as_deref(),
+            Some("/app"),
+            "切开关不该清空路径前缀"
+        );
+        assert_eq!(
+            after.access_key.as_deref(),
+            Some("ak-secret"),
+            "切开关不该清空访问密钥"
+        );
+        assert_eq!(after.name, "web");
+        assert_eq!(after.local_addr, "127.0.0.1:8080");
+
+        // 反面：显式 `Some(None)` 必须真的能清空，否则「清空」功能会静默失效。
+        store
+            .update_tunnel(TunnelPatch {
+                id: id.clone(),
+                host: Some(None),
+                ..Default::default()
+            })
+            .await
+            .expect("clear host");
+        let after = store.find_tunnel(&id).await.expect("find").expect("some");
+        assert_eq!(after.host, None, "Some(None) 应清空 Host");
+        assert_eq!(after.remote_port, Some(45000), "清空 Host 不该波及端口");
+
+        // 显式改值也要落库。
+        store
+            .update_tunnel(TunnelPatch {
+                id: id.clone(),
+                remote_port: Some(Some(45001)),
+                ..Default::default()
+            })
+            .await
+            .expect("set port");
+        let after = store.find_tunnel(&id).await.expect("find").expect("some");
+        assert_eq!(after.remote_port, Some(45001));
+        assert_eq!(
+            after.access_key.as_deref(),
+            Some("ak-secret"),
+            "改端口不该动访问密钥"
+        );
+    }
+
+    #[tokio::test]
+    async fn tunnels_sharing_pool_group_by_node_ownership() {
+        // 公网端口是节点级资源：占用判定必须覆盖**同节点下所有客户端**的隧道，
+        // 否则同节点上两个客户端会各自从池首分配、拿到同一个端口。
+        let store = Store::open_in_memory().expect("open");
+        let node = node_rec("n1");
+        let node_id = node.id.clone();
+        store.insert_node(node).await.expect("node");
+
+        let a = client_rec("c-a", Some(node_id.clone()));
+        let b = client_rec("c-b", Some(node_id.clone()));
+        let orphan = client_rec("c-orphan", None);
+        let (a_id, b_id, o_id) = (a.id.clone(), b.id.clone(), orphan.id.clone());
+        store.insert_client(a).await.expect("a");
+        store.insert_client(b).await.expect("b");
+        store.insert_client(orphan).await.expect("orphan");
+
+        let ta = tunnel_rec(&a_id, "web", Some(20000));
+        let tb = tunnel_rec(&b_id, "web", Some(20000));
+        let to = tunnel_rec(&o_id, "web", Some(20000));
+        let (ta_id, tb_id, to_id) = (ta.id.clone(), tb.id.clone(), to.id.clone());
+        store.insert_tunnel(ta).await.expect("ta");
+        store.insert_tunnel(tb).await.expect("tb");
+        store.insert_tunnel(to).await.expect("to");
+
+        let scoped = store
+            .list_tunnels_sharing_pool(Some(&node_id))
+            .await
+            .expect("by node");
+        let ids: std::collections::HashSet<&str> =
+            scoped.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "同节点下两个客户端的隧道都应计入：{ids:?}");
+        assert!(ids.contains(ta_id.as_str()) && ids.contains(tb_id.as_str()));
+        assert!(
+            !ids.contains(to_id.as_str()),
+            "未归属节点的客户端不该混进该节点的占用集合"
+        );
+
+        let orphans = store
+            .list_tunnels_sharing_pool(None)
+            .await
+            .expect("orphans");
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].id, to_id);
     }
 
     #[tokio::test]

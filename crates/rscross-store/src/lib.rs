@@ -1768,7 +1768,7 @@ mod tests {
     async fn public_addr_wins_over_auto_derived_host() {
         // 这条是「新增自建节点」里服务端地址的实际生效点：客户端拿到的
         // tunnel_server 必须就是管理员填的那个，不能被自动推导覆盖。
-        let store = Store::open_memory().await.expect("store");
+        let store = Store::open_in_memory().expect("open");
         let id = uuid::Uuid::new_v4().to_string();
         let mut rec = node_rec("addr");
         rec.id = id.clone();

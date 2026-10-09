@@ -145,6 +145,19 @@ impl ApiClient {
         Ok(Self { http, base })
     }
 
+    /// 用已解析好的控制台地址创建。
+    ///
+    /// REST 路径需要的是 http(s) 基址：把发现阶段给出的 ws 地址反推回
+    /// http(s)（只改「是否加密」这一件事）。反推失败说明发现层给了非法结果 ——
+    /// 与其拿着它去请求并收到语焉不详的 404，不如在这里说清楚。
+    pub fn from_console(addr: &rscross_common::console::ConsoleAddress) -> Result<Self> {
+        match addr.scheme {
+            rscross_common::console::ConsoleScheme::Http
+            | rscross_common::console::ConsoleScheme::Https => Self::new(&addr.spec),
+            _ => Self::new(&ws_to_http(&addr.ws_url)),
+        }
+    }
+
     /// 基础地址。
     pub fn base(&self) -> &str {
         &self.base
@@ -212,6 +225,18 @@ impl ApiClient {
             .map_err(Error::transport)?;
         let parsed: PushResponse = decode(response).await?;
         Ok(parsed.accepted)
+    }
+}
+
+/// ws/wss → http/https（只改加密那一层）。
+fn ws_to_http(spec: &str) -> String {
+    let t = spec.trim();
+    if let Some(rest) = t.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else if let Some(rest) = t.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else {
+        t.to_string()
     }
 }
 

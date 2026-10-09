@@ -78,6 +78,18 @@ pub struct Args {
 
 /// 子命令。
 #[derive(Debug, clap::Subcommand)]
+/// 控制面传输方式。
+///
+/// 由 `--console` 的 scheme 决定，不额外配置 —— 让「写什么地址」唯一决定
+/// 「怎么连」，省掉一个需要和地址保持同步的开关。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlTransport {
+    /// 控制面 WebSocket（主协议）。一条连接上可并发心跳与日志上报。
+    WebSocket,
+    /// 传统 REST（兼容路径）。控制台只提供 HTTP 入口时使用。
+    Http,
+}
+
 pub enum Command {
     /// 访问端：凭访问密钥在本机建立到内网服务的入口（私有 / P2P 隧道）。
     ///
@@ -144,7 +156,54 @@ pub async fn run_with_args(args: Args) -> Result<()> {
         "rscross-client 启动中"
     );
 
-    let api = ApiClient::new(&cfg.client.console_url)?;
+    // ---- 0. 解析控制台地址 ----
+    //
+    // 先做发现再选传输：`--console` 的写法直接决定用 WS 还是 REST，
+    // 而「地址算错了」和「连不上」是两种故障 —— 先把地址定下来，
+    // 后面每一步失败时日志里都有一个确定的地址可对照。
+    let console = crate::discover::discover(&cfg.client.console_url).await?;
+    tracing::info!(
+        spec = %console.spec,
+        scheme = ?console.scheme,
+        authority = %console.authority,
+        hops = console.hops,
+        discovered = console.discovered.as_deref().unwrap_or("-"),
+        "控制台地址已解析"
+    );
+
+    // 用哪种传输由 scheme 决定：ws/wss 与 txt:// 走控制面 WebSocket（主协议），
+    // http/https 保留为兼容路径（仍走 REST）。
+    let transport = match console.scheme {
+        rscross_common::console::ConsoleScheme::Ws
+        | rscross_common::console::ConsoleScheme::Wss
+        | rscross_common::console::ConsoleScheme::Txt => {
+            tracing::info!(url = %console.ws_url, "控制面走 WebSocket（主协议）");
+            ControlTransport::WebSocket
+        }
+        rscross_common::console::ConsoleScheme::Http
+        | rscross_common::console::ConsoleScheme::Https => {
+            tracing::info!(base = %console.spec, "控制面走 HTTP（兼容路径）");
+            ControlTransport::Http
+        }
+    };
+
+    // WS 传输在这里就建连：连不上要在启动阶段失败并说清地址，
+    // 而不是让每个循环各自重试、每次都报一次同样的错。
+    let socket = match transport {
+        ControlTransport::WebSocket => Some(
+            crate::wsclient::ControlSocket::connect(
+                rscross_common::control::Role::Agent,
+                &console.ws_url,
+            )
+            .await?,
+        ),
+        ControlTransport::Http => None,
+    };
+    if let Some(s) = &socket {
+        tracing::info!(url = %s.url(), "控制面 WebSocket 已建立");
+    }
+
+    let api = ApiClient::from_console(&console)?;
     let shutdown = CancellationToken::new();
 
     // ---- 1. Iroh 节点（先建，注册时要把 EndpointId 一并上报）----

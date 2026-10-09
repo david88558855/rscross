@@ -10,7 +10,7 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use rscross_auth::{new_node_token, token_hash};
-use rscross_common::{DesiredTunnel, NodeEndpoint, NodeRuntime};
+use rscross_common::{NodeEndpoint, NodeRuntime};
 use rscross_config::ConsoleFile;
 use rscross_store::{NodePatch, NodeRecord, NodeRuntimePatch};
 use serde::{Deserialize, Serialize};

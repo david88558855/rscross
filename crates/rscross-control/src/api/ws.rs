@@ -20,7 +20,6 @@ use rscross_common::control::{
     ControlRequest, ControlResponse, Role, CONTROL_VERSION, MAX_HEARTBEAT_SECS,
     MIN_HEARTBEAT_SECS,
 };
-use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
@@ -59,14 +58,12 @@ async fn run_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
         let frame = match next {
             Err(_) => {
                 tracing::info!(?role, %peer_ip, "控制面连接静默超时，关闭");
-                // 只说「我走了」，不解释原因 —— 客户端重连时会重新做版本协商，
-                // 这里的 reason 对它没有意义。
                 // 1001 = Going Away。只说「我走了」，不解释原因 ——
                 // 客户端重连时会重新做版本协商，这里的 reason 对它没有意义。
                 let _ = sink
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: 1001,
-                        reason: Cow::Borrowed("idle timeout"),
+                        reason: "idle timeout".into(),
                     })))
                     .await;
                 return;

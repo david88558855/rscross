@@ -67,7 +67,7 @@ pub async fn index() -> Response {
 }
 
 /// 未匹配路由：API 前缀返回 JSON 404，其余回落到 SPA 首页。
-pub async fn fallback(uri: axum::http::Uri) -> Response {
+pub async fn fallback(uri: axum::http::Uri, headers: axum::http::HeaderMap) -> Response {
     let path = uri.path();
     if path.starts_with("/api/") {
         return (
@@ -76,6 +76,26 @@ pub async fn fallback(uri: axum::http::Uri) -> Response {
                 "code": "not_found",
                 "message": format!("接口不存在: {path}"),
             })),
+        )
+            .into_response();
+    }
+    // 根路径同时服务两种用途，用 Accept 区分：
+    //
+    // - 客户端（不发 Accept: text/html）→ 307 到控制面 WebSocket 端点。
+    //   这样 `http://host:7700` 能作为 `--console` 的发现入口。
+    // - 浏览器（Accept 里含 text/html）→ 照常返回控制台页面。
+    //
+    // 分不清两者的话只能二选一：全给 307 会让浏览器用户一脸懵地跳到
+    // WS 端点然后连接失败；全给页面则 http:// 入口没法用。
+    let wants_html = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/html"))
+        .unwrap_or(false);
+    if path == "/" && !wants_html {
+        return (
+            StatusCode::TEMPORARY_REDIRECT,
+            [(axum::http::header::LOCATION, rscross_common::console::CONTROL_WS_PATH)],
         )
             .into_response();
     }

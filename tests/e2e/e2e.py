@@ -217,7 +217,14 @@ ALL_PROCS: list["Proc"] = []
 class Proc:
     """带日志文件的子进程包装。"""
 
-    def __init__(self, label: str, binary: Path, args: list[str], log_path: Path):
+    def __init__(
+        self,
+        label: str,
+        binary: Path,
+        args: list[str],
+        log_path: Path,
+        env_extra: dict[str, str] | None = None,
+    ):
         self.label = label
         ALL_PROCS.append(self)
         self.log_path = log_path
@@ -225,6 +232,8 @@ class Proc:
         self._file = open(log_path, "wb")
         env = dict(os.environ)
         env["RUST_BACKTRACE"] = "1"
+        if env_extra:
+            env.update(env_extra)
         self.proc = subprocess.Popen(
             [str(binary), *args],
             stdout=self._file,
@@ -303,6 +312,38 @@ def dump(procs: list[Proc]) -> None:
 
 
 # --------------------------------------------------------------- 通用步骤
+
+
+def raw_request(
+    method: str,
+    url: str,
+    body=None,
+    headers: dict[str, str] | None = None,
+    accept: str | None = None,
+    timeout: float = 10.0,
+) -> tuple[int, dict[str, str]]:
+    """不跟随重定向地发一次请求，返回 (status, 响应头小写键值)。
+
+    专门用来断言 307 之类的重定向 —— http_json 走 urllib 会自动跟随，
+    永远看不见 3xx。
+    """
+    data = json.dumps(body).encode() if body is not None else None
+    request = urllib.request.Request(url, data=data, method=method)
+    for key, value in (headers or {}).items():
+        request.add_header(key, value)
+    if accept:
+        request.add_header("Accept", accept)
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(request, timeout=timeout) as resp:
+            return resp.status, {k.lower(): v for k, v in resp.headers.items()}
+    except urllib.error.HTTPError as err:
+        return err.code, {k.lower(): v for k, v in err.headers.items()}
 
 
 def login(base: str, password: str) -> str | None:
@@ -1469,7 +1510,7 @@ def scenario_console_addr(dist: Path, work: Path) -> None:
     out = (proc.stdout + proc.stderr).strip()
     check(
         f"{label}: 缺 scheme 时列出支持的写法",
-        proc.returncode != 0 and "ws://" in out,
+        proc.returncode != 0 and all(x in out for x in ("ws", "wss", "http", "https", "txt")),
         out[-200:],
     )
 
@@ -1487,7 +1528,7 @@ def scenario_console_addr(dist: Path, work: Path) -> None:
     )
     check(
         f"{label}: ws:// 不会被说成「scheme 不支持」",
-        "应以 scheme" not in out and "ws://" in out,
+        "写法无效" not in out and str(dead) in out,
         out[-200:],
     )
 
@@ -1548,6 +1589,11 @@ def scenario_node_extras(dist: Path, root: Path) -> None:
     print("-" * 72, flush=True)
 
     console_cfg = root / "console.toml"
+    # 首次启动据此创建管理员；留空的话控制台会随机生成密码，脚本无从登录。
+    console_cfg.write_text(
+        '[admin]\ninitial_password = "e2e-password-123"\n',
+        encoding="utf-8",
+    )
     port = free_port()
     console = Proc(
         f"{label}/console",
@@ -1559,6 +1605,18 @@ def scenario_node_extras(dist: Path, root: Path) -> None:
     if not check(f"{label}: 控制台启动", wait_console_ready(base, console), base):
         console.stop()
         return
+
+    # 根路径对客户端是发现入口（307），对浏览器是控制台页面 ——
+    # 两条路都断言，否则很容易为了修一条把另一条弄坏。
+    status, _ = raw_request("GET", base + "/", accept="text/html")
+    check_eq(f"{label}: 浏览器访问根路径仍是控制台页面", 200, status)
+    status, headers = raw_request("GET", base + "/", accept="*/*")
+    check_eq(f"{label}: 客户端访问根路径得307（发现入口）", 307, status)
+    check(
+        f"{label}: 307 的 Location 指向控制面 WS 端点",
+        headers.get("location") == "/api/v1/control/ws",
+        f"location={headers.get('location')!r}",
+    )
 
     token = login(base, "e2e-password-123")
     if not check(f"{label}: 可登录", bool(token), base):

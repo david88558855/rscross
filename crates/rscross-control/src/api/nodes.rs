@@ -112,7 +112,9 @@ pub async fn provision_node_with(
         status: rscross_common::ClientStatus::Pending.as_str().to_string(),
         node_token_hash: token_hash(&token),
         tunnel_token,
-        public_host,
+        // 表单里不再提供「对外主机」：它与「服务端地址」语义重叠，且内嵌形态
+        // 下由启动流程自动维护（见 plane.rs），由代码决定比让人手填可靠。
+        public_host: None,
         // 再校验一次：CLI 引导等调用方不经过 HTTP 层，不能绕过格式检查。
         public_addr: normalize_public_addr(extras.public_addr.as_deref())?,
         description: normalize_description(extras.description.as_deref())?,
@@ -508,7 +510,6 @@ pub async fn patch_node(
     let transport = normalize_transport(req.transport.as_deref())?;
 
     if name.is_some()
-        || public_host.is_some()
         || public_addr.is_some()
         || description.is_some()
         || transport.is_some()

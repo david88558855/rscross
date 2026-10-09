@@ -216,7 +216,6 @@ impl ControlPlane {
             None => provision_node(
                 &self.state,
                 name.to_string(),
-                public_host,
                 tunnel_token,
                 Some("embedded".to_string()),
             )

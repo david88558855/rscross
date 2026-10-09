@@ -1673,6 +1673,10 @@ mod tests {
             node_token_hash: format!("nhash-{name}"),
             tunnel_token: format!("ttok-{name}"),
             public_host: None,
+            public_addr: None,
+            description: None,
+            transport: "tcp".to_string(),
+            allow_relay: true,
             tunnel_port: None,
             ingress_port: None,
             version: None,
@@ -1749,6 +1753,10 @@ mod tests {
                 id: id.clone(),
                 name: None,
                 public_host: Some(Some("t.example.com".to_string())),
+                public_addr: None,
+                description: None,
+                transport: None,
+                allow_relay: None,
             })
             .await
             .expect("update");

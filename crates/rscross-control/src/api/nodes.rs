@@ -56,12 +56,47 @@ pub fn node_command(cfg: &ConsoleFile, name: &str, token: &str) -> String {
 /// 创建一个节点并签发 node token。返回 `(记录, token 明文)`。
 ///
 /// 明文只在此刻存在；库里只留 SHA-256 摘要。
+#[allow(clippy::too_many_arguments)]
 pub async fn provision_node(
     state: &AppState,
     name: String,
     public_host: Option<String>,
     tunnel_token: Option<String>,
     created_by: Option<String>,
+) -> Result<(NodeRecord, String), ApiError> {
+    provision_node_with(
+        state,
+        name,
+        public_host,
+        tunnel_token,
+        created_by,
+        NodeExtras::default(),
+    )
+    .await
+}
+
+/// 「新增自建节点」表单的其余配置项。
+#[derive(Debug, Default, Clone)]
+pub struct NodeExtras {
+    /// 介绍。
+    pub description: Option<String>,
+    /// 服务端地址。
+    pub public_addr: Option<String>,
+    /// 传输协议。
+    pub transport: Option<String>,
+    /// P2P 中继回退开关。
+    pub allow_relay: Option<bool>,
+}
+
+/// 带完整配置项的节点开通。`provision_node` 保留给只需要最小参数的调用方
+/// （例如测试与 CLI 引导）。
+pub async fn provision_node_with(
+    state: &AppState,
+    name: String,
+    public_host: Option<String>,
+    tunnel_token: Option<String>,
+    created_by: Option<String>,
+    extras: NodeExtras,
 ) -> Result<(NodeRecord, String), ApiError> {
     let cfg = state.config_snapshot().await;
     if cfg.limits.max_nodes > 0 {
@@ -88,6 +123,13 @@ pub async fn provision_node(
         node_token_hash: token_hash(&token),
         tunnel_token,
         public_host,
+        public_addr: extras
+            .public_addr
+            .filter(|v| !v.trim().is_empty()),
+        description: extras.description.filter(|v| !v.trim().is_empty()),
+        transport: extras.transport.unwrap_or_else(|| DEFAULT_TRANSPORT.to_string()),
+        // 默认开启：直连失败还能走中继，比「连不上」好。
+        allow_relay: extras.allow_relay.unwrap_or(true),
         tunnel_port: None,
         ingress_port: None,
         version: None,
@@ -222,6 +264,14 @@ pub struct CreateNodeRequest {
     pub public_host: Option<String>,
     /// 自定义 FerroTunnel 握手 token，留空则自动生成。
     pub tunnel_token: Option<String>,
+    /// 对外可见的介绍（纯展示）。
+    pub description: Option<String>,
+    /// 服务端地址：客户端据此连接该节点。留空则按 `public_host` 或观测到的出口 IP 推导。
+    pub public_addr: Option<String>,
+    /// 传输协议，留空默认 `tcp`。
+    pub transport: Option<String>,
+    /// P2P 直连失败时是否回退中继，默认开启。
+    pub allow_relay: Option<bool>,
 }
 
 /// 创建节点响应。
@@ -254,12 +304,18 @@ pub async fn create_node(
     let user = state.require_admin(&headers).await?;
     let cfg = state.config_snapshot().await;
 
-    let (node, token) = provision_node(
+    let (node, token) = provision_node_with(
         &state,
         req.name,
         req.public_host.filter(|s| !s.trim().is_empty()),
         req.tunnel_token,
         Some(user.username.clone()),
+        NodeExtras {
+            description: req.description,
+            public_addr: req.public_addr,
+            transport: normalize_transport(req.transport.as_deref())?,
+            allow_relay: req.allow_relay,
+        },
     )
     .await?;
 
@@ -314,6 +370,31 @@ pub async fn get_node(
     })))
 }
 
+/// 自建节点可选的传输协议。
+///
+/// 白名单而不是自由字符串：这是要写进配置文件并影响实际连接方式的字段，
+/// 拼错一个字符会变成「节点上线了但隧道全不通」，而且日志里看不出原因。
+pub const TRANSPORTS: &[&str] = &["tcp", "udp", "quic", "kcp", "ws", "wss"];
+
+/// 默认传输协议。
+pub const DEFAULT_TRANSPORT: &str = "tcp";
+
+/// 校验传输协议；空串按未设置处理（返回 `None`）。
+fn normalize_transport(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(v) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let lower = v.to_ascii_lowercase();
+    if TRANSPORTS.contains(&lower.as_str()) {
+        Ok(Some(lower))
+    } else {
+        Err(ApiError::bad_request(format!(
+            "不支持的传输协议 {v:?}，可选：{}",
+            TRANSPORTS.join(" / ")
+        )))
+    }
+}
+
 /// 修改节点请求。
 #[derive(Debug, Deserialize)]
 pub struct PatchNodeRequest {
@@ -323,6 +404,14 @@ pub struct PatchNodeRequest {
     pub public_host: Option<String>,
     /// 启用 / 禁用。
     pub disabled: Option<bool>,
+    /// 对外可见的介绍（传空字符串表示清空）。
+    pub description: Option<String>,
+    /// 服务端地址（传空字符串表示清空，改回自动推导）。
+    pub public_addr: Option<String>,
+    /// 传输协议。
+    pub transport: Option<String>,
+    /// P2P 直连失败时是否回退中继。
+    pub allow_relay: Option<bool>,
 }
 
 /// `PATCH /api/v1/nodes/{id}`
@@ -343,13 +432,27 @@ pub async fn patch_node(
         .as_deref()
         .map(|v| Some(v.trim().to_string()).filter(|s| !s.is_empty()));
 
-    if name.is_some() || public_host.is_some() {
+    let public_addr = req
+        .public_addr
+        .as_deref()
+        .map(|v| Some(v.trim().to_string()).filter(|s| !s.is_empty()));
+    let description = req
+        .description
+        .as_deref()
+        .map(|v| Some(v.trim().to_string()).filter(|s| !s.is_empty()));
+    let transport = normalize_transport(req.transport.as_deref())?;
+
+    if name.is_some() || public_host.is_some() || public_addr.is_some() || description.is_some() || transport.is_some() || req.allow_relay.is_some() {
         state
             .store
             .update_node(NodePatch {
                 id: id.clone(),
                 name,
                 public_host,
+                public_addr,
+                description,
+                transport,
+                allow_relay: req.allow_relay,
             })
             .await
             .map_err(map_store_conflict)?;

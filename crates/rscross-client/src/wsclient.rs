@@ -46,7 +46,17 @@ pub struct ControlSocket {
     next_id: AtomicU64,
     /// 收到的帧（由后台任务分发）。
     events: mpsc::UnboundedReceiver<ControlResponse>,
+    /// 关停信号。Drop 时取消 —— 否则重连后旧连接的两个任务还在跑，
+    /// 它们持有的 sink 会继续把帧发到已经废弃的连接上。
+    stop: tokio_util::sync::CancellationToken,
     _driver: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ControlSocket {
+    fn drop(&mut self) {
+        // 不 await：Drop 里不能阻塞。任务会在下一个检查点退出。
+        self.stop.cancel();
+    }
 }
 
 impl std::fmt::Debug for ControlSocket {
@@ -87,10 +97,20 @@ impl ControlSocket {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<ControlResponse>();
 
         let driver_inbox = inbox.clone();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let driver_stop = stop.clone();
         let driver = tokio::spawn(async move {
             // 发送侧：把队列里的帧刷出去。
+            let sender_stop = driver_stop.clone();
             let sender_task = tokio::spawn(async move {
-                while let Some(text) = tx_rx.recv().await {
+                while let Some(text) = tokio::select! {
+                    biased;
+                    _ = sender_stop.cancelled() => break,
+                    text = tx_rx.recv() => match text {
+                        Some(t) => t,
+                        None => break,
+                    },
+                } {
                     if sink
                         .send(tungstenite::Message::Text(text.into()))
                         .await
@@ -104,7 +124,13 @@ impl ControlSocket {
 
             // 接收侧：把应答按 id 配对给等待者；没有对应等待者的（例如主动推送）
             // 走 events 通道交给调用方。
-            while let Some(Ok(msg)) = stream.next().await {
+            loop {
+                let next = tokio::select! {
+                    biased;
+                    _ = driver_stop.cancelled() => break,
+                    item = stream.next() => item,
+                };
+                let Some(Ok(msg)) = next else { break };
                 let text = match msg {
                     tungstenite::Message::Text(t) => t.to_string(),
                     tungstenite::Message::Close(_) => break,
@@ -113,6 +139,9 @@ impl ControlSocket {
                         Ok(t) => t,
                         Err(_) => continue,
                     },
+                    // 原始帧：tokio-tungstenite 默认不暴露给我们（未开启 feature），
+                    // 真出现时说明协议栈行为变了，跳过而不是让整个循环崩掉。
+                    _ => continue,
                 };
                 let resp: ControlResponse = match serde_json::from_str(&text) {
                     Ok(v) => v,
@@ -159,6 +188,7 @@ impl ControlSocket {
             inbox,
             next_id: AtomicU64::new(1),
             events: event_rx,
+            stop,
             _driver: driver,
         };
 

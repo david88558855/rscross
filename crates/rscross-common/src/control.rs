@@ -29,7 +29,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::console::ConsoleAddress;
 use crate::{
     ClientLogEntry, ClientRuntime, DesiredTunnel, NodeEndpoint, NodeRuntime, NodeTunnelPlan,
 };

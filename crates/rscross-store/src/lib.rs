@@ -2041,7 +2041,12 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             client_id: client_id.to_string(),
             name: name.to_string(),
-            kind: if remote_port.is_some() { "port" } else { "domain" }.to_string(),
+            kind: if remote_port.is_some() {
+                "port"
+            } else {
+                "domain"
+            }
+            .to_string(),
             proto: "tcp".to_string(),
             local_addr: "127.0.0.1:8080".to_string(),
             remote_port,
@@ -2722,8 +2727,7 @@ mod tests {
             .list_tunnels_sharing_pool(Some(&node_id))
             .await
             .expect("by node");
-        let ids: std::collections::HashSet<&str> =
-            scoped.iter().map(|t| t.id.as_str()).collect();
+        let ids: std::collections::HashSet<&str> = scoped.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids.len(), 2, "同节点下两个客户端的隧道都应计入：{ids:?}");
         assert!(ids.contains(ta_id.as_str()) && ids.contains(tb_id.as_str()));
         assert!(

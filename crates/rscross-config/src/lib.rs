@@ -382,12 +382,15 @@ impl NodeFile {
             }
         }
         if self.node.control_mode == "managed" {
-            let url = &self.node.console_url;
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return Err(Error::config(format!(
-                    "managed 模式下 node.console_url 必须以 http:// 或 https:// 开头，实际为 {url}"
-                )));
-            }
+            // 交给common 的 scheme 解析判定，别在这里另写一份前缀检查 ——
+            // 两处规则一旦漂移，就会出现「配置能过但连不上」或反过来。
+            let url = self.node.console_url.trim();
+            rscross_common::console::plan_console_address(url).map_err(|_| {
+                Error::config(format!(
+                    "managed 模式下 node.console_url 写法无效（支持 {}）：{url}",
+                    rscross_common::console::ConsoleScheme::ALL.join(" / ")
+                ))
+            })?;
         }
         parse_socket_addr(&self.node.tunnel_bind, "node.tunnel_bind")?;
         parse_socket_addr(&self.node.ingress_bind, "node.ingress_bind")?;
@@ -473,12 +476,14 @@ impl Default for ClientSection {
 impl ClientFile {
     /// 校验语义正确性。
     pub fn validate(&self) -> Result<()> {
-        let url = &self.client.console_url;
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err(Error::config(format!(
-                "client.console_url 必须以 http:// 或 https:// 开头，实际为 {url}"
-            )));
-        }
+        // 支持 ws/wss/http/https/txt 五种写法，判定逻辑与运行时解析同源。
+        let url = self.client.console_url.trim();
+        rscross_common::console::plan_console_address(url).map_err(|_| {
+            Error::config(format!(
+                "client.console_url 写法无效（支持 {}）：{url}",
+                rscross_common::console::ConsoleScheme::ALL.join(" / ")
+            ))
+        })?;
         if self.client.state_dir.trim().is_empty() {
             return Err(Error::config("client.state_dir 不能为空"));
         }
@@ -874,14 +879,43 @@ mod tests {
     }
 
     #[test]
-    fn managed_mode_requires_http_console_url() {
+    fn managed_mode_accepts_all_console_schemes() {
         let mut cfg = NodeFile::default();
         cfg.node.control_mode = "managed".to_string();
-        cfg.node.console_url = "1.2.3.4:7800".to_string();
-        assert!(cfg.validate().is_err());
 
-        cfg.node.console_url = "http://1.2.3.4:7800".to_string();
-        assert!(cfg.validate().is_ok());
+        // 五种写法都要能用 —— 需求是「主协议由 http 改为 ws」，
+        // 只放开其中一种等于没改。
+        for url in [
+            "ws://1.2.3.4:7700",
+            "wss://console.example.com/api/v1/control/ws",
+            "http://1.2.3.4:7700",
+            "https://console.example.com",
+            "txt://console.example.com",
+        ] {
+            cfg.node.console_url = url.to_string();
+            assert!(cfg.validate().is_ok(), "{url} 应被接受");
+        }
+
+        cfg.node.console_url = "1.2.3.4:7800".to_string();
+        assert!(cfg.validate().is_err(), "缺 scheme 应被拒绝");
+    }
+
+    #[test]
+    fn client_console_url_accepts_ws_and_txt() {
+        let mut cfg = ClientFile::default();
+        for url in [
+            "ws://127.0.0.1:7700",
+            "wss://c.example.com/ws",
+            "http://127.0.0.1:7800",
+            "https://c.example.com",
+            "txt://c.example.com",
+        ] {
+            cfg.client.console_url = url.to_string();
+            assert!(cfg.validate().is_ok(), "{url} 应被接受");
+        }
+        cfg.client.console_url = "127.0.0.1:7700".to_string();
+        let err = cfg.validate().expect_err("缺 scheme 应被拒");
+        assert!(err.to_string().contains("ws"), "提示应列出支持的 scheme：{err}");
     }
 
     #[test]

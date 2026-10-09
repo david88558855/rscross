@@ -476,10 +476,38 @@ impl Store {
         self.blocking(move |c| {
             let n = c
                 .execute(
-                    "UPDATE nodes SET name = COALESCE(?2, name),
-                        public_host = ?3, updated_at = ?4
+                    // 三态语义，不能用 COALESCE 一把梭：
+                    //   None      = 不改这个字段
+                    //   Some(v)   = 改成 v
+                    //   Some(None)= 清空
+                    // COALESCE(x, col) 只区分前两种，Some(None) 传进去就是 NULL，
+                    // 会被当成「不改」—— 清空功能静默失效。
+                    // 单层 Option 的字段（transport / allow_relay）用 COALESCE 即可。
+                    //
+                    // 每个可改字段都必须出现在这里：`NodePatch` 加了字段而忘了
+                    // 加进 SET，接口会返回 200、记录也读得出来，但改动根本没落库。
+                    "UPDATE nodes SET
+                        name = COALESCE(?2, name),
+                        public_host = CASE WHEN ?3 THEN ?4 ELSE public_host END,
+                        public_addr = CASE WHEN ?5 THEN ?6 ELSE public_addr END,
+                        description = CASE WHEN ?7 THEN ?8 ELSE description END,
+                        transport = COALESCE(?9, transport),
+                        allow_relay = COALESCE(?10, allow_relay),
+                        updated_at = ?11
                      WHERE id = ?1",
-                    params![patch.id, patch.name, patch.public_host, now],
+                    params![
+                        patch.id,
+                        patch.name,
+                        patch.public_host.is_some(),
+                        patch.public_host.flatten(),
+                        patch.public_addr.is_some(),
+                        patch.public_addr.flatten(),
+                        patch.description.is_some(),
+                        patch.description.flatten(),
+                        patch.transport,
+                        patch.allow_relay.map(i64::from),
+                        now,
+                    ],
                 )
                 .map_err(Error::store)?;
             if n == 0 {
@@ -1810,6 +1838,50 @@ mod tests {
         let got = store.find_node(&id).await.expect("find").expect("some");
         assert_eq!(got.tunnel_server(), "10.0.0.5:17835");
 
+        // 介绍与传输协议 / 中继开关也要能改（这几个字段曾经漏在 SET 之外，
+        // 接口返回 200 但改动没落库 —— 单测只测 public_addr 抓不到）。
+        store
+            .update_node(NodePatch {
+                id: id.clone(),
+                name: None,
+                public_host: None,
+                public_addr: Some(Some("10.0.0.5".to_string())),
+                description: Some(Some("香港出口".to_string())),
+                transport: Some("wss".to_string()),
+                allow_relay: Some(false),
+            })
+            .await
+            .expect("update");
+        let got = store.find_node(&id).await.expect("find").expect("some");
+        assert_eq!(got.tunnel_server(), "10.0.0.5:17835");
+        assert_eq!(got.description.as_deref(), Some("香港出口"));
+        assert_eq!(got.transport, "wss");
+        assert!(!got.allow_relay);
+
+        // 三态：Some(None) = 清空，None = 不改。
+        // 这里是本用例最关键的一条 —— 用 COALESCE 的话清空会静默失效。
+        store
+            .update_node(NodePatch {
+                id: id.clone(),
+                name: None,
+                public_host: None,
+                public_addr: None,
+                description: None,
+                transport: Some("kcp".to_string()),
+                allow_relay: None,
+            })
+            .await
+            .expect("update");
+        let got = store.find_node(&id).await.expect("find").expect("some");
+        assert_eq!(
+            got.tunnel_server(),
+            "10.0.0.5:17835",
+            "public_addr 传 None 表示不改，不该被清掉"
+        );
+        assert_eq!(got.description.as_deref(), Some("香港出口"), "未传的字段不该变");
+        assert_eq!(got.transport, "kcp", "只改 transport，另两个不该动");
+        assert!(!got.allow_relay, "未传的 allow_relay 不该变");
+
         // 清空后回退到自动推导。
         store
             .update_node(NodePatch {
@@ -1817,14 +1889,19 @@ mod tests {
                 name: None,
                 public_host: None,
                 public_addr: Some(None),
-                description: None,
+                description: Some(None),
                 transport: None,
                 allow_relay: None,
             })
             .await
             .expect("update");
         let got = store.find_node(&id).await.expect("find").expect("some");
-        assert!(!got.tunnel_server().starts_with("10.0.0.5"));
+        assert!(
+            !got.tunnel_server().starts_with("10.0.0.5"),
+            "Some(None) 应清空并回落到自动推导，实际 {}",
+            got.tunnel_server()
+        );
+        assert_eq!(got.description, None, "Some(None) 应清空介绍");
     }
 
     #[tokio::test]

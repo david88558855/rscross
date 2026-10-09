@@ -79,7 +79,7 @@ async fn run_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
             Ok(Some(Ok(msg))) => msg,
         };
 
-        let text = match msg {
+        let text = match frame {
             Message::Text(t) => t,
             Message::Ping(p) => {
                 if sink.send(Message::Pong(p)).await.is_err() {

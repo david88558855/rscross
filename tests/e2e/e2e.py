@@ -1437,6 +1437,199 @@ def scenario_default_port(dist: Path, work: Path) -> None:
     console.stop()
 
 
+def scenario_console_addr(dist: Path, work: Path) -> None:
+    """`--console` 的四种写法，以及「新增自建节点」的五个配置项。
+
+    分两块验证，因为它们是这轮改造的两条主线：
+
+    ① 地址 scheme —— ws/wss 直连、http(s) 跟 307、txt:// 走 DNS。
+       解析失败的提示是否可操作，和成功时能否连上同样重要：
+       用户在这三种写法下踩的坑完全不同。
+    ② 节点配置项 —— 服务端地址是否真的生效（客户端拿到的地址就是填的那个）。
+    """
+    label = "控制台地址"
+    print("\n" + "-" * 72, flush=True)
+    print(f"场景：{label} —— scheme 解析与自建节点配置项", flush=True)
+    print("-" * 72, flush=True)
+
+    root = work / "console-addr"
+    root.mkdir(parents=True, exist_ok=True)
+    client = bin_path(dist, "rscross-client")
+
+    # ---- ① 非法 scheme 的提示要可操作 ----
+    proc = subprocess.run(
+        [str(client), "--console", "127.0.0.1:7700", "--help"],
+        capture_output=True, text=True, timeout=30,
+    )
+    # --help 会先成功退出，所以这里直接看校验是否发生在解析前：用非法值跑真正的启动。
+    proc = subprocess.run(
+        [str(client), "--console", "127.0.0.1:7700"],
+        capture_output=True, text=True, timeout=60,
+    )
+    out = (proc.stdout + proc.stderr).strip()
+    check(
+        f"{label}: 缺 scheme 时列出支持的写法",
+        proc.returncode != 0 and "ws://" in out,
+        out[-200:],
+    )
+
+    # ---- ② ws:// 直连：不存在的端口应报「连不上」而不是「地址非法」 ----
+    dead = free_port()
+    proc = subprocess.run(
+        [str(client), "--console", f"ws://127.0.0.1:{dead}"],
+        capture_output=True, text=True, timeout=60,
+    )
+    out = (proc.stdout + proc.stderr).strip()
+    check(
+        f"{label}: ws:// 端口不通时报连接失败且带出该地址",
+        proc.returncode != 0 and str(dead) in out,
+        out[-200:],
+    )
+    check(
+        f"{label}: ws:// 不会被说成「scheme 不支持」",
+        "应以 scheme" not in out and "ws://" in out,
+        out[-200:],
+    )
+
+    # ---- ③ http:// 入口返回非 307 时应明确要求改用 ws:// ----
+    http_port = free_port()
+    probe_root = root / "probe"
+    probe_root.mkdir(parents=True, exist_ok=True)
+    (probe_root / "index.html").write_text("<h1>not a redirect</h1>", encoding="utf-8")
+    httpd = start_static_server(probe_root, http_port)
+    try:
+        proc = subprocess.run(
+            [str(client), "--console", f"http://127.0.0.1:{http_port}/"],
+            capture_output=True, text=True, timeout=60,
+        )
+        out = (proc.stdout + proc.stderr).strip()
+        check(
+            f"{label}: http:// 入口不返回 307 时提示改用 ws://",
+            proc.returncode != 0 and ("307" in out or "ws://" in out),
+            out[-200:],
+        )
+    finally:
+        httpd.shutdown()
+
+    # ---- ④ txt:// 查不到 TXT 记录 ----
+    proc = subprocess.run(
+        [str(client), "--console", "txt://rscross-e2e-no-such-domain.invalid"],
+        capture_output=True, text=True, timeout=60,
+    )
+    out = (proc.stdout + proc.stderr).strip()
+    check(
+        f"{label}: txt:// 解析失败时说明是 TXT 记录问题",
+        proc.returncode != 0 and "TXT" in out,
+        out[-200:],
+    )
+
+    # ---- ⑤ 自建节点配置项：接口 + 实际生效 ----
+    scenario_node_extras(dist, root)
+
+
+def start_static_server(directory: Path, port: int):
+    """起一个只返回 200 的静态服务器（用于验证「不返回 307」这条分支）。"""
+    import functools
+    import http.server
+    import threading
+
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    httpd.RequestHandlerClass.log_message = lambda *a, **k: None  # type: ignore[assignment]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd
+
+
+def scenario_node_extras(dist: Path, root: Path) -> None:
+    """「新增自建节点」的五个配置项必须真的落库并影响下发给客户端的地址。"""
+    label = "自建节点配置"
+    print("\n" + "-" * 72, flush=True)
+    print(f"场景：{label} —— 介绍 / 服务端地址 / 传输协议 / 中继开关", flush=True)
+    print("-" * 72, flush=True)
+
+    console_cfg = root / "console.toml"
+    port = free_port()
+    console = Proc(
+        f"{label}/console",
+        bin_path(dist, "rscross-console"),
+        ["--config", str(console_cfg), "--bind", f"127.0.0.1:{port}"],
+        root / "console.log",
+    )
+    base = f"http://127.0.0.1:{port}"
+    if not check(f"{label}: 控制台启动", wait_console_ready(base, console), base):
+        console.stop()
+        return
+
+    token = login(base, "e2e-password-123")
+    if not check(f"{label}: 可登录", bool(token), base):
+        console.stop()
+        return
+
+    status, created = http_json(
+        "POST", base + "/api/v1/nodes",
+        {
+            "name": "self-built-1",
+            "description": "香港出口 · 20Mbps",
+            "public_host": "node1.example.com",
+            "public_addr": "10.0.0.5:19999",
+            "transport": "wss",
+            "allow_relay": False,
+        },
+        token=token,
+    )
+    if not check(f"{label}: 可创建带全部配置项的节点", status == 200,
+                 f"status={status} body={created}"):
+        console.stop()
+        return
+
+    node = created.get("node") or {}
+    check_eq(f"{label}: 介绍已保存", "香港出口 · 20Mbps", node.get("description"))
+    check_eq(f"{label}: 服务端地址已保存", "10.0.0.5:19999", node.get("public_addr"))
+    check_eq(f"{label}: 传输协议已保存", "wss", node.get("transport"))
+    check_eq(f"{label}: P2P 中继开关已保存", False, bool(node.get("allow_relay")))
+
+    # 默认值：传输协议 tcp、中继开启
+    status, second = http_json(
+        "POST", base + "/api/v1/nodes", {"name": "self-built-2"}, token=token,
+    )
+    n2 = (second or {}).get("node") or {}
+    check_eq(f"{label}: 传输协议默认 tcp", "tcp", n2.get("transport"))
+    check_eq(f"{label}: P2P 中继默认开启", True, bool(n2.get("allow_relay")))
+
+    # 非法传输协议必须被拒，并列出可选值
+    status, err = http_json(
+        "POST", base + "/api/v1/nodes",
+        {"name": "self-built-3", "transport": "sctp"}, token=token,
+    )
+    check(
+        f"{label}: 非法传输协议被拒且列出可选值",
+        status == 400 and "quic" in json.dumps(err, ensure_ascii=False),
+        f"status={status} body={err}",
+    )
+
+    # 服务端地址优先于对外主机下发 —— 这才是「客户端据此连接」的实际含义
+    node_id = node.get("id")
+    status, listed = http_json("GET", base + f"/api/v1/nodes/{node_id}", token=token)
+    endpoint = (listed or {}).get("endpoint") or {}
+    check_eq(
+        f"{label}: 下发给客户端的服务端地址就是配置的那个",
+        "10.0.0.5:19999", endpoint.get("public_addr"),
+    )
+    check_eq(f"{label}: 传输协议一并下发", "wss", endpoint.get("transport"))
+
+    # 修改：清空服务端地址应回落到自动推导
+    status, patched = http_json(
+        "PATCH", base + f"/api/v1/nodes/{node_id}",
+        {"public_addr": "", "allow_relay": True, "description": ""}, token=token,
+    )
+    check_eq(f"{label}: 可清空服务端地址", 200, status)
+    check_eq(f"{label}: 清空后回到自动推导", None, (patched or {}).get("public_addr"))
+    check_eq(f"{label}: 可改回中继开启", True, bool((patched or {}).get("allow_relay")))
+    check_eq(f"{label}: 可清空介绍", None, (patched or {}).get("description"))
+
+    console.stop()
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print("用法: python3 tests/e2e/e2e.py <二进制目录>", file=sys.stderr)
@@ -1514,6 +1707,7 @@ def main() -> int:
         scenario_embedded(dist, work)
         scenario_standalone(dist, work)
         scenario_default_port(dist, work)
+        scenario_console_addr(dist, work)
     except Exception as err:  # noqa: BLE001 - e2e 必须给出可诊断的失败，而不是裸 traceback
         check("e2e 脚本执行未抛异常", False, f"{type(err).__name__}: {err}")
         import traceback

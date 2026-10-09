@@ -1936,6 +1936,49 @@ ring_capacity = 500
         str(nodes)[:200],
     )
 
+    # ---------------------------------------------------- 归属解析的三条规则
+    # ① 恰好一台启用节点 + 未指定归属 → 自动选中（单机部署不必每次选节点）
+    status, single = http_json(
+        "POST", base + "/api/v1/clients", {"name": "single-node", "ttl_minutes": 10}, token=token
+    )
+    check_eq(
+        f"{label}: 只有一台节点时，未指定归属会自动选中",
+        node_id,
+        (single or {}).get("node_id"),
+    )
+
+    # ② 多台节点 + 未指定归属 → 保持未分配。
+    #    界面上「暂不指定」是默认项，后端若随手挑一台，用户装完才发现流量走了
+    #    别的出口 —— 这条断言就是防这个。
+    status, second = http_json(
+        "POST", base + "/api/v1/nodes", {"name": "acct-node-2"}, token=token
+    )
+    second_id = ((second or {}).get("node") or {}).get("id")
+    if not check(f"{label}: 可创建第二台节点", bool(second_id), f"status={status} body={second}"):
+        console.stop()
+        return
+    status, many = http_json(
+        "POST", base + "/api/v1/clients", {"name": "multi-node", "ttl_minutes": 10}, token=token
+    )
+    check_eq(
+        f"{label}: 多台节点时，未指定归属保持未分配",
+        None,
+        (many or {}).get("node_id"),
+    )
+
+    # ③ 显式指定归属 → 按指定绑定（且第二台节点才是被选中的那台）
+    status, picked = http_json(
+        "POST",
+        base + "/api/v1/clients",
+        {"name": "picked-node", "node_id": second_id, "ttl_minutes": 10},
+        token=token,
+    )
+    check_eq(
+        f"{label}: 显式指定归属时按指定绑定",
+        second_id,
+        (picked or {}).get("node_id"),
+    )
+
     # 把「未归属」的客户端改派到新节点 —— 这正是无节点先注册的价值所在
     status, _ = http_json(
         "PATCH", f"{base}/api/v1/clients/{found['id']}", {"node_id": node_id}, token=token
@@ -1959,15 +2002,16 @@ ring_capacity = 500
         token=bob_token,
     )
     check_eq(f"{label}: 可修改自己的密码", 200, status)
+    # 下面这几条断言是「否定式」的（某某应当失败）。check() 在通过时也会打印
+    # detail，所以这里不能把「旧密码仍然可用」当 detail 传 —— 那会让 PASS 行
+    # 读起来像是自相矛盾。证据只在失败时才有意义。
     check(
         f"{label}: 改密后新密码可登录",
         bool(login_as(base, "bob", "bob-new-password")),
-        "新密码登录失败",
     )
     check(
         f"{label}: 改密后旧密码立即失效",
         not login_as(base, "bob", "bob-password"),
-        "旧密码仍然可用",
     )
 
     # ---------------------------------------------------------- ⑤ 管理员用户管理
@@ -2006,7 +2050,6 @@ ring_capacity = 500
     check(
         f"{label}: 重置后可用新密码登录",
         bool(login_as(base, "bob", "bob-reset-password")),
-        "重置后的密码登录失败",
     )
 
     status, _ = http_json(
@@ -2016,7 +2059,6 @@ ring_capacity = 500
     check(
         f"{label}: 被禁用后无法登录",
         not login_as(base, "bob", "bob-reset-password"),
-        "被禁用用户仍可登录",
     )
 
     # 最后一个管理员保护：先把 carol 降级（还剩 admin，允许），再降 admin（应被拒）

@@ -2161,11 +2161,19 @@ mod tests {
     async fn user_admin_crud_and_last_admin_guard_inputs() {
         let store = Store::open_in_memory().expect("open");
         let admin = store
-            .create_user("admin".to_string(), "hash-a".to_string(), "admin".to_string())
+            .create_user(
+                "admin".to_string(),
+                "hash-a".to_string(),
+                "admin".to_string(),
+            )
             .await
             .expect("create admin");
         let viewer = store
-            .create_user("alice".to_string(), "hash-b".to_string(), "viewer".to_string())
+            .create_user(
+                "alice".to_string(),
+                "hash-b".to_string(),
+                "viewer".to_string(),
+            )
             .await
             .expect("create viewer");
 
@@ -2194,7 +2202,11 @@ mod tests {
             .set_user_role(&viewer.id, "admin")
             .await
             .expect("promote");
-        assert_eq!(store.count_admins().await.expect("admins"), 1, "被禁用的管理员不计入");
+        assert_eq!(
+            store.count_admins().await.expect("admins"),
+            1,
+            "被禁用的管理员不计入"
+        );
         store
             .set_user_disabled(&viewer.id, false)
             .await
@@ -2212,7 +2224,10 @@ mod tests {
 
         store.delete_user(&viewer.id).await.expect("delete");
         assert_eq!(store.count_users().await.expect("count"), 1);
-        assert!(store.delete_user(&viewer.id).await.is_err(), "重复删除应报错");
+        assert!(
+            store.delete_user(&viewer.id).await.is_err(),
+            "重复删除应报错"
+        );
     }
 
     #[tokio::test]

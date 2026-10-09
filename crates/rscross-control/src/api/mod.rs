@@ -29,12 +29,18 @@ pub const ROLE_ADMIN: &str = "admin";
 pub const ROLE_VIEWER: &str = "viewer";
 
 /// 校验角色名。缺省按 `viewer`（最小权限）。
+///
+/// 大小写不敏感，但**统一回写成小写**：库里只存 `admin` / `viewer` 两种字面量，
+/// 这样 `state::require_admin` 与 `count_admins`（`WHERE role = 'admin'`）的
+/// 字符串比较永远对得上 —— 否则 `"Admin"` 会既拿不到权限、又不计入
+/// 「最后一个管理员」的保护，变成一个说不出哪里错的怪状态。
 pub fn normalize_role(raw: Option<&str>) -> Result<String, ApiError> {
-    match raw
+    let role = raw
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or(ROLE_VIEWER)
-    {
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| ROLE_VIEWER.to_string());
+    match role.as_str() {
         ROLE_ADMIN => Ok(ROLE_ADMIN.to_string()),
         ROLE_VIEWER => Ok(ROLE_VIEWER.to_string()),
         other => Err(ApiError::bad_request(format!(
@@ -261,7 +267,13 @@ mod tests {
         assert_eq!(normalize_role(None).expect("缺省"), ROLE_VIEWER);
         assert_eq!(normalize_role(Some("  ")).expect("空白"), ROLE_VIEWER);
         assert_eq!(normalize_role(Some("admin")).expect("admin"), ROLE_ADMIN);
-        assert_eq!(normalize_role(Some("VIEWER")).expect("只读"), ROLE_VIEWER);
+        // 大小写不敏感，但必须回写成小写：库里混进 "Admin" 会让
+        // require_admin 与 count_admins 双双认不出来。
+        assert_eq!(normalize_role(Some("ADMIN")).expect("ADMIN"), ROLE_ADMIN);
+        assert_eq!(normalize_role(Some("Viewer")).expect("Viewer"), ROLE_VIEWER);
+        assert_eq!(normalize_role(Some(" admin ")).expect("带空格"), ROLE_ADMIN);
+        // 空串等同于没给，仍然落到最小权限。
+        assert_eq!(normalize_role(Some("")).expect("空串"), ROLE_VIEWER);
         assert!(normalize_role(Some("operator")).is_err());
     }
 

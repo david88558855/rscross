@@ -166,9 +166,7 @@ pub async fn create_client(
             name.clone(),
             Some(format!(
                 "归属节点={} 有效期={ttl}分钟",
-                node.as_ref()
-                    .map(|n| n.name.as_str())
-                    .unwrap_or("未指定")
+                node.as_ref().map(|n| n.name.as_str()).unwrap_or("未指定")
             )),
             &headers,
         )

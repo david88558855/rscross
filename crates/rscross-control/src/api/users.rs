@@ -14,7 +14,9 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::api::auth::{hash_password_offloaded, view, UserView};
-use crate::api::{map_store_conflict, normalize_name, normalize_role, validate_password, ROLE_ADMIN};
+use crate::api::{
+    map_store_conflict, normalize_name, normalize_role, validate_password, ROLE_ADMIN,
+};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -118,20 +120,25 @@ pub async fn patch_user(
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError::not_found("用户不存在"))?;
 
-    // 会让目标失去管理员身份的操作（改角色 / 禁用）需要先确认系统里
+    // 先把角色归一化并校验：非法角色要在「最后一个管理员」那套判断之前就 400，
+    // 否则用户只是把角色名拼错，却会收到一句「至少要保留一个启用状态的管理员」。
+    let new_role = match req.role.as_deref() {
+        Some(_) => Some(normalize_role(req.role.as_deref())?),
+        None => None,
+    };
+
+    // 会让目标失去管理员身份的操作（降级 / 禁用）需要先确认系统里
     // 还留有别的可用管理员，否则控制台会变成没人能管的孤岛。
-    let losing_admin = req
-        .role
+    // 比较用归一化后的角色名，避免 "Admin" 这种大小写变体被当成「降级」。
+    let demoting = new_role
         .as_deref()
-        .map(|r| r.trim() != ROLE_ADMIN)
-        .unwrap_or(false)
-        || req.disabled == Some(true);
-    if target.role == ROLE_ADMIN && !target.disabled && losing_admin {
+        .map(|r| r != ROLE_ADMIN)
+        .unwrap_or(false);
+    if target.role == ROLE_ADMIN && !target.disabled && (demoting || req.disabled == Some(true)) {
         ensure_other_admin(&state, &target.id).await?;
     }
 
-    if let Some(role) = req.role.as_deref() {
-        let role = normalize_role(Some(role))?;
+    if let Some(role) = new_role {
         state
             .store
             .set_user_role(&target.id, &role)

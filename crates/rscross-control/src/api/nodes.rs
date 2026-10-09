@@ -215,41 +215,15 @@ pub fn node_endpoint(node: &NodeRecord) -> NodeEndpoint {
     }
 }
 
-/// 为客户端解析归属节点。
+/// 解析**必须存在**的归属节点。
 ///
-/// - 指定了 `node_id` → 必须是存在且启用的节点；
-/// - 未指定且控制台里只有一个节点 → 自动选中（单机内嵌场景的默认行为）；
-/// - 其余情况 → 报错，要求显式指定。
+/// 与 [`resolve_node_optional`] 只差最后一步：拿不到就报错。
+/// 调用方是「已经明确要挂到某台节点上」的场景（如改派客户端），
+/// 这种情况下拿不到目标节点属于真错误，不该被静默降级成「未归属」。
 pub async fn resolve_node(state: &AppState, node_id: Option<&str>) -> Result<NodeRecord, ApiError> {
-    if let Some(id) = node_id {
-        let node = state
-            .store
-            .find_node(id)
-            .await
-            .map_err(ApiError::from)?
-            .ok_or_else(|| ApiError::not_found("指定的服务端节点不存在"))?;
-        if node.disabled {
-            return Err(ApiError::forbidden(format!("节点 {} 已被禁用", node.name)));
-        }
-        return Ok(node);
-    }
-
-    let nodes = state.store.list_nodes().await.map_err(ApiError::from)?;
-    match nodes.len() {
-        0 => Err(ApiError::bad_request(
-            "控制台里还没有服务端节点，请先创建节点并启动服务端",
-        )),
-        1 => {
-            let node = nodes.into_iter().next().expect("len == 1");
-            if node.disabled {
-                return Err(ApiError::forbidden(format!("节点 {} 已被禁用", node.name)));
-            }
-            Ok(node)
-        }
-        _ => Err(ApiError::bad_request(
-            "控制台里有多个服务端节点，必须在接入令牌里指定归属节点",
-        )),
-    }
+    resolve_node_optional(state, node_id).await?.ok_or_else(|| {
+        ApiError::bad_request("控制台里还没有可用的服务端节点，请先创建节点并启动服务端")
+    })
 }
 
 /// 解析归属节点，**允许「当前还没有节点」**。
@@ -267,6 +241,8 @@ pub async fn resolve_node_optional(
     node_id: Option<&str>,
 ) -> Result<Option<NodeRecord>, ApiError> {
     if let Some(id) = node_id.map(str::trim).filter(|s| !s.is_empty()) {
+        // 明确指定了归属：找不到或已禁用都是真错误，绝不能悄悄兜底到别的节点，
+        // 否则客户端会挂到非预期的出口上，而控制台看起来一切正常。
         let node = state
             .store
             .find_node(id)
@@ -279,6 +255,10 @@ pub async fn resolve_node_optional(
         return Ok(Some(node));
     }
 
+    // 未指定归属时只在「恰好一台启用节点」的情况下自动选中：单机部署不必每次
+    // 都填节点；而多台节点时随手挑一台，就等于后端替用户做决定 ——
+    // 界面上的默认项明明写着「暂不指定（之后可在列表里改派）」，
+    // 结果客户端却挂到了某个非预期的出口上。这种情况一律留空，等显式改派。
     let mut enabled = state
         .store
         .list_nodes()
@@ -286,7 +266,11 @@ pub async fn resolve_node_optional(
         .map_err(ApiError::from)?
         .into_iter()
         .filter(|n| !n.disabled);
-    Ok(enabled.next())
+    let first = enabled.next();
+    if enabled.next().is_some() {
+        return Ok(None);
+    }
+    Ok(first)
 }
 
 /// 掩掉非管理员不该看到的节点密钥。

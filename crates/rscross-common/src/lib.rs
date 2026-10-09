@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "runtime")]
 pub mod signal;
 
+pub mod console;
+pub mod control;
+
 /// 全工程统一 `Result`。
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -594,6 +597,24 @@ pub struct DesiredTunnel {
 /// serde 默认值：允许中继回退（宁可通而不快，也不要直接不通）。
 fn default_true() -> bool {
     true
+}
+
+/// 客户端上报给控制台的日志条目。
+///
+/// 控制台侧会把它转成内部 `LogEvent` 落进环形缓冲与数据库，
+/// 因此这里的字段名要与控制台的 `LogEvent` 对齐（由 e2e 用真实二进制校验）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientLogEntry {
+    /// 级别：`info` / `warn` / `error`。
+    pub level: String,
+    /// 日志正文。
+    pub message: String,
+    /// 目标模块；留空则由控制台按客户端名补一个。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// 产生时间（RFC3339）；留空则由控制台补当前时间。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<String>,
 }
 
 impl DesiredTunnel {
